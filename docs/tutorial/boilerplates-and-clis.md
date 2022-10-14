@@ -1,6 +1,6 @@
 # Boilerplates and CLIs
 
-Electron development is un-opinionated - there is no "one true way" to develop,
+Electron development is unopinionated - there is no "one true way" to develop,
 build, package, or release an Electron application. Additional features for
 Electron, both for build- and run-time, can usually be found on
 [npm](https://www.npmjs.com/search?q=electron) in individual packages, allowing developers to build both
@@ -26,14 +26,11 @@ beginners, using a command line tool is likely to be helpful*.
 
 ## electron-forge
 
-A "complete tool for building modern Electron applications". Electron Forge
-unifies the existing (and well maintained) build tools for Electron development
-into a cohesive package so that anyone can jump right in to Electron
-development.
+Electron Forge is a tool for packaging and publishing Electron applications. It unifies Electron's tooling ecosystem
+into a single extensible interface so that anyone can jump right into making Electron apps.
 
-Forge comes with [ready-to-use templates](https://electronforge.io/templates) for popular
-frameworks like React, Vue, or Angular. It uses the same core modules used by the
-greater Electron community (like [`electron-packager`](https://github.com/electron-userland/electron-packager)) – 
+Forge comes with [a ready-to-use template](https://electronforge.io/templates) using Webpack as a bundler. It includes an example typescript configuration and provides two configuration files to enable easy customization. It uses the same core modules used by the
+greater Electron community (like [`electron-packager`](https://github.com/electron/electron-packager)) –
 changes made by Electron maintainers (like Slack) benefit Forge's users, too.
 
 You can find more information and documentation on [electronforge.io](https://electronforge.io/).

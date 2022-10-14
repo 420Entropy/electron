@@ -10,7 +10,7 @@ so the `nodeIntegrationInWorker` option should be set to `true` in
 `webPreferences`.
 
 ```javascript
-let win = new BrowserWindow({
+const win = new BrowserWindow({
   webPreferences: {
     nodeIntegrationInWorker: true
   }
@@ -19,6 +19,8 @@ let win = new BrowserWindow({
 
 The `nodeIntegrationInWorker` can be used independent of `nodeIntegration`, but
 `sandbox` must not be set to `true`.
+
+**Note:** This option is not available in [`SharedWorker`s](https://developer.mozilla.org/en-US/docs/Web/API/SharedWorker) or [`Service Worker`s](https://developer.mozilla.org/en-US/docs/Web/API/ServiceWorker) owing to incompatibilities in sandboxing policies.
 
 ## Available APIs
 
@@ -44,7 +46,7 @@ loads no native modules after the Web Workers get started.
 process.dlopen = () => {
   throw new Error('Load native module is not safe')
 }
-let worker = new Worker('script.js')
+const worker = new Worker('script.js')
 ```
 
 [web-workers]: https://developer.mozilla.org/en/docs/Web/API/Web_Workers_API/Using_web_workers

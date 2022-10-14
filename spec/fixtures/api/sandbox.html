@@ -20,12 +20,12 @@
       opener.require('electron').ipcRenderer.send('answer', document.body.innerHTML)
     }
   } else {
-    const {ipcRenderer, remote} = require('electron')
     const tests = {
       'reload-remote-child': () => {
         open(`${location.protocol}//${location.pathname}?reload-remote`)
       },
       'reload-remote': async () => {
+        const {ipcRenderer, remote} = require('electron')
         const p = ipcRenderer.sendSync('get-remote-module-path')
         const Hello = remote.require(p)
         if (!ipcRenderer.sendSync('reloaded')) {
@@ -34,24 +34,6 @@
         }
         await invokeGc()
         ipcRenderer.send('answer', new Hello().say())
-      },
-      // FIXME: Chromium 67 - getProcessMemoryInfo has been removed
-      // 'allocate-memory': async () => {
-      //   await invokeGc()
-      //   const {privateBytes: bytesBeforeOpen} = process.getProcessMemoryInfo()
-      //   let w = open('./allocate-memory.html')
-      //   await invokeGc()
-      //   const {privateBytes: bytesAfterOpen} = process.getProcessMemoryInfo()
-      //   w.close()
-      //   w = null
-      //   await invokeGc()
-      //   const {privateBytes: bytesAfterClose} = process.getProcessMemoryInfo()
-      //   ipcRenderer.send('answer', {
-      //     bytesBeforeOpen, bytesAfterOpen, bytesAfterClose
-      //   })
-      // },
-      'window-events': () => {
-        document.title = 'changed'
       },
       'webcontents-stop': () => {
         stop()
@@ -65,14 +47,16 @@
         })
       },
       'exit-event': () => {
+        const {ipcRenderer} = require('electron')
+        const currentLocation = location.href.slice();
         process.on('exit', () => {
-          ipcRenderer.send('answer', location.href)
+          ipcRenderer.send('answer', currentLocation)
         })
         location.assign('http://www.google.com')
       },
       'window-open': () => {
         addEventListener('load', () => {
-          popup = open(window.location.href, 'popup!', 'top=60,left=50,width=500,height=600')
+          const popup = open(window.location.href, 'popup!', 'top=60,left=50,width=500,height=600')
           popup.addEventListener('DOMContentLoaded', () => {
             popup.document.write('<h1>scripting from opener</h1>')
             popup.callback()
@@ -80,7 +64,11 @@
         })
       },
       'window-open-external': () => {
+        const {ipcRenderer} = require('electron')
         addEventListener('load', () => {
+          ipcRenderer.once('open-the-popup', (event, url) => {
+            popup = open(url, '', 'top=65,left=55,width=505,height=605')
+          })
           ipcRenderer.once('touch-the-popup', () => {
             let errorMessage = null
             try {
@@ -90,11 +78,12 @@
             }
             ipcRenderer.send('answer', errorMessage)
           })
-          popup = open('http://www.google.com/#q=electron', '', 'top=65,left=55,width=505,height=605')
+          ipcRenderer.send('opener-loaded')
         })
       },
       'verify-ipc-sender': () => {
-        popup = open()
+        const {ipcRenderer} = require('electron')
+        const popup = open()
         ipcRenderer.once('verified', () => {
           ipcRenderer.send('parent-answer')
         })

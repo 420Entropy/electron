@@ -43,30 +43,18 @@ use HTML5 APIs which are already available in browsers. Good candidates are
 [Storage API][storage], [`localStorage`][local-storage],
 [`sessionStorage`][session-storage], and [IndexedDB][indexed-db].
 
-Or you can use the IPC system, which is specific to Electron, to store objects
-in the main process as a global variable, and then to access them from the
-renderers through the `remote` property of `electron` module:
+Alternatively, you can use the IPC primitives that are provided by Electron. To
+share data between the main and renderer processes, you can use the
+[`ipcMain`](api/ipc-main.md) and [`ipcRenderer`](api/ipc-renderer.md) modules.
+To communicate directly between web pages, you can send a
+[`MessagePort`][message-port] from one to the other, possibly via the main process
+using [`ipcRenderer.postMessage()`](api/ipc-renderer.md#ipcrendererpostmessagechannel-message-transfer).
+Subsequent communication over message ports is direct and does not detour through
+the main process.
 
-```javascript
-// In the main process.
-global.sharedObject = {
-  someProperty: 'default value'
-}
-```
+## My app's tray disappeared after a few minutes.
 
-```javascript
-// In page 1.
-require('electron').remote.getGlobal('sharedObject').someProperty = 'new value'
-```
-
-```javascript
-// In page 2.
-console.log(require('electron').remote.getGlobal('sharedObject').someProperty)
-```
-
-## My app's window/tray disappeared after a few minutes.
-
-This happens when the variable which is used to store the window/tray gets
+This happens when the variable which is used to store the tray gets
 garbage collected.
 
 If you encounter this problem, the following articles may prove helpful:
@@ -79,7 +67,7 @@ code from this:
 
 ```javascript
 const { app, Tray } = require('electron')
-app.on('ready', () => {
+app.whenReady().then(() => {
   const tray = new Tray('/path/to/icon.png')
   tray.setTitle('hello world')
 })
@@ -90,7 +78,7 @@ to this:
 ```javascript
 const { app, Tray } = require('electron')
 let tray = null
-app.on('ready', () => {
+app.whenReady().then(() => {
   tray = new Tray('/path/to/icon.png')
   tray.setTitle('hello world')
 })
@@ -107,7 +95,7 @@ To solve this, you can turn off node integration in Electron:
 ```javascript
 // In the main process.
 const { BrowserWindow } = require('electron')
-let win = new BrowserWindow({
+const win = new BrowserWindow({
   webPreferences: {
     nodeIntegration: false
   }
@@ -139,34 +127,30 @@ When using Electron's built-in module you might encounter an error like this:
 Uncaught TypeError: Cannot read property 'setZoomLevel' of undefined
 ```
 
-This is because you have the [npm `electron` module][electron-module] installed
-either locally or globally, which overrides Electron's built-in module.
-
-To verify whether you are using the correct built-in module, you can print the
-path of the `electron` module:
-
-```javascript
-console.log(require.resolve('electron'))
-```
-
-and then check if it is in the following form:
-
-```sh
-"/path/to/Electron.app/Contents/Resources/atom.asar/renderer/api/lib/exports/electron.js"
-```
-
-If it is something like `node_modules/electron/index.js`, then you have to
-either remove the npm `electron` module, or rename it.
-
-```sh
-npm uninstall electron
-npm uninstall -g electron
-```
-
-However if you are using the built-in module but still getting this error, it
-is very likely you are using the module in the wrong process. For example
+It is very likely you are using the module in the wrong process. For example
 `electron.app` can only be used in the main process, while `electron.webFrame`
 is only available in renderer processes.
+
+## The font looks blurry, what is this and what can I do?
+
+If [sub-pixel anti-aliasing](https://alienryderflex.com/sub_pixel/) is deactivated, then fonts on LCD screens can look blurry. Example:
+
+![Subpixel rendering example](images/subpixel-rendering-screenshot.gif)
+
+Sub-pixel anti-aliasing needs a non-transparent background of the layer containing the font glyphs. (See [this issue](https://github.com/electron/electron/issues/6344#issuecomment-420371918) for more info).
+
+To achieve this goal, set the background in the constructor for [BrowserWindow][browser-window]:
+
+```javascript
+const { BrowserWindow } = require('electron')
+const win = new BrowserWindow({
+  backgroundColor: '#fff'
+})
+```
+
+The effect is visible only on (some?) LCD screens. Even if you don't see a difference, some of your users may. It is best to always set the background this way, unless you have reasons not to do so.
+
+Notice that just setting the background in the CSS does not have the desired effect.
 
 [memory-management]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Memory_Management
 [variable-scope]: https://msdn.microsoft.com/library/bzt2dkta(v=vs.94).aspx
@@ -175,3 +159,5 @@ is only available in renderer processes.
 [local-storage]: https://developer.mozilla.org/en-US/docs/Web/API/Window/localStorage
 [session-storage]: https://developer.mozilla.org/en-US/docs/Web/API/Window/sessionStorage
 [indexed-db]: https://developer.mozilla.org/en-US/docs/Web/API/IndexedDB_API
+[message-port]: https://developer.mozilla.org/en-US/docs/Web/API/MessagePort
+[browser-window]: api/browser-window.md

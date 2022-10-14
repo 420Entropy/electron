@@ -1,70 +1,43 @@
-const { app, session } = require('electron')
+const { app, session } = require('electron');
 
-app.on('ready', async function () {
-  const url = 'http://foo.bar'
-  const persistentSession = session.fromPartition('persist:ence-test')
+app.whenReady().then(async function () {
+  const url = 'http://foo.bar';
+  const persistentSession = session.fromPartition('persist:ence-test');
+  const name = 'test';
+  const value = 'true';
 
-  const set = () => {
-    return new Promise((resolve, reject) => {
-      persistentSession.cookies.set({
-        url,
-        name: 'test',
-        value: 'true',
-        expirationDate: Date.now() + 60000
-      }, error => {
-        if (error) {
-          reject(error)
-        } else {
-          resolve()
-        }
-      })
-    })
-  }
+  const set = () => persistentSession.cookies.set({
+    url,
+    name,
+    value,
+    expirationDate: Math.floor((Date.now() + 60000) / 1000),
+    sameSite: 'strict'
+  });
 
-  const get = () => {
-    return new Promise((resolve, reject) => {
-      persistentSession.cookies.get({ url }, (error, list) => {
-        if (error) {
-          reject(error)
-        } else {
-          resolve(list)
-        }
-      })
-    })
-  }
+  const get = () => persistentSession.cookies.get({
+    url
+  });
 
-  const maybeRemove = (pred) => {
-    return new Promise((resolve, reject) => {
-      if (pred()) {
-        persistentSession.cookies.remove(url, 'test', error => {
-          if (error) {
-            reject(error)
-          } else {
-            resolve()
-          }
-        })
-      } else {
-        resolve()
-      }
-    })
-  }
+  const maybeRemove = async (pred) => {
+    if (pred()) {
+      await persistentSession.cookies.remove(url, name);
+    }
+  };
 
   try {
-    await maybeRemove(() => process.env.PHASE === 'one')
-    const one = await get()
-    await set()
-    const two = await get()
-    await maybeRemove(() => process.env.PHASE === 'two')
-    const three = await get()
+    await maybeRemove(() => process.env.PHASE === 'one');
+    const one = await get();
+    await set();
+    const two = await get();
+    await maybeRemove(() => process.env.PHASE === 'two');
+    const three = await get();
 
-    process.stdout.write(`${one.length}${two.length}${three.length}`)
+    process.stdout.write(`${one.length}${two.length}${three.length}`);
   } catch (e) {
-    process.stdout.write('ERROR')
+    process.stdout.write(`ERROR : ${e.message}`);
   } finally {
-    process.stdout.end()
+    process.stdout.end();
 
-    setImmediate(() => {
-      app.quit()
-    })
+    app.quit();
   }
-})
+});

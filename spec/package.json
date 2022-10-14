@@ -1,35 +1,40 @@
 {
-  "name": "electron-test",
-  "productName": "Electron Test",
-  "main": "static/main.js",
+  "name": "electron-test-main",
+  "productName": "Electron Test Main",
+  "main": "index.js",
   "version": "0.1.0",
-  "scripts": {
-    "postinstall": "node ../tools/run-if-exists.js node_modules/robotjs node-gyp rebuild"
-  },
   "devDependencies": {
-    "basic-auth": "^2.0.0",
-    "bluebird": "^3.5.1",
-    "chai": "^4.1.2",
+    "@electron-ci/echo": "file:./fixtures/native-addon/echo",
+    "@electron-ci/uv-dlopen": "file:./fixtures/native-addon/uv-dlopen/",
+    "@types/sinon": "^9.0.4",
+    "@types/ws": "^7.2.0",
+    "basic-auth": "^2.0.1",
+    "busboy": "^0.3.1",
+    "chai": "^4.2.0",
     "chai-as-promised": "^7.1.1",
-    "coffee-script": "1.12.7",
-    "dbus-native": "^0.2.5",
+    "coffeescript": "^2.4.1",
+    "dbus-native": "github:nornagon/dbus-native#master",
     "dirty-chai": "^2.0.1",
-    "graceful-fs": "^4.1.11",
+    "graceful-fs": "^4.1.15",
+    "is-valid-window": "0.0.5",
     "mkdirp": "^0.5.1",
     "mocha": "^5.2.0",
-    "mocha-junit-reporter": "^1.17.0",
+    "mocha-appveyor-reporter": "^0.4.2",
+    "mocha-junit-reporter": "^1.18.0",
     "mocha-multi-reporters": "^1.1.7",
-    "multiparty": "^4.1.4",
+    "pdfjs-dist": "^2.2.228",
     "q": "^1.5.1",
-    "runas": "3.x",
     "send": "^0.16.2",
-    "temp": "^0.8.3",
-    "walkdir": "0.0.12",
+    "sinon": "^9.0.1",
+    "split": "^1.0.1",
+    "temp": "^0.9.0",
+    "uuid": "^3.3.3",
+    "walkdir": "^0.3.2",
     "winreg": "^1.2.4",
-    "ws": "^5.2.0",
-    "yargs": "^11.0.0"
+    "ws": "^7.4.6",
+    "yargs": "^16.0.3"
   },
-  "optionalDependencies": {
-    "robotjs": "^0.5.1"
+  "resolutions": {
+    "nan": "github:jkleinsc/nan#remove_accessor_signature"
   }
 }

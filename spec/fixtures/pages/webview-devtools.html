@@ -4,24 +4,10 @@
     <meta charset="utf-8">
   </head>
   <body>
-    <webview nodeintegration src="./a.html"></webview>
+    <webview nodeintegration></webview>
     <script>
         var wv = document.querySelector('webview')
         wv.addEventListener('dom-ready', () => {
-          const webContents = wv.getWebContents()
-          webContents.on('devtools-opened', function () {
-            var showPanelIntevalId = setInterval(function () {
-              if (webContents.devToolsWebContents) {
-                webContents.devToolsWebContents.executeJavaScript('(' + (function () {
-                  var lastPanelId = UI.inspectorView._tabbedPane._tabs.peekLast().id
-                  UI.inspectorView.showPanel(lastPanelId)
-                }).toString() + ')()')
-              } else {
-                clearInterval(showPanelIntevalId)
-              }
-            }, 100)
-          })
-
           wv.openDevTools()
         })
       </script>

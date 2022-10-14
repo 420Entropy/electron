@@ -1,14 +1,11 @@
 [![Electron Logo](https://electronjs.org/images/electron-logo.svg)](https://electronjs.org)
 
+[![CircleCI Build Status](https://circleci.com/gh/electron/electron/tree/main.svg?style=shield)](https://circleci.com/gh/electron/electron/tree/main)
+[![AppVeyor Build Status](https://ci.appveyor.com/api/projects/status/4lggi9dpjc1qob7k/branch/main?svg=true)](https://ci.appveyor.com/project/electron-bot/electron-ljo26/branch/main)
+[![Electron Discord Invite](https://img.shields.io/discord/745037351163527189?color=%237289DA&label=chat&logo=discord&logoColor=white)](https://discord.gg/electronjs)
 
-[![CircleCI Build Status](https://circleci.com/gh/electron/electron/tree/master.svg?style=shield)](https://circleci.com/gh/electron/electron/tree/master)
-[![AppVeyor Build Status](https://windows-ci.electronjs.org/api/projects/status/nilyf07hcef14dvj/branch/master?svg=true)](https://windows-ci.electronjs.org/project/AppVeyor/electron/branch/master)
-[![Azure Pipelines Build Status](https://github.visualstudio.com/electron/_apis/build/status/electron-builds/electron-osx-testing?branchName=master)](https://github.visualstudio.com/electron/_build/latest?definitionId=36)
-[![devDependency Status](https://david-dm.org/electron/electron/dev-status.svg)](https://david-dm.org/electron/electron?type=dev)
-[![Join the Electron Community on Slack](https://atom-slack.herokuapp.com/badge.svg)](https://atom-slack.herokuapp.com/)
-
-:memo: Available Translations: 🇨🇳 🇹🇼 🇧🇷 🇪🇸 🇰🇷 🇯🇵 🇷🇺 🇫🇷 🇹🇭 🇳🇱 🇹🇷 🇮🇩 🇺🇦 🇨🇿 🇮🇹.
-View these docs in other languages at [electron/i18n](https://github.com/electron/i18n/tree/master/content/).
+:memo: Available Translations: 🇨🇳 🇧🇷 🇪🇸 🇯🇵 🇷🇺 🇫🇷 🇺🇸 🇩🇪.
+View these docs in other languages on our [Crowdin](https://crowdin.com/project/electron) project.
 
 The Electron framework lets you write cross-platform desktop applications
 using JavaScript, HTML and CSS. It is based on [Node.js](https://nodejs.org/) and
@@ -19,7 +16,7 @@ Follow [@ElectronJS](https://twitter.com/electronjs) on Twitter for important
 announcements.
 
 This project adheres to the Contributor Covenant
-[code of conduct](https://github.com/electron/electron/tree/master/CODE_OF_CONDUCT.md).
+[code of conduct](https://github.com/electron/electron/tree/main/CODE_OF_CONDUCT.md).
 By participating, you are expected to uphold this code. Please report unacceptable
 behavior to [coc@electronjs.org](mailto:coc@electronjs.org).
 
@@ -30,15 +27,23 @@ The preferred method is to install Electron as a development dependency in your
 app:
 
 ```sh
-npm install electron --save-dev [--save-exact]
+npm install electron --save-dev
 ```
 
-The `--save-exact` flag is recommended for Electron prior to version 2, as it does not follow semantic
-versioning. As of version 2.0.0, Electron follows semver, so you don't need `--save-exact` flag. For info on how to manage Electron versions in your apps, see
+For more installation options and troubleshooting tips, see
+[installation](docs/tutorial/installation.md). For info on how to manage Electron versions in your apps, see
 [Electron versioning](docs/tutorial/electron-versioning.md).
 
-For more installation options and troubleshooting tips, see
-[installation](docs/tutorial/installation.md).
+## Platform support
+
+Each Electron release provides binaries for macOS, Windows, and Linux.
+
+* macOS (High Sierra and up): Electron provides 64-bit Intel and ARM binaries for macOS. Apple Silicon support was added in Electron 11.
+* Windows (Windows 7 and up): Electron provides `ia32` (`x86`), `x64` (`amd64`), and `arm64` binaries for Windows. Windows on ARM support was added in Electron 5.0.8.
+* Linux: The prebuilt binaries of Electron are built on Ubuntu 20.04. They have also been verified to work on:
+  * Ubuntu 14.04 and newer
+  * Fedora 24 and newer
+  * Debian 8 and newer
 
 ## Quick start & Electron Fiddle
 
@@ -60,13 +65,10 @@ npm start
 
 ## Resources for learning Electron
 
-- [electronjs.org/docs](https://electronjs.org/docs) - all of Electron's documentation
-- [electron/fiddle](https://github.com/electron/fiddle) - A tool to build, run, and package small Electron experiments
-- [electron/electron-quick-start](https://github.com/electron/electron-quick-start) - a very basic starter Electron app
-- [electronjs.org/community#boilerplates](https://electronjs.org/community#boilerplates) - sample starter apps created by the community
-- [electron/simple-samples](https://github.com/electron/simple-samples) - small applications with ideas for taking them further
-- [electron/electron-api-demos](https://github.com/electron/electron-api-demos) - an Electron app that teaches you how to use Electron
-- [hokein/electron-sample-apps](https://github.com/hokein/electron-sample-apps) - small demo apps for the various Electron APIs
+* [electronjs.org/docs](https://electronjs.org/docs) - All of Electron's documentation
+* [electron/fiddle](https://github.com/electron/fiddle) - A tool to build, run, and package small Electron experiments
+* [electron/electron-quick-start](https://github.com/electron/electron-quick-start) - A very basic starter Electron app
+* [electronjs.org/community#boilerplates](https://electronjs.org/community#boilerplates) - Sample starter apps created by the community
 
 ## Programmatic usage
 
@@ -87,19 +89,27 @@ const child = proc.spawn(electron)
 
 ### Mirrors
 
-- [China](https://npm.taobao.org/mirrors/electron)
+* [China](https://npmmirror.com/mirrors/electron/)
 
-## Documentation Translations
+See the [Advanced Installation Instructions](https://www.electronjs.org/docs/latest/tutorial/installation#mirror) to learn how to use a custom mirror.
 
-Find documentation translations in [electron/i18n](https://github.com/electron/i18n).
+## Documentation translations
+
+We crowdsource translations for our documentation via [Crowdin](https://crowdin.com/project/electron).
+We currently accept translations for Chinese (Simplified), French, German, Japanese, Portuguese,
+Russian, and Spanish.
+
+## Contributing
+
+If you are interested in reporting/fixing issues and contributing directly to the code base, please see [CONTRIBUTING.md](CONTRIBUTING.md) for more information on what we're looking for and how to get started.
 
 ## Community
 
 Info on reporting bugs, getting help, finding third-party tools and sample apps,
-and more can be found in the [support document](docs/tutorial/support.md#finding-support).
+and more can be found on the [Community page](https://www.electronjs.org/community).
 
 ## License
 
-[MIT](https://github.com/electron/electron/blob/master/LICENSE)
+[MIT](https://github.com/electron/electron/blob/main/LICENSE)
 
-When using the Electron or other GitHub logos, be sure to follow the [GitHub logo guidelines](https://github.com/logos).
+When using Electron logos, make sure to follow [OpenJS Foundation Trademark Policy](https://openjsf.org/wp-content/uploads/sites/84/2021/01/OpenJS-Foundation-Trademark-Policy-2021-01-12.docx.pdf).

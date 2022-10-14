@@ -1,7 +1,9 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
+from __future__ import print_function
 import argparse
 import glob
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -23,23 +25,37 @@ def main():
   returncode = 0
   try:
     with scoped_cwd(app_path):
-      mkargs = [ get_binary_path('mksnapshot', app_path), \
-                   SNAPSHOT_SOURCE, '--startup_blob', 'snapshot_blob.bin', \
-                   '--turbo_instruction_scheduling' ]
-      subprocess.check_call(mkargs)
-      print 'ok mksnapshot successfully created snapshot_blob.bin.'
-      context_snapshot = 'v8_context_snapshot.bin'
-      context_snapshot_path = os.path.join(app_path, context_snapshot)
-      gen_binary = get_binary_path('v8_context_snapshot_generator', \
-                                   app_path)
-      genargs = [ gen_binary, \
-                 '--output_file={0}'.format(context_snapshot_path) ]
-      subprocess.check_call(genargs)
-      print 'ok v8_context_snapshot_generator successfully created ' \
-            + context_snapshot
+      if args.snapshot_files_dir is None:
+        with open(os.path.join(app_path, 'mksnapshot_args')) as f:
+          mkargs = f.read().splitlines()
+        print('running: ' + ' '.join(mkargs + [ SNAPSHOT_SOURCE ]))
+        subprocess.check_call(mkargs + [ SNAPSHOT_SOURCE ], cwd=app_path)
+        print('ok mksnapshot successfully created snapshot_blob.bin.')
+        context_snapshot = 'v8_context_snapshot.bin'
+        if platform.system() == 'Darwin':
+          if os.environ.get('TARGET_ARCH') == 'arm64':
+            context_snapshot = 'v8_context_snapshot.arm64.bin'
+          else:
+            context_snapshot = 'v8_context_snapshot.x86_64.bin'
+        context_snapshot_path = os.path.join(app_path, context_snapshot)
+        gen_binary = get_binary_path('v8_context_snapshot_generator', \
+                                    app_path)
+        genargs = [ gen_binary, \
+                  '--output_file={0}'.format(context_snapshot_path) ]
+        print('running: ' + ' '.join(genargs))
+        subprocess.check_call(genargs)
+        print('ok v8_context_snapshot_generator successfully created ' \
+              + context_snapshot)
+        if args.create_snapshot_only:
+          return 0
+      else:
+        gen_bin_path = os.path.join(args.snapshot_files_dir, '*.bin')
+        generated_bin_files = glob.glob(gen_bin_path)
+        for bin_file in generated_bin_files:
+          shutil.copy2(bin_file, app_path)
 
       test_path = os.path.join(SOURCE_ROOT, 'spec', 'fixtures', \
-                               'snapshot-items-available.js')
+                               'snapshot-items-available')
 
       if sys.platform == 'darwin':
         bin_files = glob.glob(os.path.join(app_path, '*.bin'))
@@ -55,22 +71,23 @@ def main():
       else:
         electron = os.path.join(app_path, PROJECT_NAME)
 
+      print('running: ' + ' '.join([electron, test_path]))
       subprocess.check_call([electron, test_path])
-      print 'ok successfully used custom snapshot.'
+      print('ok successfully used custom snapshot.')
   except subprocess.CalledProcessError as e:
-    print 'not ok an error was encountered while testing mksnapshot.'
-    print e
+    print('not ok an error was encountered while testing mksnapshot.')
+    print(e)
     returncode = e.returncode
   except KeyboardInterrupt:
-    print 'Other error'
+    print('Other error')
     returncode = 0
-
+  print('Returning with error code: {0}'.format(returncode))
   return returncode
 
 
 # Create copy of app to install custom snapshot
 def create_app_copy(initial_app_path):
-  print 'Creating copy of app for testing'
+  print('Creating copy of app for testing')
   app_path = os.path.join(os.path.dirname(initial_app_path),
                           os.path.basename(initial_app_path)
                           + '-mksnapshot-test')
@@ -93,6 +110,14 @@ def parse_args():
                           Relative to the --source-root.',
                       default=None,
                       required=True)
+  parser.add_argument('--create-snapshot-only',
+                      help='Just create snapshot files, but do not run test',
+                      action='store_true')
+  parser.add_argument('--snapshot-files-dir',
+                      help='Directory containing snapshot files to use \
+                          for testing',
+                      default=None,
+                      required=False)
   parser.add_argument('--source-root',
                       default=SOURCE_ROOT,
                       required=False)

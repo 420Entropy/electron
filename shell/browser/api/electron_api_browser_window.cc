@@ -73,17 +73,6 @@ BrowserWindow::BrowserWindow(gin::Arguments* args,
     web_preferences.Set(options::kShow, show);
   }
 
-  bool titleBarOverlay = false;
-  options.Get(options::ktitleBarOverlay, &titleBarOverlay);
-  if (titleBarOverlay) {
-    std::string enabled_features = "";
-    if (web_preferences.Get(options::kEnableBlinkFeatures, &enabled_features)) {
-      enabled_features += ",";
-    }
-    enabled_features += features::kWebAppWindowControlsOverlay.name;
-    web_preferences.Set(options::kEnableBlinkFeatures, enabled_features);
-  }
-
   // Copy the webContents option to webPreferences.
   v8::Local<v8::Value> value;
   if (options.Get("webContents", &value)) {
@@ -215,8 +204,8 @@ void BrowserWindow::OnCloseButtonClicked(bool* prevent_default) {
   api_web_contents_->NotifyUserActivation();
 
   // Trigger beforeunload events for associated BrowserViews.
-  for (NativeBrowserView* view : window_->browser_views()) {
-    auto* vwc = view->web_contents();
+  for (InspectableWebContentsView* view : window_->inspectable_views()) {
+    auto* vwc = view->inspectable_web_contents()->GetWebContents();
     auto* api_web_contents = api::WebContents::From(vwc);
 
     // Required to make beforeunload handler work.

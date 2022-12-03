@@ -226,8 +226,8 @@ NativeWindowMac::NativeWindowMac(const gin_helper::Dictionary& options,
 
   NSUInteger styleMask = NSWindowStyleMaskTitled;
 
-  // Removing NSWindowStyleMaskTitled removes window title, which removes
-  // rounded corners of window.
+  // The NSWindowStyleMaskFullSizeContentView style removes rounded corners
+  // for frameless window.
   bool rounded_corner = true;
   options.Get(options::kRoundedCorners, &rounded_corner);
   if (!rounded_corner && !has_frame())
@@ -1061,6 +1061,10 @@ bool NativeWindowMac::HasShadow() {
   return [window_ hasShadow];
 }
 
+void NativeWindowMac::InvalidateShadow() {
+  [window_ invalidateShadow];
+}
+
 void NativeWindowMac::SetOpacity(const double opacity) {
   const double boundedOpacity = base::clamp(opacity, 0.0, 1.0);
   [window_ setAlphaValue:boundedOpacity];
@@ -1664,9 +1668,9 @@ class NativeAppWindowFrameViewMac : public views::NativeFrameViewMac {
 
     // Check for possible draggable region in the client area for the frameless
     // window.
-    SkRegion const* draggable_region = native_window_->draggable_region();
-    if (draggable_region && draggable_region->contains(point.x(), point.y()))
-      return HTCAPTION;
+    int contents_hit_test = native_window_->NonClientHitTest(point);
+    if (contents_hit_test != HTNOWHERE)
+      return contents_hit_test;
 
     return HTCLIENT;
   }

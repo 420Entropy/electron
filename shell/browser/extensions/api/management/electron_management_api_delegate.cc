@@ -9,7 +9,7 @@
 #include <string>
 #include <utility>
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "base/strings/strcat.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
@@ -78,12 +78,17 @@ ElectronManagementAPIDelegate::ElectronManagementAPIDelegate() = default;
 
 ElectronManagementAPIDelegate::~ElectronManagementAPIDelegate() = default;
 
-void ElectronManagementAPIDelegate::LaunchAppFunctionDelegate(
+bool ElectronManagementAPIDelegate::LaunchAppFunctionDelegate(
     const extensions::Extension* extension,
     content::BrowserContext* context) const {
+  // Note: Chromium looks for an existing profile and determines whether
+  // the user has set a launch preference
+  // See: https://chromium-review.googlesource.com/c/chromium/src/+/4389621
+  // For Electron, this should always return the default (true).
   // TODO(sentialx): emit event
   extensions::RecordAppLaunchType(extension_misc::APP_LAUNCH_EXTENSION_API,
                                   extension->GetType());
+  return true;
 }
 
 GURL ElectronManagementAPIDelegate::GetFullLaunchURL(

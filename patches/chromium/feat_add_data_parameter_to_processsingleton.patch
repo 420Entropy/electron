@@ -13,11 +13,11 @@ app.requestSingleInstanceLock API so that users can pass in a JSON
 object for the second instance to send to the first instance.
 
 diff --git a/chrome/browser/process_singleton.h b/chrome/browser/process_singleton.h
-index 19350d58e817ea8ac7868dd90a08cc25836c9921..5e4a054946c37bed297cc4e952235b83b23756be 100644
+index 02d9eabfef9521722340739bf86df3dfc30018d7..af8639ebcc61d8081a12334f652a551d542cd758 100644
 --- a/chrome/browser/process_singleton.h
 +++ b/chrome/browser/process_singleton.h
 @@ -18,6 +18,7 @@
- #include "base/files/file_path.h"
+ #include "base/functional/callback.h"
  #include "base/memory/ref_counted.h"
  #include "base/process/process.h"
 +#include "base/containers/span.h"
@@ -65,7 +65,7 @@ index 19350d58e817ea8ac7868dd90a08cc25836c9921..5e4a054946c37bed297cc4e952235b83
  #if BUILDFLAG(IS_WIN)
    bool EscapeVirtualization(const base::FilePath& user_data_dir);
 diff --git a/chrome/browser/process_singleton_posix.cc b/chrome/browser/process_singleton_posix.cc
-index 70190a215c1d085c7f632444a275493a2373315c..7a552e1c740c817e141667e704ac33a614f73406 100644
+index 0e1baf024e7aee3bc1edad1e0620bd56647d042b..2302cd0b1c536f5c5bc5125a7bbe133e86a77d69 100644
 --- a/chrome/browser/process_singleton_posix.cc
 +++ b/chrome/browser/process_singleton_posix.cc
 @@ -608,6 +608,7 @@ class ProcessSingleton::LinuxWatcher
@@ -179,10 +179,10 @@ index 70190a215c1d085c7f632444a275493a2373315c..7a552e1c740c817e141667e704ac33a6
    if (!WriteToSocket(socket.fd(), to_send.data(), to_send.length())) {
      // Try to kill the other process, because it might have been dead.
 diff --git a/chrome/browser/process_singleton_win.cc b/chrome/browser/process_singleton_win.cc
-index 009b522049adc32144c51842369dc1156bd959fa..8fb7835f6e0a7b2690d13b45179f8de70747e874 100644
+index 3dff138357d9e1ae8d572df7630aa6ec429728a3..ae123a441bcf7939fad222d84e4bd6ec84bf6422 100644
 --- a/chrome/browser/process_singleton_win.cc
 +++ b/chrome/browser/process_singleton_win.cc
-@@ -81,10 +81,12 @@ BOOL CALLBACK BrowserWindowEnumeration(HWND window, LPARAM param) {
+@@ -80,10 +80,12 @@ BOOL CALLBACK BrowserWindowEnumeration(HWND window, LPARAM param) {
  
  bool ParseCommandLine(const COPYDATASTRUCT* cds,
                        base::CommandLine* parsed_command_line,
@@ -197,7 +197,7 @@ index 009b522049adc32144c51842369dc1156bd959fa..8fb7835f6e0a7b2690d13b45179f8de7
    static const int min_message_size = 7;
    if (cds->cbData < min_message_size * sizeof(wchar_t) ||
        cds->cbData % sizeof(wchar_t) != 0) {
-@@ -134,6 +136,37 @@ bool ParseCommandLine(const COPYDATASTRUCT* cds,
+@@ -133,6 +135,37 @@ bool ParseCommandLine(const COPYDATASTRUCT* cds,
      const std::wstring cmd_line =
          msg.substr(second_null + 1, third_null - second_null);
      *parsed_command_line = base::CommandLine::FromString(cmd_line);
@@ -235,7 +235,7 @@ index 009b522049adc32144c51842369dc1156bd959fa..8fb7835f6e0a7b2690d13b45179f8de7
      return true;
    }
    return false;
-@@ -155,13 +188,14 @@ bool ProcessLaunchNotification(
+@@ -154,13 +187,14 @@ bool ProcessLaunchNotification(
  
    base::CommandLine parsed_command_line(base::CommandLine::NO_PROGRAM);
    base::FilePath current_directory;
@@ -253,7 +253,7 @@ index 009b522049adc32144c51842369dc1156bd959fa..8fb7835f6e0a7b2690d13b45179f8de7
    return true;
  }
  
-@@ -267,9 +301,11 @@ bool ProcessSingleton::EscapeVirtualization(
+@@ -264,9 +298,11 @@ bool ProcessSingleton::EscapeVirtualization(
  ProcessSingleton::ProcessSingleton(
      const std::string& program_name,
      const base::FilePath& user_data_dir,
@@ -265,7 +265,7 @@ index 009b522049adc32144c51842369dc1156bd959fa..8fb7835f6e0a7b2690d13b45179f8de7
        program_name_(program_name),
        is_app_sandboxed_(is_app_sandboxed),
        is_virtualized_(false),
-@@ -296,7 +332,7 @@ ProcessSingleton::NotifyResult ProcessSingleton::NotifyOtherProcess() {
+@@ -293,7 +329,7 @@ ProcessSingleton::NotifyResult ProcessSingleton::NotifyOtherProcess() {
      return PROCESS_NONE;
    }
  

@@ -120,10 +120,6 @@
 #include "ui/native_theme/native_theme.h"
 #include "v8/include/v8.h"
 
-#if BUILDFLAG(IS_WIN)
-#include "sandbox/win/src/sandbox_policy.h"
-#endif
-
 #if BUILDFLAG(USE_NSS_CERTS)
 #include "net/ssl/client_cert_store_nss.h"
 #elif BUILDFLAG(IS_WIN)
@@ -182,8 +178,8 @@
 #endif
 
 #if BUILDFLAG(IS_MAC)
-#include "content/common/mac_helpers.h"
-#include "content/public/common/child_process_host.h"
+#include "content/browser/mac_helpers.h"
+#include "content/public/browser/child_process_host.h"
 #endif
 
 #if BUILDFLAG(IS_LINUX)
@@ -253,7 +249,7 @@ enum class RenderProcessHostPrivilege {
 bool AllowFileAccess(const std::string& extension_id,
                      content::BrowserContext* context) {
   return base::CommandLine::ForCurrentProcess()->HasSwitch(
-             ::switches::kDisableExtensionsFileAccessCheck) ||
+             extensions::switches::kDisableExtensionsFileAccessCheck) ||
          extensions::ExtensionPrefs::Get(context)->AllowFileAccess(
              extension_id);
 }
@@ -474,15 +470,10 @@ void ElectronBrowserClient::AppendExtraCommandLineSwitches(
         content::ChildProcessHost::CHILD_RENDERER);
     auto gpu_child_path = content::ChildProcessHost::GetChildPath(
         content::ChildProcessHost::CHILD_GPU);
-#if BUILDFLAG(ENABLE_PLUGINS)
     auto plugin_child_path = content::ChildProcessHost::GetChildPath(
         content::ChildProcessHost::CHILD_PLUGIN);
-#endif
-    if (program != renderer_child_path && program != gpu_child_path
-#if BUILDFLAG(ENABLE_PLUGINS)
-        && program != plugin_child_path
-#endif
-    ) {
+    if (program != renderer_child_path && program != gpu_child_path &&
+        program != plugin_child_path) {
       child_path = content::ChildProcessHost::GetChildPath(
           content::ChildProcessHost::CHILD_NORMAL);
       CHECK_EQ(program, child_path)
@@ -1440,19 +1431,6 @@ void ElectronBrowserClient::OverrideURLLoaderFactoryParams(
       browser_context, origin, is_for_isolated_world, factory_params);
 }
 
-#if BUILDFLAG(IS_WIN)
-bool ElectronBrowserClient::PreSpawnChild(sandbox::TargetPolicy* policy,
-                                          sandbox::mojom::Sandbox sandbox_type,
-                                          ChildSpawnFlags flags) {
-  sandbox::ResultCode result = policy->GetConfig()->AddRule(
-      sandbox::SubSystem::kFiles, sandbox::Semantics::kFilesAllowAny,
-      L"\\??\\pipe\\crashpad_*");
-  if (result != sandbox::SBOX_ALL_OK)
-    return false;
-  return true;
-}
-#endif  // BUILDFLAG(IS_WIN)
-
 void ElectronBrowserClient::
     RegisterAssociatedInterfaceBindersForRenderFrameHost(
         content::RenderFrameHost&
@@ -1534,13 +1512,6 @@ std::string ElectronBrowserClient::GetApplicationLocale() {
   if (BrowserThread::CurrentlyOn(BrowserThread::IO))
     return g_io_thread_application_locale.Get();
   return *g_application_locale;
-}
-
-base::FilePath ElectronBrowserClient::GetFontLookupTableCacheDir() {
-  base::FilePath user_data_dir;
-  base::PathService::Get(chrome::DIR_USER_DATA, &user_data_dir);
-  DCHECK(!user_data_dir.empty());
-  return user_data_dir.Append(FILE_PATH_LITERAL("FontLookupTableCache"));
 }
 
 bool ElectronBrowserClient::ShouldEnableStrictSiteIsolation() {
@@ -1744,13 +1715,11 @@ void ElectronBrowserClient::RegisterBrowserInterfaceBindersForServiceWorker(
       base::BindRepeating(&BindBadgeServiceForServiceWorker));
 }
 
-device::GeolocationManager* ElectronBrowserClient::GetGeolocationManager() {
 #if BUILDFLAG(IS_MAC)
-  return browser_main_parts_->GetGeolocationManager();
-#else
-  return nullptr;
-#endif
+device::GeolocationManager* ElectronBrowserClient::GetGeolocationManager() {
+  return g_browser_process->geolocation_manager();
 }
+#endif
 
 content::HidDelegate* ElectronBrowserClient::GetHidDelegate() {
   if (!hid_delegate_)

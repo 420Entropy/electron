@@ -142,7 +142,7 @@ class ScriptExecutionCallback {
       context_bridge::ObjectCache object_cache;
       maybe_result = PassValueToOtherContext(
           result->GetCreationContextChecked(), promise_.GetContext(), result,
-          &object_cache, false, 0);
+          &object_cache, false, 0, BridgeErrorTarget::kSource);
       if (maybe_result.IsEmpty() || try_catch.HasCaught()) {
         success = false;
       }
@@ -643,7 +643,7 @@ class WebFrameRenderer : public gin::Wrappable<WebFrameRenderer>,
                                              std::move(completion_callback));
 
     render_frame->GetWebFrame()->RequestExecuteScript(
-        blink::DOMWrapperWorld::kMainWorldId, base::make_span(&source, 1),
+        blink::DOMWrapperWorld::kMainWorldId, base::make_span(&source, 1u),
         has_user_gesture ? blink::mojom::UserActivationOption::kActivate
                          : blink::mojom::UserActivationOption::kDoNotActivate,
         blink::mojom::EvaluationTiming::kSynchronous,
@@ -916,4 +916,4 @@ void Initialize(v8::Local<v8::Object> exports,
 
 }  // namespace
 
-NODE_LINKED_MODULE_CONTEXT_AWARE(electron_renderer_web_frame, Initialize)
+NODE_LINKED_BINDING_CONTEXT_AWARE(electron_renderer_web_frame, Initialize)

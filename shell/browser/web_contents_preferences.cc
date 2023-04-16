@@ -389,28 +389,23 @@ void WebContentsPreferences::AppendCommandLineSwitches(
 }
 
 void WebContentsPreferences::SaveLastPreferences() {
-  last_web_preferences_ = base::Value(base::Value::Type::DICTIONARY);
-  last_web_preferences_.SetKey(options::kNodeIntegration,
-                               base::Value(node_integration_));
-  last_web_preferences_.SetKey(options::kNodeIntegrationInSubFrames,
-                               base::Value(node_integration_in_sub_frames_));
-  last_web_preferences_.SetKey(options::kSandbox, base::Value(IsSandboxed()));
-  last_web_preferences_.SetKey(options::kContextIsolation,
-                               base::Value(context_isolation_));
-  last_web_preferences_.SetKey(options::kJavaScript, base::Value(javascript_));
-  last_web_preferences_.SetKey(options::kEnableWebSQL,
-                               base::Value(enable_websql_));
-  last_web_preferences_.SetKey(options::kWebviewTag, base::Value(webview_tag_));
-  last_web_preferences_.SetKey("disablePopups", base::Value(disable_popups_));
-  last_web_preferences_.SetKey(options::kWebSecurity,
-                               base::Value(web_security_));
-  last_web_preferences_.SetKey(options::kAllowRunningInsecureContent,
-                               base::Value(allow_running_insecure_content_));
-  last_web_preferences_.SetKey(options::kExperimentalFeatures,
-                               base::Value(experimental_features_));
-  last_web_preferences_.SetKey(
-      options::kEnableBlinkFeatures,
-      base::Value(enable_blink_features_.value_or("")));
+  base::Value::Dict dict;
+  dict.Set(options::kNodeIntegration, node_integration_);
+  dict.Set(options::kNodeIntegrationInSubFrames,
+           node_integration_in_sub_frames_);
+  dict.Set(options::kSandbox, IsSandboxed());
+  dict.Set(options::kContextIsolation, context_isolation_);
+  dict.Set(options::kJavaScript, javascript_);
+  dict.Set(options::kEnableWebSQL, enable_websql_);
+  dict.Set(options::kWebviewTag, webview_tag_);
+  dict.Set("disablePopups", disable_popups_);
+  dict.Set(options::kWebSecurity, web_security_);
+  dict.Set(options::kAllowRunningInsecureContent,
+           allow_running_insecure_content_);
+  dict.Set(options::kExperimentalFeatures, experimental_features_);
+  dict.Set(options::kEnableBlinkFeatures, enable_blink_features_.value_or(""));
+
+  last_web_preferences_ = base::Value(std::move(dict));
 }
 
 void WebContentsPreferences::OverrideWebkitPrefs(
@@ -430,24 +425,32 @@ void WebContentsPreferences::OverrideWebkitPrefs(
   prefs->web_security_enabled = web_security_;
   prefs->allow_running_insecure_content = allow_running_insecure_content_;
 
-  if (auto font =
-          default_font_family_.find("standard") != default_font_family_.end())
-    prefs->standard_font_family_map[blink::web_pref::kCommonScript] = font;
-  if (auto font =
-          default_font_family_.find("serif") != default_font_family_.end())
-    prefs->serif_font_family_map[blink::web_pref::kCommonScript] = font;
-  if (auto font =
-          default_font_family_.find("sansSerif") != default_font_family_.end())
-    prefs->sans_serif_font_family_map[blink::web_pref::kCommonScript] = font;
-  if (auto font =
-          default_font_family_.find("monospace") != default_font_family_.end())
-    prefs->fixed_font_family_map[blink::web_pref::kCommonScript] = font;
-  if (auto font =
-          default_font_family_.find("cursive") != default_font_family_.end())
-    prefs->cursive_font_family_map[blink::web_pref::kCommonScript] = font;
-  if (auto font =
-          default_font_family_.find("fantasy") != default_font_family_.end())
-    prefs->fantasy_font_family_map[blink::web_pref::kCommonScript] = font;
+  if (!default_font_family_.empty()) {
+    if (auto iter = default_font_family_.find("standard");
+        iter != default_font_family_.end())
+      prefs->standard_font_family_map[blink::web_pref::kCommonScript] =
+          iter->second;
+    if (auto iter = default_font_family_.find("serif");
+        iter != default_font_family_.end())
+      prefs->serif_font_family_map[blink::web_pref::kCommonScript] =
+          iter->second;
+    if (auto iter = default_font_family_.find("sansSerif");
+        iter != default_font_family_.end())
+      prefs->sans_serif_font_family_map[blink::web_pref::kCommonScript] =
+          iter->second;
+    if (auto iter = default_font_family_.find("monospace");
+        iter != default_font_family_.end())
+      prefs->fixed_font_family_map[blink::web_pref::kCommonScript] =
+          iter->second;
+    if (auto iter = default_font_family_.find("cursive");
+        iter != default_font_family_.end())
+      prefs->cursive_font_family_map[blink::web_pref::kCommonScript] =
+          iter->second;
+    if (auto iter = default_font_family_.find("fantasy");
+        iter != default_font_family_.end())
+      prefs->fantasy_font_family_map[blink::web_pref::kCommonScript] =
+          iter->second;
+  }
 
   if (default_font_size_)
     prefs->default_font_size = *default_font_size_;

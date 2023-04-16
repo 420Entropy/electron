@@ -23,6 +23,7 @@
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/desktop_media_id.h"
+#include "shell/browser/browser.h"
 #include "shell/browser/javascript_environment.h"
 #include "shell/browser/native_browser_view_mac.h"
 #include "shell/browser/ui/cocoa/electron_native_widget_mac.h"
@@ -619,7 +620,7 @@ void NativeWindowMac::SetFullScreen(bool fullscreen) {
     return;
   }
 
-  if (fullscreen == IsFullscreen())
+  if (fullscreen == IsFullscreen() || !IsFullScreenable())
     return;
 
   // Take note of the current window size
@@ -1030,9 +1031,12 @@ void NativeWindowMac::SetKiosk(bool kiosk) {
     is_kiosk_ = true;
     SetFullScreen(true);
   } else if (!kiosk && is_kiosk_) {
-    [NSApp setPresentationOptions:kiosk_options_];
     is_kiosk_ = false;
     SetFullScreen(false);
+
+    // Set presentation options *after* asynchronously exiting
+    // fullscreen to ensure they take effect.
+    [NSApp setPresentationOptions:kiosk_options_];
   }
 }
 
@@ -1212,7 +1216,7 @@ content::DesktopMediaID NativeWindowMac::GetDesktopMediaID() const {
   auto desktop_media_id = content::DesktopMediaID(
       content::DesktopMediaID::TYPE_WINDOW, GetAcceleratedWidget());
   // c.f.
-  // https://source.chromium.org/chromium/chromium/src/+/master:chrome/browser/media/webrtc/native_desktop_media_list.cc;l=372?q=kWindowCaptureMacV2&ss=chromium
+  // https://source.chromium.org/chromium/chromium/src/+/main:chrome/browser/media/webrtc/native_desktop_media_list.cc;l=775-780;drc=79502ab47f61bff351426f57f576daef02b1a8dc
   // Refs https://github.com/electron/electron/pull/30507
   // TODO(deepak1556): Match upstream for `kWindowCaptureMacV2`
 #if 0
@@ -1278,18 +1282,15 @@ void NativeWindowMac::SetOverlayIcon(const gfx::Image& overlay,
 void NativeWindowMac::SetVisibleOnAllWorkspaces(bool visible,
                                                 bool visibleOnFullScreen,
                                                 bool skipTransformProcessType) {
-  // In order for NSWindows to be visible on fullscreen we need to functionally
-  // mimic app.dock.hide() since Apple changed the underlying functionality of
+  // In order for NSWindows to be visible on fullscreen we need to invoke
+  // app.dock.hide() since Apple changed the underlying functionality of
   // NSWindows starting with 10.14 to disallow NSWindows from floating on top of
   // fullscreen apps.
   if (!skipTransformProcessType) {
-    ProcessSerialNumber psn = {0, kCurrentProcess};
     if (visibleOnFullScreen) {
-      [window_ setCanHide:NO];
-      TransformProcessType(&psn, kProcessTransformToUIElementApplication);
+      Browser::Get()->DockHide();
     } else {
-      [window_ setCanHide:YES];
-      TransformProcessType(&psn, kProcessTransformToForegroundApplication);
+      Browser::Get()->DockShow(JavascriptEnvironment::GetIsolate());
     }
   }
 
@@ -1471,7 +1472,7 @@ bool NativeWindowMac::GetWindowButtonVisibility() const {
          ![window_ standardWindowButton:NSWindowCloseButton].hidden;
 }
 
-void NativeWindowMac::SetTrafficLightPosition(
+void NativeWindowMac::SetWindowButtonPosition(
     absl::optional<gfx::Point> position) {
   traffic_light_position_ = std::move(position);
   if (buttons_proxy_) {
@@ -1480,7 +1481,7 @@ void NativeWindowMac::SetTrafficLightPosition(
   }
 }
 
-absl::optional<gfx::Point> NativeWindowMac::GetTrafficLightPosition() const {
+absl::optional<gfx::Point> NativeWindowMac::GetWindowButtonPosition() const {
   return traffic_light_position_;
 }
 

@@ -13,16 +13,6 @@ PLATFORM = {
   'win32': 'win32',
 }[sys.platform]
 
-LINUX_BINARIES = [
-  'chrome-sandbox',
-  'chrome_crashpad_handler',
-  'electron',
-  'libEGL.so',
-  'libGLESv2.so',
-  'libffmpeg.so',
-  'libvk_swiftshader.so',
-]
-
 verbose_mode = False
 
 
@@ -38,17 +28,6 @@ def get_target_arch():
   if arch is None:
     return 'x64'
   return arch
-
-
-def get_env_var(name):
-  value = os.environ.get('ELECTRON_' + name, '')
-  if not value:
-    # TODO Remove ATOM_SHELL_* fallback values
-    value = os.environ.get('ATOM_SHELL_' + name, '')
-    if value:
-      print('Warning: Use $ELECTRON_' + name +
-            ' instead of $ATOM_SHELL_' + name)
-  return value
 
 
 def enable_verbose_mode():

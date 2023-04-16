@@ -44,8 +44,7 @@ struct Converter<base::trace_event::TraceConfig> {
 
     base::Value::Dict memory_dump_config;
     if (ConvertFromV8(isolate, val, &memory_dump_config)) {
-      *out = base::trace_event::TraceConfig(
-          base::Value(std::move(memory_dump_config)));
+      *out = base::trace_event::TraceConfig(std::move(memory_dump_config));
       return true;
     }
 
@@ -178,4 +177,4 @@ void Initialize(v8::Local<v8::Object> exports,
 
 }  // namespace
 
-NODE_LINKED_MODULE_CONTEXT_AWARE(electron_browser_content_tracing, Initialize)
+NODE_LINKED_BINDING_CONTEXT_AWARE(electron_browser_content_tracing, Initialize)

@@ -8,14 +8,14 @@ categories in use are known / declared.  This patch is required for us
 to introduce a new Electron category for Electron-specific tracing.
 
 diff --git a/base/trace_event/builtin_categories.h b/base/trace_event/builtin_categories.h
-index a96b2338f39adb7f765d7c7a67eff8dbbdb991a5..6bbcacacfb9057801674dcc656b8864f1aec0d73 100644
+index 3c8faea2c2391a0172504d524129702cb3c43cf0..b561f3e09d294e74b41a22ab22e8bbe5be05a116 100644
 --- a/base/trace_event/builtin_categories.h
 +++ b/base/trace_event/builtin_categories.h
-@@ -81,6 +81,7 @@
+@@ -80,6 +80,7 @@
    X("drmcursor")                                                         \
    X("dwrite")                                                            \
    X("DXVA_Decoding")                                                     \
 +  X("electron")                                                          \
    X("evdev")                                                             \
    X("event")                                                             \
-   X("exo")                                                               \
+   X("event_latency")                                                     \

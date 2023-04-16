@@ -22,15 +22,15 @@ However, the patch would need to be reviewed by the security team, as it
 does touch a security-sensitive class.
 
 diff --git a/content/browser/renderer_host/render_process_host_impl.cc b/content/browser/renderer_host/render_process_host_impl.cc
-index a0cbbcb558917e57ef62c82ef9a4ffc5c2e59d57..05b41950ba338ef3a94046508863a9bcb38d7532 100644
+index cf277d96d0c0dc8381ceee8ea82b19e34291d652..da3254d252dabca7593eb46c461ce4063137d957 100644
 --- a/content/browser/renderer_host/render_process_host_impl.cc
 +++ b/content/browser/renderer_host/render_process_host_impl.cc
-@@ -1769,9 +1769,15 @@ bool RenderProcessHostImpl::Init() {
+@@ -1803,9 +1803,15 @@ bool RenderProcessHostImpl::Init() {
      std::unique_ptr<SandboxedProcessLauncherDelegate> sandbox_delegate =
          std::make_unique<RendererSandboxedProcessLauncherDelegateWin>(
-             cmd_line.get(), IsJitDisabled());
+             *cmd_line, IsPdf(), IsJitDisabled());
 +#else
-+#if BUILDFLAG(USE_ZYGOTE_HANDLE)
++#if BUILDFLAG(USE_ZYGOTE)
 +    bool use_zygote = !cmd_line->HasSwitch(switches::kNoZygote);
 +    std::unique_ptr<SandboxedProcessLauncherDelegate> sandbox_delegate =
 +        std::make_unique<RendererSandboxedProcessLauncherDelegate>(use_zygote);
@@ -42,52 +42,52 @@ index a0cbbcb558917e57ef62c82ef9a4ffc5c2e59d57..05b41950ba338ef3a94046508863a9bc
  
      auto file_data = std::make_unique<ChildProcessLauncherFileData>();
 diff --git a/content/browser/renderer_host/renderer_sandboxed_process_launcher_delegate.cc b/content/browser/renderer_host/renderer_sandboxed_process_launcher_delegate.cc
-index 81f25ee3d7eb26a336cae05bd158e3cd1ec07257..9d95eccc579e0778f0b3f3a3a31817380e3989c2 100644
+index c297e3fc2ffabb53e94908d7021ef3e750d4c0f1..4b723edd68f9c5668c5e8f3b12984a6f18392252 100644
 --- a/content/browser/renderer_host/renderer_sandboxed_process_launcher_delegate.cc
 +++ b/content/browser/renderer_host/renderer_sandboxed_process_launcher_delegate.cc
-@@ -31,6 +31,9 @@ namespace content {
+@@ -33,6 +33,9 @@ namespace content {
  
- #if BUILDFLAG(USE_ZYGOTE_HANDLE)
- ZygoteHandle RendererSandboxedProcessLauncherDelegate::GetZygote() {
+ #if BUILDFLAG(USE_ZYGOTE)
+ ZygoteCommunication* RendererSandboxedProcessLauncherDelegate::GetZygote() {
 +  if (!use_zygote_) {
 +    return nullptr;
 +  }
    const base::CommandLine& browser_command_line =
        *base::CommandLine::ForCurrentProcess();
    base::CommandLine::StringType renderer_prefix =
-@@ -60,6 +63,9 @@ RendererSandboxedProcessLauncherDelegateWin::
-           GetContentClient()->browser()->IsRendererCodeIntegrityEnabled()),
-       renderer_app_container_disabled_(
-           GetContentClient()->browser()->IsRendererAppContainerDisabled()) {
-+#if BUILDFLAG(USE_ZYGOTE_HANDLE)
+@@ -67,6 +70,9 @@ RendererSandboxedProcessLauncherDelegateWin::
+       is_pdf_renderer_(is_pdf_renderer) {
+   // PDF renderers must be jitless.
+   CHECK(!is_pdf_renderer || is_jit_disabled);
++#if BUILDFLAG(USE_ZYGOTE)
 +  use_zygote_ = !cmd_line->HasSwitch(switches::kNoZygote);
 +#endif
    if (is_jit_disabled) {
      dynamic_code_can_be_disabled_ = true;
      return;
 diff --git a/content/browser/renderer_host/renderer_sandboxed_process_launcher_delegate.h b/content/browser/renderer_host/renderer_sandboxed_process_launcher_delegate.h
-index 736b46ec59d495c9e5639fa53d2d76e8510d091c..bc37668adab98027d61f684c95b81d8c1dc893cd 100644
+index 00038da2c15696b361aea1469ccf73307e44963e..7ccfbf11ecfd56fd165915baa85919eaf2e923b9 100644
 --- a/content/browser/renderer_host/renderer_sandboxed_process_launcher_delegate.h
 +++ b/content/browser/renderer_host/renderer_sandboxed_process_launcher_delegate.h
 @@ -18,6 +18,11 @@ class CONTENT_EXPORT RendererSandboxedProcessLauncherDelegate
   public:
    RendererSandboxedProcessLauncherDelegate() = default;
  
-+#if BUILDFLAG(USE_ZYGOTE_HANDLE)
++#if BUILDFLAG(USE_ZYGOTE)
 +  RendererSandboxedProcessLauncherDelegate(bool use_zygote):
 +    use_zygote_(use_zygote) {}
 +#endif
 +
    ~RendererSandboxedProcessLauncherDelegate() override = default;
  
- #if BUILDFLAG(USE_ZYGOTE_HANDLE)
-@@ -29,6 +34,11 @@ class CONTENT_EXPORT RendererSandboxedProcessLauncherDelegate
- #endif  // BUILDFLAG(IS_MAC)
+ #if BUILDFLAG(USE_ZYGOTE)
+@@ -30,6 +35,11 @@ class CONTENT_EXPORT RendererSandboxedProcessLauncherDelegate
  
+   // sandbox::policy::SandboxDelegate:
    sandbox::mojom::Sandbox GetSandboxType() override;
 +
 + private:
-+#if BUILDFLAG(USE_ZYGOTE_HANDLE)
++#if BUILDFLAG(USE_ZYGOTE)
 +  bool use_zygote_ = true;
 +#endif
  };

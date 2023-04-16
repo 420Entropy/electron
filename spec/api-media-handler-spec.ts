@@ -1,8 +1,8 @@
 import { expect } from 'chai';
 import { BrowserWindow, session, desktopCapturer } from 'electron/main';
-import { closeAllWindows } from './window-helpers';
+import { closeAllWindows } from './lib/window-helpers';
 import * as http from 'http';
-import { ifdescribe, ifit } from './spec-helpers';
+import { ifdescribe, ifit, listen } from './lib/spec-helpers';
 
 const features = process._linkedBinding('electron_common_features');
 
@@ -17,21 +17,22 @@ ifdescribe(features.isDesktopCapturerEnabled())('setDisplayMediaRequestHandler',
       res.setHeader('Content-Type', 'text/html');
       res.end('');
     });
-    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
-    serverUrl = `http://localhost:${(server.address() as any).port}`;
+    serverUrl = (await listen(server)).url;
   });
   after(() => {
     server.close();
   });
 
-  // NOTE(nornagon): this test fails on our macOS CircleCI runners with the
+  // FIXME(nornagon): this test fails on our macOS CircleCI runners with the
   // error message:
   // [ERROR:video_capture_device_client.cc(659)] error@ OnStart@content/browser/media/capture/desktop_capture_device_mac.cc:98, CGDisplayStreamCreate failed, OS message: Value too large to be stored in data type (84)
   // This is possibly related to the OS/VM setup that CircleCI uses for macOS.
   // Our arm64 runners are in @jkleinsc's office, and are real machines, so the
   // test works there.
   ifit(!(process.platform === 'darwin' && process.arch === 'x64'))('works when calling getDisplayMedia', async function () {
-    if ((await desktopCapturer.getSources({ types: ['screen'] })).length === 0) { return this.skip(); }
+    if ((await desktopCapturer.getSources({ types: ['screen'] })).length === 0) {
+      return this.skip();
+    }
     const ses = session.fromPartition('' + Math.random());
     let requestHandlerCalled = false;
     let mediaRequest: any = null;
@@ -55,7 +56,7 @@ ifdescribe(features.isDesktopCapturerEnabled())('setDisplayMediaRequestHandler',
         video: true,
         audio: false,
       }).then(x => ({ok: x instanceof MediaStream}), e => ({ok: false, message: e.message}))
-    `);
+    `, true);
     expect(requestHandlerCalled).to.be.true();
     expect(mediaRequest.videoRequested).to.be.true();
     expect(mediaRequest.audioRequested).to.be.false();
@@ -78,7 +79,7 @@ ifdescribe(features.isDesktopCapturerEnabled())('setDisplayMediaRequestHandler',
         video: true,
         audio: true,
       }).then(x => ({ok: x instanceof MediaStream}), e => ({ok: false, message: e.message}))
-    `);
+    `, true);
     expect(requestHandlerCalled).to.be.true();
     expect(ok).to.be.false();
     expect(message).to.equal('Could not start video source');
@@ -104,7 +105,7 @@ ifdescribe(features.isDesktopCapturerEnabled())('setDisplayMediaRequestHandler',
       navigator.mediaDevices.getDisplayMedia({
         video: true,
       }).then(x => ({ok: x instanceof MediaStream}), e => ({ok: false, message: e.message}))
-    `);
+    `, true);
     expect(requestHandlerCalled).to.be.true();
     expect(ok).to.be.false();
     expect(callbackError?.message).to.equal('Video was requested, but no video stream was provided');
@@ -131,7 +132,7 @@ ifdescribe(features.isDesktopCapturerEnabled())('setDisplayMediaRequestHandler',
         video: true,
         audio: true,
       }).then(x => ({ok: x instanceof MediaStream}), e => ({ok: false, message: e.message}))
-    `);
+    `, true);
     expect(requestHandlerCalled).to.be.true();
     expect(ok).to.be.false();
     expect(callbackError?.message).to.equal('Video was requested, but no video stream was provided');
@@ -154,7 +155,7 @@ ifdescribe(features.isDesktopCapturerEnabled())('setDisplayMediaRequestHandler',
         video: true,
         audio: true,
       }).then(x => ({ok: x instanceof MediaStream}), e => ({ok: false, message: e.message}))
-    `);
+    `, true);
     expect(requestHandlerCalled).to.be.true();
     expect(ok).to.be.true();
   });
@@ -178,7 +179,7 @@ ifdescribe(features.isDesktopCapturerEnabled())('setDisplayMediaRequestHandler',
         video: true,
         audio: true,
       }).then(x => ({ok: x instanceof MediaStream}), e => ({ok: false, message: e.message}))
-    `);
+    `, true);
     expect(requestHandlerCalled).to.be.true();
     expect(ok).to.be.false();
     expect(callbackError.message).to.equal('Video was requested, but no video stream was provided');
@@ -200,7 +201,7 @@ ifdescribe(features.isDesktopCapturerEnabled())('setDisplayMediaRequestHandler',
         video: true,
         audio: true,
       }).then(x => ({ok: x instanceof MediaStream}), e => ({ok: false, message: e.message}))
-    `);
+    `, true);
     expect(requestHandlerCalled).to.be.true();
     // This is a little surprising... apparently chrome will generate a stream
     // for this non-existent web contents?
@@ -238,7 +239,7 @@ ifdescribe(features.isDesktopCapturerEnabled())('setDisplayMediaRequestHandler',
         video: true,
         audio: true,
       }).then(x => ({ok: x instanceof MediaStream}), e => ({ok: false, message: e.message}))
-    `);
+    `, true);
     expect(requestHandlerCalled).to.be.true();
     expect(ok).to.be.true(message);
   });
@@ -259,7 +260,7 @@ ifdescribe(features.isDesktopCapturerEnabled())('setDisplayMediaRequestHandler',
         video: true,
         audio: true,
       }).then(x => ({ok: x instanceof MediaStream}), e => ({ok: false, message: e.message}))
-    `);
+    `, true);
     expect(requestHandlerCalled).to.be.true();
     expect(ok).to.be.true(message);
   });
@@ -277,7 +278,7 @@ ifdescribe(features.isDesktopCapturerEnabled())('setDisplayMediaRequestHandler',
       navigator.mediaDevices.getDisplayMedia({
         video: true,
       }).then(x => ({ok: x instanceof MediaStream}), e => ({ok: false, message: e.message}))
-    `);
+    `, true);
     expect(requestHandlerCalled).to.be.true();
     expect(ok).to.be.true(message);
   });
@@ -354,7 +355,7 @@ ifdescribe(features.isDesktopCapturerEnabled())('setDisplayMediaRequestHandler',
       navigator.mediaDevices.getDisplayMedia({
         video: true,
       }).then(x => ({ok: x instanceof MediaStream}), e => ({ok: false, message: e.message}))
-    `);
+    `, true);
     expect(ok).to.be.false();
     expect(message).to.equal('Not supported');
   });

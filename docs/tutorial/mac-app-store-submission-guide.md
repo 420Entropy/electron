@@ -11,7 +11,7 @@ This guide provides information on:
 To sign Electron apps, the following tools must be installed first:
 
 * Xcode 11 or above.
-* The [@electron/osx-sign] npm module.
+* The [@electron/osx-sign][] npm module.
 
 You also have to register an Apple Developer account and join the
 [Apple Developer Program][developer-program].
@@ -341,7 +341,7 @@ Electron uses following cryptographic algorithms:
 * RIPEMD - [ISO/IEC 10118-3](https://webstore.ansi.org/RecordDetail.aspx?sku=ISO%2FIEC%2010118-3:2004)
 
 [developer-program]: https://developer.apple.com/support/compare-memberships/
-[@electron/osx-sign]: https://github.com/electron/electron-osx-sign
+[@electron/osx-sign]: https://github.com/electron/osx-sign
 [app-sandboxing]: https://developer.apple.com/app-sandboxing/
 [app-notarization]: https://developer.apple.com/documentation/security/notarizing_macos_software_before_distribution
 [submitting-your-app]: https://developer.apple.com/library/mac/documentation/IDEs/Conceptual/AppDistributionGuide/SubmittingYourApp/SubmittingYourApp.html

@@ -97,25 +97,25 @@ const size_t kMaxMessageChunkSize = IPC::Channel::kMaximumMessageSize / 4;
 InspectableWebContents::List g_web_contents_instances_;
 
 base::Value RectToDictionary(const gfx::Rect& bounds) {
-  base::Value dict(base::Value::Type::DICTIONARY);
-  dict.SetKey("x", base::Value(bounds.x()));
-  dict.SetKey("y", base::Value(bounds.y()));
-  dict.SetKey("width", base::Value(bounds.width()));
-  dict.SetKey("height", base::Value(bounds.height()));
-  return dict;
+  base::Value::Dict dict;
+  dict.Set("x", bounds.x());
+  dict.Set("y", bounds.y());
+  dict.Set("width", bounds.width());
+  dict.Set("height", bounds.height());
+  return base::Value(std::move(dict));
 }
 
-gfx::Rect DictionaryToRect(const base::Value* dict) {
-  const base::Value* found = dict->FindKey("x");
+gfx::Rect DictionaryToRect(const base::Value::Dict& dict) {
+  const base::Value* found = dict.Find("x");
   int x = found ? found->GetInt() : 0;
 
-  found = dict->FindKey("y");
+  found = dict.Find("y");
   int y = found ? found->GetInt() : 0;
 
-  found = dict->FindKey("width");
+  found = dict.Find("width");
   int width = found ? found->GetInt() : 800;
 
-  found = dict->FindKey("height");
+  found = dict.Find("height");
   int height = found ? found->GetInt() : 600;
 
   return gfx::Rect(x, y, width, height);
@@ -290,20 +290,21 @@ class InspectableWebContents::NetworkResourceLoader
           stream_id_, bindings_, resource_request_, traffic_annotation_,
           std::move(url_loader_factory_), std::move(callback_), delay);
     } else {
-      base::DictionaryValue response;
-      response.SetInteger("statusCode", response_headers_
-                                            ? response_headers_->response_code()
-                                            : net::HTTP_OK);
+      base::Value response(base::Value::Type::DICT);
+      response.GetDict().Set(
+          "statusCode", response_headers_ ? response_headers_->response_code()
+                                          : net::HTTP_OK);
 
-      auto headers = std::make_unique<base::DictionaryValue>();
+      base::Value::Dict headers;
       size_t iterator = 0;
       std::string name;
       std::string value;
       while (response_headers_ &&
              response_headers_->EnumerateHeaderLines(&iterator, &name, &value))
-        headers->SetString(name, value);
+        headers.Set(name, value);
 
-      response.Set("headers", std::move(headers));
+      response.GetDict().Set("headers", std::move(headers));
+
       std::move(callback_).Run(&response);
     }
 
@@ -352,7 +353,7 @@ InspectableWebContents::InspectableWebContents(
   const base::Value* bounds_dict =
       &pref_service_->GetValue(kDevToolsBoundsPref);
   if (bounds_dict->is_dict()) {
-    devtools_bounds_ = DictionaryToRect(bounds_dict);
+    devtools_bounds_ = DictionaryToRect(bounds_dict->GetDict());
     // Sometimes the devtools window is out of screen or has too small size.
     if (devtools_bounds_.height() < 100 || devtools_bounds_.width() < 100) {
       devtools_bounds_.set_height(600);
@@ -622,7 +623,7 @@ void InspectableWebContents::AddDevToolsExtensionsToClient() {
     extension_info.Set("exposeExperimentalAPIs",
                        extension->permissions_data()->HasAPIPermission(
                            extensions::mojom::APIPermissionID::kExperimental));
-    results.Append(base::Value(std::move(extension_info)));
+    results.Append(std::move(extension_info));
   }
 
   CallClientFunction("DevToolsAPI", "addExtensions",
@@ -654,8 +655,8 @@ void InspectableWebContents::LoadNetworkResource(DispatchCallback callback,
                                                  int stream_id) {
   GURL gurl(url);
   if (!gurl.is_valid()) {
-    base::DictionaryValue response;
-    response.SetInteger("statusCode", net::HTTP_NOT_FOUND);
+    base::Value response(base::Value::Type::DICT);
+    response.GetDict().Set("statusCode", net::HTTP_NOT_FOUND);
     std::move(callback).Run(&response);
     return;
   }
@@ -722,7 +723,10 @@ void InspectableWebContents::SetIsDocked(DispatchCallback callback,
     std::move(callback).Run(nullptr);
 }
 
-void InspectableWebContents::OpenInNewTab(const std::string& url) {}
+void InspectableWebContents::OpenInNewTab(const std::string& url) {
+  if (delegate_)
+    delegate_->DevToolsOpenInNewTab(url);
+}
 
 void InspectableWebContents::ShowItemInFolder(
     const std::string& file_system_path) {
@@ -875,23 +879,23 @@ void InspectableWebContents::GetPreference(DispatchCallback callback,
 
 void InspectableWebContents::SetPreference(const std::string& name,
                                            const std::string& value) {
-  DictionaryPrefUpdate update(pref_service_, kDevToolsPreferences);
-  update.Get()->SetKey(name, base::Value(value));
+  ScopedDictPrefUpdate update(pref_service_, kDevToolsPreferences);
+  update->Set(name, base::Value(value));
 }
 
 void InspectableWebContents::RemovePreference(const std::string& name) {
-  DictionaryPrefUpdate update(pref_service_, kDevToolsPreferences);
-  update.Get()->RemoveKey(name);
+  ScopedDictPrefUpdate update(pref_service_, kDevToolsPreferences);
+  update->Remove(name);
 }
 
 void InspectableWebContents::ClearPreferences() {
-  DictionaryPrefUpdate unsynced_update(pref_service_, kDevToolsPreferences);
-  unsynced_update.Get()->DictClear();
+  ScopedDictPrefUpdate unsynced_update(pref_service_, kDevToolsPreferences);
+  unsynced_update->clear();
 }
 
 void InspectableWebContents::GetSyncInformation(DispatchCallback callback) {
-  base::Value result(base::Value::Type::DICTIONARY);
-  result.SetBoolKey("isSyncActive", false);
+  base::Value result(base::Value::Type::DICT);
+  result.GetDict().Set("isSyncActive", false);
   std::move(callback).Run(&result);
 }
 

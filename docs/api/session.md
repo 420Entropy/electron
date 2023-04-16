@@ -42,6 +42,22 @@ To create a `Session` with `options`, you have to ensure the `Session` with the
 `partition` has never been used before. There is no way to change the `options`
 of an existing `Session` object.
 
+### `session.fromPath(path[, options])`
+
+* `path` string
+* `options` Object (optional)
+  * `cache` boolean - Whether to enable cache.
+
+Returns `Session` - A session instance from the absolute path as specified by the `path`
+string. When there is an existing `Session` with the same absolute path, it
+will be returned; otherwise a new `Session` instance will be created with `options`. The
+call will throw an error if the path is not an absolute path. Additionally, an error will
+be thrown if an empty string is provided.
+
+To create a `Session` with `options`, you have to ensure the `Session` with the
+`path` has never been used before. There is no way to change the `options`
+of an existing `Session` object.
+
 ## Properties
 
 The `session` module has the following properties:
@@ -195,8 +211,8 @@ Emitted when a HID device needs to be selected when a call to
 `navigator.hid.requestDevice` is made. `callback` should be called with
 `deviceId` to be selected; passing no arguments to `callback` will
 cancel the request.  Additionally, permissioning on `navigator.hid` can
-be further managed by using [ses.setPermissionCheckHandler(handler)](#sessetpermissioncheckhandlerhandler)
-and [ses.setDevicePermissionHandler(handler)`](#sessetdevicepermissionhandlerhandler).
+be further managed by using [`ses.setPermissionCheckHandler(handler)`](#sessetpermissioncheckhandlerhandler)
+and [`ses.setDevicePermissionHandler(handler)`](#sessetdevicepermissionhandlerhandler).
 
 ```javascript
 const { app, BrowserWindow } = require('electron')
@@ -444,8 +460,8 @@ Emitted when a USB device needs to be selected when a call to
 `navigator.usb.requestDevice` is made. `callback` should be called with
 `deviceId` to be selected; passing no arguments to `callback` will
 cancel the request.  Additionally, permissioning on `navigator.usb` can
-be further managed by using [ses.setPermissionCheckHandler(handler)](#sessetpermissioncheckhandlerhandler)
-and [ses.setDevicePermissionHandler(handler)`](#sessetdevicepermissionhandlerhandler).
+be further managed by using [`ses.setPermissionCheckHandler(handler)`](#sessetpermissioncheckhandlerhandler)
+and [`ses.setDevicePermissionHandler(handler)`](#sessetdevicepermissionhandlerhandler).
 
 ```javascript
 const { app, BrowserWindow } = require('electron')
@@ -561,7 +577,7 @@ Clears the session’s HTTP cache.
   * `origin` string (optional) - Should follow `window.location.origin`’s representation
     `scheme://host:port`.
   * `storages` string[] (optional) - The types of storages to clear, can contain:
-    `appcache`, `cookies`, `filesystem`, `indexdb`, `localstorage`,
+    `cookies`, `filesystem`, `indexdb`, `localstorage`,
     `shadercache`, `websql`, `serviceworkers`, `cachestorage`. If not
     specified, clear all storage types.
   * `quotas` string[] (optional) - The types of quotas to clear, can contain:
@@ -644,8 +660,8 @@ The `proxyBypassRules` is a comma separated list of rules described below:
    Match all hostnames that match the pattern HOSTNAME_PATTERN.
 
    Examples:
-     "foobar.com", "*foobar.com", "*.foobar.com", "*foobar.com:99",
-     "https://x.*.y.com:99"
+     "foobar.com", "\*foobar.com", "\*.foobar.com", "\*foobar.com:99",
+     "https://x.\*.y.com:99"
 
 * `"." HOSTNAME_SUFFIX_PATTERN [ ":" PORT ]`
 
@@ -659,7 +675,7 @@ The `proxyBypassRules` is a comma separated list of rules described below:
    Match URLs which are IP address literals.
 
    Examples:
-     "127.0.1", "[0:0::1]", "[::1]", "http://[::1]:99"
+     "127.0.1", "\[0:0::1]", "\[::1]", "http://\[::1]:99"
 
 * `IP_LITERAL "/" PREFIX_LENGTH_IN_BITS`
 
@@ -673,6 +689,41 @@ The `proxyBypassRules` is a comma separated list of rules described below:
 
    Match local addresses. The meaning of `<local>` is whether the
    host matches one of: "127.0.0.1", "::1", "localhost".
+
+#### `ses.resolveHost(host, [options])`
+
+* `host` string - Hostname to resolve.
+* `options` Object (optional)
+  * `queryType` string (optional) - Requested DNS query type. If unspecified,
+    resolver will pick A or AAAA (or both) based on IPv4/IPv6 settings:
+    * `A` - Fetch only A records
+    * `AAAA` - Fetch only AAAA records.
+  * `source` string (optional) - The source to use for resolved addresses.
+    Default allows the resolver to pick an appropriate source. Only affects use
+    of big external sources (e.g. calling the system for resolution or using
+    DNS). Even if a source is specified, results can still come from cache,
+    resolving "localhost" or IP literals, etc. One of the following values:
+    * `any` (default) - Resolver will pick an appropriate source. Results could
+      come from DNS, MulticastDNS, HOSTS file, etc
+    * `system` - Results will only be retrieved from the system or OS, e.g. via
+      the `getaddrinfo()` system call
+    * `dns` - Results will only come from DNS queries
+    * `mdns` - Results will only come from Multicast DNS queries
+    * `localOnly` - No external sources will be used. Results will only come
+      from fast local sources that are available no matter the source setting,
+      e.g. cache, hosts file, IP literal resolution, etc.
+  * `cacheUsage` string (optional) - Indicates what DNS cache entries, if any,
+    can be used to provide a response. One of the following values:
+    * `allowed` (default) - Results may come from the host cache if non-stale
+    * `staleAllowed` - Results may come from the host cache even if stale (by
+      expiration or network changes)
+    * `disallowed` - Results will not come from the host cache.
+  * `secureDnsPolicy` string (optional) - Controls the resolver's Secure DNS
+    behavior for this request. One of the following values:
+    * `allow` (default)
+    * `disable`
+
+Returns [`Promise<ResolvedHost>`](structures/resolved-host.md) - Resolves with the resolved IP addresses for the `host`.
 
 #### `ses.resolveProxy(url)`
 
@@ -731,6 +782,61 @@ Returns `Promise<void>` - Resolves when all connections are closed.
 
 **Note:** It will terminate / fail all requests currently in flight.
 
+#### `ses.fetch(input[, init])`
+
+* `input` string | [GlobalRequest](https://nodejs.org/api/globals.html#request)
+* `init` [RequestInit](https://developer.mozilla.org/en-US/docs/Web/API/fetch#options) (optional)
+
+Returns `Promise<GlobalResponse>` - see [Response](https://developer.mozilla.org/en-US/docs/Web/API/Response).
+
+Sends a request, similarly to how `fetch()` works in the renderer, using
+Chrome's network stack. This differs from Node's `fetch()`, which uses
+Node.js's HTTP stack.
+
+Example:
+
+```js
+async function example () {
+  const response = await net.fetch('https://my.app')
+  if (response.ok) {
+    const body = await response.json()
+    // ... use the result.
+  }
+}
+```
+
+See also [`net.fetch()`](net.md#netfetchinput-init), a convenience method which
+issues requests from the [default session](#sessiondefaultsession).
+
+See the MDN documentation for
+[`fetch()`](https://developer.mozilla.org/en-US/docs/Web/API/fetch) for more
+details.
+
+Limitations:
+
+* `net.fetch()` does not support the `data:` or `blob:` schemes.
+* The value of the `integrity` option is ignored.
+* The `.type` and `.url` values of the returned `Response` object are
+  incorrect.
+
+By default, requests made with `net.fetch` can be made to [custom
+protocols](protocol.md) as well as `file:`, and will trigger
+[webRequest](web-request.md) handlers if present. When the non-standard
+`bypassCustomProtocolHandlers` option is set in RequestInit, custom protocol
+handlers will not be called for this request. This allows forwarding an
+intercepted request to the built-in handler. [webRequest](web-request.md)
+handlers will still be triggered when bypassing custom protocols.
+
+```js
+protocol.handle('https', (req) => {
+  if (req.url === 'https://my-app.com') {
+    return new Response('<body>my app</body>')
+  } else {
+    return net.fetch(req, { bypassCustomProtocolHandlers: true })
+  }
+})
+```
+
 #### `ses.disableNetworkEmulation()`
 
 Disables any network emulation already active for the `session`. Resets to
@@ -784,6 +890,7 @@ win.webContents.session.setCertificateVerifyProc((request, callback) => {
   * `webContents` [WebContents](web-contents.md) - WebContents requesting the permission.  Please note that if the request comes from a subframe you should use `requestingUrl` to check the request origin.
   * `permission` string - The type of requested permission.
     * `clipboard-read` - Request access to read from the clipboard.
+    * `clipboard-sanitized-write` - Request access to write to the clipboard.
     * `media` -  Request access to media devices such as camera, microphone and speakers.
     * `display-capture` - Request access to capture the screen.
     * `mediaKeySystem` - Request access to DRM protected content.
@@ -794,6 +901,7 @@ win.webContents.session.setCertificateVerifyProc((request, callback) => {
     * `pointerLock` - Request to directly interpret mouse movements as an input method. Click [here](https://developer.mozilla.org/en-US/docs/Web/API/Pointer_Lock_API) to know more. These requests always appear to originate from the main frame.
     * `fullscreen` - Request for the app to enter fullscreen mode.
     * `openExternal` - Request to open links in external applications.
+    * `window-management` - Request access to enumerate screens using the [`getScreenDetails`](https://developer.chrome.com/en/articles/multi-screen-window-placement/) API.
     * `unknown` - An unrecognized permission request
   * `callback` Function
     * `permissionGranted` boolean - Allow or deny the permission.
@@ -877,6 +985,10 @@ session.fromPartition('some-partition').setPermissionCheckHandler((webContents, 
         Specifying a loopback device will capture system audio, and is
         currently only supported on Windows. If a WebFrameMain is specified,
         will capture audio from that frame.
+      * `enableLocalEcho` Boolean (optional) - If `audio` is a [WebFrameMain](web-frame-main.md)
+         and this is set to `true`, then local playback of audio will not be muted (e.g. using `MediaRecorder`
+         to record `WebFrameMain` with this flag set to `true` will allow audio to pass through to the speakers
+         while recording). Default is `false`.
 
 This handler will be called when web content requests access to display media
 via the `navigator.mediaDevices.getDisplayMedia` API. Use the

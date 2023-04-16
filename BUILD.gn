@@ -1,7 +1,7 @@
 import("//build/config/locales.gni")
 import("//build/config/ui.gni")
 import("//build/config/win/manifest.gni")
-import("//components/os_crypt/features.gni")
+import("//components/os_crypt/sync/features.gni")
 import("//components/spellcheck/spellcheck_build_features.gni")
 import("//content/public/app/mac_helpers.gni")
 import("//extensions/buildflags/buildflags.gni")
@@ -433,7 +433,7 @@ source_set("electron_lib") {
     "//components/network_hints/renderer",
     "//components/network_session_configurator/common",
     "//components/omnibox/browser:buildflags",
-    "//components/os_crypt",
+    "//components/os_crypt/sync",
     "//components/pref_registry",
     "//components/prefs",
     "//components/security_state/content",
@@ -546,7 +546,7 @@ source_set("electron_lib") {
     deps += [
       "//components/remote_cocoa/app_shim",
       "//components/remote_cocoa/browser",
-      "//content/common:mac_helpers",
+      "//content/browser:mac_helpers",
       "//ui/accelerated_widget_mac",
     ]
 
@@ -632,8 +632,6 @@ source_set("electron_lib") {
     sources += [
       "shell/browser/certificate_manager_model.cc",
       "shell/browser/certificate_manager_model.h",
-      "shell/browser/ui/gtk/menu_util.cc",
-      "shell/browser/ui/gtk/menu_util.h",
       "shell/browser/ui/gtk_util.cc",
       "shell/browser/ui/gtk_util.h",
     ]
@@ -746,7 +744,7 @@ source_set("electron_lib") {
       "//components/update_client:update_client",
       "//components/zoom",
       "//extensions/browser",
-      "//extensions/browser:core_api_provider",
+      "//extensions/browser/api:api_provider",
       "//extensions/browser/updater",
       "//extensions/common",
       "//extensions/common:core_api_provider",
@@ -1279,7 +1277,7 @@ if (is_mac) {
       ]
 
       deps += [
-        "//components/browser_watcher:browser_watcher_client",
+        "//chrome/app:exit_code_watcher",
         "//components/crash/core/app:run_as_crashpad_handler",
       ]
 

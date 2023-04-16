@@ -178,9 +178,11 @@ v8::Local<v8::Promise> InAppPurchase::PurchaseProduct(
 
   int quantity = 1;
   args->GetNext(&quantity);
+  std::string username = "";
+  args->GetNext(&username);
 
   in_app_purchase::PurchaseProduct(
-      product_id, quantity,
+      product_id, quantity, username,
       base::BindOnce(gin_helper::Promise<bool>::ResolvePromise,
                      std::move(promise)));
 
@@ -228,4 +230,4 @@ void Initialize(v8::Local<v8::Object> exports,
 
 }  // namespace
 
-NODE_LINKED_MODULE_CONTEXT_AWARE(electron_browser_in_app_purchase, Initialize)
+NODE_LINKED_BINDING_CONTEXT_AWARE(electron_browser_in_app_purchase, Initialize)

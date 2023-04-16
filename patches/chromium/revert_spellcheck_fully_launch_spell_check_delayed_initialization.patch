@@ -10,10 +10,10 @@ can be reverted when those failures are addressed. It's unlikely
 that this patch will be upstreamed.
 
 diff --git a/chrome/browser/extensions/api/language_settings_private/language_settings_private_api_unittest.cc b/chrome/browser/extensions/api/language_settings_private/language_settings_private_api_unittest.cc
-index 29d2c92f103958c419294119e35c87be18f8118e..27fa9161a2d23f5b60de42ab1cf5faa4154917f7 100644
+index bf355ff4813e9b8c822b7c2b65cd3d1e3452fb2a..99eafce374f6914e18f278f945a0ea5ca1aabb3c 100644
 --- a/chrome/browser/extensions/api/language_settings_private/language_settings_private_api_unittest.cc
 +++ b/chrome/browser/extensions/api/language_settings_private/language_settings_private_api_unittest.cc
-@@ -293,26 +293,7 @@ TEST_F(LanguageSettingsPrivateApiTest, GetNeverTranslateLanguagesListTest) {
+@@ -290,24 +290,7 @@ TEST_F(LanguageSettingsPrivateApiTest, GetNeverTranslateLanguagesListTest) {
    }
  }
  
@@ -26,12 +26,10 @@ index 29d2c92f103958c419294119e35c87be18f8118e..27fa9161a2d23f5b60de42ab1cf5faa4
 - protected:
 -  void InitFeatures() override {
 -#if BUILDFLAG(IS_WIN)
--    // Force Windows hybrid spellcheck to be enabled, and disable the delayed
--    // init feature since that case is tested in
+-    // Disable the delayed init feature since that case is tested in
 -    // LanguageSettingsPrivateApiTestDelayInit below.
--    feature_list_.InitWithFeatures(
--        /*enabled_features=*/{spellcheck::kWinUseBrowserSpellChecker},
--        /*disabled_features=*/{spellcheck::kWinDelaySpellcheckServiceInit});
+-    feature_list_.InitAndDisableFeature(
+-        spellcheck::kWinDelaySpellcheckServiceInit);
 -#endif  // BUILDFLAG(IS_WIN)
 -  }
 -};
@@ -42,10 +40,10 @@ index 29d2c92f103958c419294119e35c87be18f8118e..27fa9161a2d23f5b60de42ab1cf5faa4
    RunGetLanguageListTest();
  }
 diff --git a/chrome/browser/spellchecker/spellcheck_service_unittest.cc b/chrome/browser/spellchecker/spellcheck_service_unittest.cc
-index f528150f455103828c463c28b302f671f100d533..18566653b1cdca9a4db1657f3e4b811ff720c41b 100644
+index f982882ed166c5abfecadbbf89fe8771908c35f5..b0be80e0622237c54749e9e645a44fb7e24c0c79 100644
 --- a/chrome/browser/spellchecker/spellcheck_service_unittest.cc
 +++ b/chrome/browser/spellchecker/spellcheck_service_unittest.cc
-@@ -341,18 +341,9 @@ const std::vector<std::string> SpellcheckServiceHybridUnitTestBase::
+@@ -333,17 +333,9 @@ const std::vector<std::string> SpellcheckServiceHybridUnitTestBase::
                               // dictionaries.
  };
  
@@ -57,16 +55,15 @@ index f528150f455103828c463c28b302f671f100d533..18566653b1cdca9a4db1657f3e4b811f
 -  void InitFeatures() override {
 -    // Disable kWinDelaySpellcheckServiceInit, as the case where it's enabled
 -    // is tested in SpellcheckServiceWindowsDictionaryMappingUnitTestDelayInit.
--    feature_list_.InitWithFeatures(
--        /*enabled_features=*/{spellcheck::kWinUseBrowserSpellChecker},
--        /*disabled_features=*/{spellcheck::kWinDelaySpellcheckServiceInit});
+-    feature_list_.InitAndDisableFeature(
+-        spellcheck::kWinDelaySpellcheckServiceInit);
 -  }
 -};
 +      public testing::WithParamInterface<TestCase> {};
  
  static const TestCase kHybridGetDictionariesParams[] = {
      // Galician (gl) has only Windows support, no Hunspell dictionary. Croatian
-@@ -407,10 +398,10 @@ static const TestCase kHybridGetDictionariesParams[] = {
+@@ -398,10 +390,10 @@ static const TestCase kHybridGetDictionariesParams[] = {
  };
  
  INSTANTIATE_TEST_SUITE_P(TestCases,
@@ -79,7 +76,7 @@ index f528150f455103828c463c28b302f671f100d533..18566653b1cdca9a4db1657f3e4b811f
    RunGetDictionariesTest(GetParam().accept_languages,
                           GetParam().spellcheck_dictionaries,
                           GetParam().expected_dictionaries);
-@@ -440,16 +431,7 @@ std::ostream& operator<<(std::ostream& out,
+@@ -431,15 +423,7 @@ std::ostream& operator<<(std::ostream& out,
  
  class SpellcheckServiceWindowsDictionaryMappingUnitTest
      : public SpellcheckServiceHybridUnitTestBase,
@@ -88,9 +85,8 @@ index f528150f455103828c463c28b302f671f100d533..18566653b1cdca9a4db1657f3e4b811f
 -  void InitFeatures() override {
 -    // Disable kWinDelaySpellcheckServiceInit, as the case where it's enabled
 -    // is tested in SpellcheckServiceWindowsDictionaryMappingUnitTestDelayInit.
--    feature_list_.InitWithFeatures(
--        /*enabled_features=*/{spellcheck::kWinUseBrowserSpellChecker},
--        /*disabled_features=*/{spellcheck::kWinDelaySpellcheckServiceInit});
+-    feature_list_.InitAndDisableFeature(
+-        spellcheck::kWinDelaySpellcheckServiceInit);
 -  }
 -};
 +      public testing::WithParamInterface<DictionaryMappingTestCase> {};
@@ -98,10 +94,10 @@ index f528150f455103828c463c28b302f671f100d533..18566653b1cdca9a4db1657f3e4b811f
  static const DictionaryMappingTestCase kHybridDictionaryMappingsParams[] = {
      DictionaryMappingTestCase({"en-CA", "en-CA", "en-CA", "en", "en"}),
 diff --git a/components/spellcheck/common/spellcheck_features.cc b/components/spellcheck/common/spellcheck_features.cc
-index 0f17118a967852309b42c74d5c41516df3288d73..5be8a0b6a4472eee426c1af1342c86158630ac37 100644
+index c1b7636ea528c8162d71e2f71b2414e3ebb7a9f8..4927c08e372338619f8c43d693a8cf6196101933 100644
 --- a/components/spellcheck/common/spellcheck_features.cc
 +++ b/components/spellcheck/common/spellcheck_features.cc
-@@ -34,7 +34,7 @@ BASE_FEATURE(kWinUseBrowserSpellChecker,
+@@ -43,7 +43,7 @@ ScopedDisableBrowserSpellCheckerForTesting::
  
  BASE_FEATURE(kWinDelaySpellcheckServiceInit,
               "WinDelaySpellcheckServiceInit",

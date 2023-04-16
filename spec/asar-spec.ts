@@ -3,10 +3,10 @@ import * as path from 'path';
 import * as url from 'url';
 import { Worker } from 'worker_threads';
 import { BrowserWindow, ipcMain } from 'electron/main';
-import { closeAllWindows } from './window-helpers';
-import { emittedOnce } from './events-helpers';
-import { getRemoteContext, ifdescribe, itremote, useRemoteContext } from './spec-helpers';
+import { closeAllWindows } from './lib/window-helpers';
+import { getRemoteContext, ifdescribe, itremote, useRemoteContext } from './lib/spec-helpers';
 import * as importedFs from 'fs';
+import { once } from 'events';
 
 const features = process._linkedBinding('electron_common_features');
 
@@ -32,7 +32,7 @@ describe('asar package', () => {
         }
       });
       const p = path.resolve(asarDir, 'web.asar', 'index.html');
-      const dirnameEvent = emittedOnce(ipcMain, 'dirname');
+      const dirnameEvent = once(ipcMain, 'dirname');
       w.loadFile(p);
       const [, dirname] = await dirnameEvent;
       expect(dirname).to.equal(path.dirname(p));
@@ -53,7 +53,7 @@ describe('asar package', () => {
         }
       });
       const p = path.resolve(asarDir, 'script.asar', 'index.html');
-      const ping = emittedOnce(ipcMain, 'ping');
+      const ping = once(ipcMain, 'ping');
       w.loadFile(p);
       const [, message] = await ping;
       expect(message).to.equal('pong');
@@ -77,7 +77,7 @@ describe('asar package', () => {
       });
       const p = path.resolve(asarDir, 'video.asar', 'index.html');
       w.loadFile(p);
-      const [, message, error] = await emittedOnce(ipcMain, 'asar-video');
+      const [, message, error] = await once(ipcMain, 'asar-video');
       if (message === 'ended') {
         expect(error).to.be.null();
       } else if (message === 'error') {
@@ -163,7 +163,7 @@ describe('asar package', function () {
       fs = require('fs')
       path = require('path')
       asarDir = ${JSON.stringify(asarDir)}
-    
+
       // This is used instead of util.promisify for some tests to dodge the
       // util.promisify.custom behavior.
       promisify = (f) => {
@@ -174,7 +174,7 @@ describe('asar package', function () {
           })
         })
       }
-    
+
       null
     `
   });
@@ -899,7 +899,7 @@ describe('asar package', function () {
         const p = path.join(asarDir, 'a.asar');
         const dirs = fs.readdirSync(p, { withFileTypes: true });
         for (const dir of dirs) {
-          expect(dir instanceof fs.Dirent).to.be.true();
+          expect(dir).to.be.an.instanceof(fs.Dirent);
         }
         const names = dirs.map(a => a.name);
         expect(names).to.deep.equal(['dir1', 'dir2', 'dir3', 'file1', 'file2', 'file3', 'link1', 'link2', 'ping.js']);
@@ -909,7 +909,7 @@ describe('asar package', function () {
         const p = path.join(asarDir, 'a.asar', 'dir3');
         const dirs = fs.readdirSync(p, { withFileTypes: true });
         for (const dir of dirs) {
-          expect(dir instanceof fs.Dirent).to.be.true();
+          expect(dir).to.be.an.instanceof(fs.Dirent);
         }
         const names = dirs.map(a => a.name);
         expect(names).to.deep.equal(['file1', 'file2', 'file3']);
@@ -941,7 +941,7 @@ describe('asar package', function () {
 
         const dirs = await promisify(fs.readdir)(p, { withFileTypes: true });
         for (const dir of dirs) {
-          expect(dir instanceof fs.Dirent).to.be.true();
+          expect(dir).to.be.an.instanceof(fs.Dirent);
         }
 
         const names = dirs.map((a: any) => a.name);
@@ -965,6 +965,32 @@ describe('asar package', function () {
         const err = await new Promise<any>(resolve => fs.readdir(p, resolve));
         expect(err.code).to.equal('ENOENT');
       });
+
+      it('handles null for options', function (done) {
+        const p = path.join(asarDir, 'a.asar', 'dir1');
+        fs.readdir(p, null, function (err, dirs) {
+          try {
+            expect(err).to.be.null();
+            expect(dirs).to.deep.equal(['file1', 'file2', 'file3', 'link1', 'link2']);
+            done();
+          } catch (e) {
+            done(e);
+          }
+        });
+      });
+
+      it('handles undefined for options', function (done) {
+        const p = path.join(asarDir, 'a.asar', 'dir1');
+        fs.readdir(p, undefined, function (err, dirs) {
+          try {
+            expect(err).to.be.null();
+            expect(dirs).to.deep.equal(['file1', 'file2', 'file3', 'link1', 'link2']);
+            done();
+          } catch (e) {
+            done(e);
+          }
+        });
+      });
     });
 
     describe('fs.promises.readdir', function () {
@@ -978,7 +1004,7 @@ describe('asar package', function () {
         const p = path.join(asarDir, 'a.asar');
         const dirs = await fs.promises.readdir(p, { withFileTypes: true });
         for (const dir of dirs) {
-          expect(dir instanceof fs.Dirent).to.be.true();
+          expect(dir).to.be.an.instanceof(fs.Dirent);
         }
         const names = dirs.map(a => a.name);
         expect(names).to.deep.equal(['dir1', 'dir2', 'dir3', 'file1', 'file2', 'file3', 'link1', 'link2', 'ping.js']);
@@ -1384,8 +1410,8 @@ describe('asar package', function () {
         expect(process.noAsar).to.be.false();
       });
     });
-    /*
 
+    /*
     describe('process.env.ELECTRON_NO_ASAR', function () {
       before(function () {
         if (!features.isRunAsNodeEnabled()) {
@@ -1488,7 +1514,7 @@ describe('asar package', function () {
     /*
     ifit(features.isRunAsNodeEnabled())('is available in forked scripts', async function () {
       const child = ChildProcess.fork(path.join(fixtures, 'module', 'original-fs.js'));
-      const message = emittedOnce(child, 'message');
+      const message = once(child, 'message');
       child.send('message');
       const [msg] = await message;
       expect(msg).to.equal('object');

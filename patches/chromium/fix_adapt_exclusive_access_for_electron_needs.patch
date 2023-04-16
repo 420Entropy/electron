@@ -16,10 +16,10 @@ Linux or Windows to un-fullscreen in some circumstances without this
 change.
 
 diff --git a/chrome/browser/ui/exclusive_access/fullscreen_controller.cc b/chrome/browser/ui/exclusive_access/fullscreen_controller.cc
-index fc36b60182f6b1d72dc8ea8a7de4ed6adaf575d5..5e59033fe91d6e33a4ad04b927daeefeb40b8b6f 100644
+index c9d65125cee23ed0545608d6acde964f786d1b70..25ce25ed55c903af727e12e7bfdd86984c4273e4 100644
 --- a/chrome/browser/ui/exclusive_access/fullscreen_controller.cc
 +++ b/chrome/browser/ui/exclusive_access/fullscreen_controller.cc
-@@ -17,12 +17,16 @@
+@@ -16,12 +16,16 @@
  #include "build/build_config.h"
  #include "chrome/browser/app_mode/app_mode_utils.h"
  #include "chrome/browser/profiles/profile.h"
@@ -34,8 +34,8 @@ index fc36b60182f6b1d72dc8ea8a7de4ed6adaf575d5..5e59033fe91d6e33a4ad04b927daeefe
  #include "chrome/browser/ui/tabs/tab_strip_model.h"
 +#endif
  #include "chrome/common/chrome_switches.h"
+ #include "content/public/browser/fullscreen_types.h"
  #include "content/public/browser/navigation_details.h"
- #include "content/public/browser/navigation_entry.h"
 @@ -180,10 +184,12 @@ void FullscreenController::EnterFullscreenModeForTab(
      return;
    }
@@ -63,19 +63,22 @@ index fc36b60182f6b1d72dc8ea8a7de4ed6adaf575d5..5e59033fe91d6e33a4ad04b927daeefe
  
    if (MaybeToggleFullscreenWithinTab(web_contents, false)) {
      // During tab capture of fullscreen-within-tab views, the browser window
-@@ -295,9 +303,11 @@ void FullscreenController::ExitFullscreenModeForTab(WebContents* web_contents) {
+@@ -295,12 +303,14 @@ void FullscreenController::ExitFullscreenModeForTab(WebContents* web_contents) {
  void FullscreenController::FullscreenTabOpeningPopup(
      content::WebContents* opener,
      content::WebContents* popup) {
 +#if 0
-   DCHECK_EQ(exclusive_access_tab(), opener);
-   DCHECK(popunder_preventer_);
-   popunder_preventer_->AddPotentialPopunder(popup);
+   if (popunder_preventer_) {
+     DCHECK_EQ(exclusive_access_tab(), opener);
+     popunder_preventer_->AddPotentialPopunder(popup);
+   } else {
+     DCHECK(IsFullscreenWithinTab(opener));
+   }
 +#endif
  }
  
  void FullscreenController::OnTabDeactivated(
-@@ -471,18 +481,17 @@ void FullscreenController::EnterFullscreenModeInternal(
+@@ -476,18 +486,17 @@ void FullscreenController::EnterFullscreenModeInternal(
    // Do not enter fullscreen mode if disallowed by pref. This prevents the user
    // from manually entering fullscreen mode and also disables kiosk mode on
    // desktop platforms.
@@ -99,7 +102,7 @@ index fc36b60182f6b1d72dc8ea8a7de4ed6adaf575d5..5e59033fe91d6e33a4ad04b927daeefe
    if (option == TAB) {
      url = GetRequestingOrigin();
      tab_fullscreen_ = true;
-@@ -515,6 +524,7 @@ void FullscreenController::EnterFullscreenModeInternal(
+@@ -520,6 +529,7 @@ void FullscreenController::EnterFullscreenModeInternal(
      if (!extension_caused_fullscreen_.is_empty())
        url = extension_caused_fullscreen_;
    }
@@ -107,7 +110,7 @@ index fc36b60182f6b1d72dc8ea8a7de4ed6adaf575d5..5e59033fe91d6e33a4ad04b927daeefe
  
    if (option == BROWSER)
      base::RecordAction(base::UserMetricsAction("ToggleFullscreen"));
-@@ -536,12 +546,12 @@ void FullscreenController::ExitFullscreenModeInternal() {
+@@ -541,12 +551,12 @@ void FullscreenController::ExitFullscreenModeInternal() {
    RecordExitingUMA();
    toggled_into_fullscreen_ = false;
    started_fullscreen_transition_ = true;
@@ -124,10 +127,10 @@ index fc36b60182f6b1d72dc8ea8a7de4ed6adaf575d5..5e59033fe91d6e33a4ad04b927daeefe
    extension_caused_fullscreen_ = GURL();
  
 diff --git a/chrome/browser/ui/exclusive_access/fullscreen_controller.h b/chrome/browser/ui/exclusive_access/fullscreen_controller.h
-index 232938c7317c5feba8ce1f8b9f3f0dbb025a6778..c0a154352dfecf625cdb709d2fb579fed3452b2b 100644
+index 5ae306dd4e2d94f47b68098d6bdc84c3faca5d5d..99b45994c56d8a179c6b26ac2021b1285b618685 100644
 --- a/chrome/browser/ui/exclusive_access/fullscreen_controller.h
 +++ b/chrome/browser/ui/exclusive_access/fullscreen_controller.h
-@@ -246,10 +246,12 @@ class FullscreenController : public ExclusiveAccessControllerBase {
+@@ -245,10 +245,12 @@ class FullscreenController : public ExclusiveAccessControllerBase {
    // Used in testing to set the state to tab fullscreen.
    bool is_tab_fullscreen_for_testing_ = false;
  

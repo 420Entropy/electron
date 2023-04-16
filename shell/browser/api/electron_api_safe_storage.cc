@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-#include "components/os_crypt/os_crypt.h"
+#include "components/os_crypt/sync/os_crypt.h"
 #include "shell/browser/browser.h"
 #include "shell/common/gin_converters/base_converter.h"
 #include "shell/common/gin_converters/callback_converter.h"
@@ -131,4 +131,4 @@ void Initialize(v8::Local<v8::Object> exports,
   dict.SetMethod("decryptString", &electron::safestorage::DecryptString);
 }
 
-NODE_LINKED_MODULE_CONTEXT_AWARE(electron_browser_safe_storage, Initialize)
+NODE_LINKED_BINDING_CONTEXT_AWARE(electron_browser_safe_storage, Initialize)

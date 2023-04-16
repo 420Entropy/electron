@@ -39,7 +39,7 @@ index 91a65a1e700cf1accb8e4541e0ceca4e0a734b16..323b9b48214aa013ad8f7da2f63cca2e
  
  }  // namespace base
 diff --git a/base/mac/foundation_util.mm b/base/mac/foundation_util.mm
-index e38a02b3f0eed139653eaa82b6a09167b8658d81..071e699b23b99abd96a8a1ef2acbdca5f979c2d4 100644
+index d2b217adce962850647ddfd7898414c86b90baa4..45c81cebf3e776f2ca9de34252971ad5e959d915 100644
 --- a/base/mac/foundation_util.mm
 +++ b/base/mac/foundation_util.mm
 @@ -28,12 +28,6 @@
@@ -47,7 +47,7 @@ index e38a02b3f0eed139653eaa82b6a09167b8658d81..071e699b23b99abd96a8a1ef2acbdca5
  CFTypeID SecKeyGetTypeID();
  #if !BUILDFLAG(IS_IOS)
 -// The NSFont/CTFont toll-free bridging is broken before 10.15.
--// http://www.openradar.me/15341349 rdar://15341349
+-// https://openradar.appspot.com/15341349
 -//
 -// TODO(https://crbug.com/1076527): This is fixed in 10.15. When 10.15 is the
 -// minimum OS for Chromium, remove this SPI declaration.
@@ -55,7 +55,7 @@ index e38a02b3f0eed139653eaa82b6a09167b8658d81..071e699b23b99abd96a8a1ef2acbdca5
  #endif
  }  // extern "C"
  
-@@ -315,8 +309,7 @@ void SetBaseBundleID(const char* new_base_bundle_id) {
+@@ -323,8 +317,7 @@ void SetBaseBundleID(const char* new_base_bundle_id) {
        const_cast<NSFont*>(reinterpret_cast<const NSFont*>(cf_val));
    DCHECK(!cf_val ||
           CTFontGetTypeID() == CFGetTypeID(cf_val) ||
@@ -65,7 +65,7 @@ index e38a02b3f0eed139653eaa82b6a09167b8658d81..071e699b23b99abd96a8a1ef2acbdca5
    return ns_val;
  }
  
-@@ -387,9 +380,6 @@ CTFontRef NSToCFCast(NSFont* ns_val) {
+@@ -397,9 +390,6 @@ CTFontRef NSToCFCast(NSFont* ns_val) {
      return (CTFontRef)(cf_val);
    }
  
@@ -76,10 +76,10 @@ index e38a02b3f0eed139653eaa82b6a09167b8658d81..071e699b23b99abd96a8a1ef2acbdca5
    if ([ns_val isKindOfClass:[NSFont class]]) {
      return (CTFontRef)(cf_val);
 diff --git a/base/process/launch_mac.cc b/base/process/launch_mac.cc
-index f860be6fbb6caf166f4808772a490ebba9cd7f08..d1b588346e106b032045b1a33ccc469c479b8f03 100644
+index b9f62726f3808636bdb513ad10d89277b7837b82..eada168aff54aebf84e80a2df5363fe77311347e 100644
 --- a/base/process/launch_mac.cc
 +++ b/base/process/launch_mac.cc
-@@ -19,14 +19,19 @@
+@@ -20,14 +20,19 @@
  #include "base/threading/scoped_blocking_call.h"
  #include "base/threading/thread_restrictions.h"
  #include "base/trace_event/base_tracing.h"
@@ -99,7 +99,7 @@ index f860be6fbb6caf166f4808772a490ebba9cd7f08..d1b588346e106b032045b1a33ccc469c
  
  int responsibility_spawnattrs_setdisclaim(posix_spawnattr_t attrs, int disclaim)
      API_AVAILABLE(macosx(10.14));
-@@ -95,13 +100,27 @@ class PosixSpawnFileActions {
+@@ -98,13 +103,27 @@ class PosixSpawnFileActions {
  };
  
  int ChangeCurrentThreadDirectory(const char* path) {
@@ -127,22 +127,17 @@ index f860be6fbb6caf166f4808772a490ebba9cd7f08..d1b588346e106b032045b1a33ccc469c
  }
  
  struct GetAppOutputOptions {
-@@ -221,11 +240,13 @@ Process LaunchProcess(const std::vector<std::string>& argv,
+@@ -224,7 +243,7 @@ Process LaunchProcess(const std::vector<std::string>& argv,
      file_actions.Inherit(STDERR_FILENO);
    }
  
+-#if BUILDFLAG(IS_MAC)
 +#if 0
    if (options.disclaim_responsibility) {
      if (__builtin_available(macOS 10.14, *)) {
        DPSXCHECK(responsibility_spawnattrs_setdisclaim(attr.get(), 1));
-     }
-   }
-+#endif
- 
-   std::vector<char*> argv_cstr;
-   argv_cstr.reserve(argv.size() + 1);
 diff --git a/media/audio/mac/audio_low_latency_input_mac.cc b/media/audio/mac/audio_low_latency_input_mac.cc
-index fa83b9cd51c1d3ad1ccee49772424390ef05e46f..604bc712f14283282253bd88580123160483f530 100644
+index 0b52fe6bd877347ac79a780aefc3c5c4b382f80e..5313bf169fdd6f86433db0fefe704f52011da861 100644
 --- a/media/audio/mac/audio_low_latency_input_mac.cc
 +++ b/media/audio/mac/audio_low_latency_input_mac.cc
 @@ -31,19 +31,23 @@

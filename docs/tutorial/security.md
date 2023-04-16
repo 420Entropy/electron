@@ -9,7 +9,7 @@ toc_max_heading_level: 3
 
 :::info Reporting security issues
 For information on how to properly disclose an Electron vulnerability,
-see [SECURITY.md](https://github.com/electron/electron/tree/main/SECURITY.md).
+see [SECURITY.md](https://github.com/electron/electron/blob/main/SECURITY.md).
 
 For upstream Chromium vulnerabilities: Electron keeps up to date with alternating
 Chromium releases. For more information, see the
@@ -44,7 +44,7 @@ your responsibility to ensure that the code is not malicious.
 
 It is important to remember that the security of your Electron application is
 the result of the overall security of the framework foundation
-(*Chromium*, *Node.js*), Electron itself, all NPM dependencies and
+(_Chromium_, _Node.js_), Electron itself, all NPM dependencies and
 your code. As such, it is your responsibility to follow a few important best
 practices:
 
@@ -52,7 +52,7 @@ practices:
 When releasing your product, you’re also shipping a bundle composed of Electron,
 Chromium shared library and Node.js. Vulnerabilities affecting these components
 may impact the security of your application. By updating Electron to the latest
-version, you ensure that critical vulnerabilities (such as *nodeIntegration bypasses*)
+version, you ensure that critical vulnerabilities (such as _nodeIntegration bypasses_)
 are already patched and cannot be exploited in your application. For more information,
 see "[Use a current version of Electron](#16-use-a-current-version-of-electron)".
 

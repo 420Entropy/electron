@@ -8,8 +8,8 @@
 #include <memory>
 #include <vector>
 
-#include "base/callback.h"
 #include "base/containers/id_map.h"
+#include "base/functional/callback.h"
 #include "content/public/browser/permission_controller_delegate.h"
 #include "gin/dictionary.h"
 #include "shell/browser/electron_browser_context.h"
@@ -139,6 +139,10 @@ class ElectronPermissionManager : public content::PermissionControllerDelegate {
       blink::PermissionType permission,
       content::RenderProcessHost* render_process_host,
       const GURL& worker_origin) override;
+  blink::mojom::PermissionStatus GetPermissionStatusForEmbeddedRequester(
+      blink::PermissionType permission,
+      content::RenderFrameHost* render_frame_host,
+      const url::Origin& requesting_origin) override;
   SubscriptionId SubscribePermissionStatusChange(
       blink::PermissionType permission,
       content::RenderProcessHost* render_process_host,

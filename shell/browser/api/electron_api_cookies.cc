@@ -128,10 +128,13 @@ bool MatchesCookie(const base::Value::Dict& filter,
       !MatchesDomain(*str, cookie.Domain()))
     return false;
   absl::optional<bool> secure_filter = filter.FindBool("secure");
-  if (secure_filter && *secure_filter == cookie.IsSecure())
+  if (secure_filter && *secure_filter != cookie.IsSecure())
     return false;
   absl::optional<bool> session_filter = filter.FindBool("session");
-  if (session_filter && *session_filter != !cookie.IsPersistent())
+  if (session_filter && *session_filter == cookie.IsPersistent())
+    return false;
+  absl::optional<bool> httpOnly_filter = filter.FindBool("httpOnly");
+  if (httpOnly_filter && *httpOnly_filter != cookie.IsHttpOnly())
     return false;
   return true;
 }
@@ -177,7 +180,7 @@ std::string InclusionStatusToString(net::CookieInclusionStatus status) {
     return "Failed to parse cookie";
   if (status.HasExclusionReason(
           net::CookieInclusionStatus::EXCLUDE_INVALID_DOMAIN))
-    return "Failed to get cookie domain";
+    return "Failed to set cookie with an invalid domain attribute";
   if (status.HasExclusionReason(
           net::CookieInclusionStatus::EXCLUDE_INVALID_PREFIX))
     return "Failed because the cookie violated prefix rules.";
@@ -315,19 +318,24 @@ v8::Local<v8::Promise> Cookies::Set(v8::Isolate* isolate,
     return handle;
   }
 
+  net::CookieInclusionStatus status;
   auto canonical_cookie = net::CanonicalCookie::CreateSanitizedCookie(
       url, name ? *name : "", value ? *value : "", domain ? *domain : "",
       path ? *path : "", ParseTimeProperty(details.FindDouble("creationDate")),
       ParseTimeProperty(details.FindDouble("expirationDate")),
       ParseTimeProperty(details.FindDouble("lastAccessDate")), secure,
       http_only, same_site, net::COOKIE_PRIORITY_DEFAULT, same_party,
-      absl::nullopt);
+      absl::nullopt, &status);
+
   if (!canonical_cookie || !canonical_cookie->IsCanonical()) {
-    promise.RejectWithErrorMessage(
-        InclusionStatusToString(net::CookieInclusionStatus(
-            net::CookieInclusionStatus::EXCLUDE_FAILURE_TO_STORE)));
+    promise.RejectWithErrorMessage(InclusionStatusToString(
+        !status.IsInclude()
+            ? status
+            : net::CookieInclusionStatus(
+                  net::CookieInclusionStatus::EXCLUDE_FAILURE_TO_STORE)));
     return handle;
   }
+
   net::CookieOptions options;
   if (http_only) {
     options.set_include_httponly();

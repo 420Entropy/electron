@@ -9,12 +9,12 @@
 #include <utility>
 #include <vector>
 
-#include "base/callback_helpers.h"
 #include "base/command_line.h"
 #include "base/containers/span.h"
 #include "base/environment.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
+#include "base/functional/callback_helpers.h"
 #include "base/path_service.h"
 #include "base/system/sys_info.h"
 #include "base/values.h"
@@ -533,7 +533,7 @@ bool NotificationCallbackWrapper(
     callback.Run(cmd, cwd, std::move(additional_data));
   } else {
     scoped_refptr<base::SingleThreadTaskRunner> task_runner(
-        base::ThreadTaskRunnerHandle::Get());
+        base::SingleThreadTaskRunner::GetCurrentDefault());
 
     // Make a copy of the span so that the data isn't lost.
     task_runner->PostTask(FROM_HERE,
@@ -607,13 +607,13 @@ int ImportIntoCertStore(CertificateManagerModel* model, base::Value options) {
   net::ScopedCERTCertificateList imported_certs;
   int rv = -1;
 
-  std::string* cert_path_ptr = options.FindStringKey("certificate");
-  if (cert_path_ptr)
-    cert_path = *cert_path_ptr;
+  if (const base::Value::Dict* dict = options.GetIfDict(); dict != nullptr) {
+    if (const std::string* str = dict->FindString("certificate"); str)
+      cert_path = *str;
 
-  std::string* pwd = options.FindStringKey("password");
-  if (pwd)
-    password = base::UTF8ToUTF16(*pwd);
+    if (const std::string* str = dict->FindString("password"); str)
+      password = base::UTF8ToUTF16(*str);
+  }
 
   if (!cert_path.empty()) {
     if (base::ReadFileToString(base::FilePath(cert_path), &file_data)) {
@@ -1865,4 +1865,4 @@ void Initialize(v8::Local<v8::Object> exports,
 
 }  // namespace
 
-NODE_LINKED_MODULE_CONTEXT_AWARE(electron_browser_app, Initialize)
+NODE_LINKED_BINDING_CONTEXT_AWARE(electron_browser_app, Initialize)

@@ -17,7 +17,7 @@ Upstreams:
 - https://github.com/nodejs/node/pull/39136
 
 diff --git a/src/crypto/crypto_cipher.cc b/src/crypto/crypto_cipher.cc
-index b907e9e9cdc4e407ee8361cebce2dc168b8c0ed3..804baa633cd7d1a57a8248b30cb1c4f65d169bd9 100644
+index 2685f5ea0bea998094453a5a29d23b1aaae55667..0ad4ba47b50a87bcf9e31a73c20a3a51be4ab96e 100644
 --- a/src/crypto/crypto_cipher.cc
 +++ b/src/crypto/crypto_cipher.cc
 @@ -27,7 +27,8 @@ using v8::Value;
@@ -31,10 +31,10 @@ index b907e9e9cdc4e407ee8361cebce2dc168b8c0ed3..804baa633cd7d1a57a8248b30cb1c4f6
    case EVP_CIPH_GCM_MODE:
  #ifndef OPENSSL_NO_OCB
 diff --git a/src/crypto/crypto_common.cc b/src/crypto/crypto_common.cc
-index 9777737126551035430178a2e0956769865b9b1a..c13185c32a26ac9facb12106c4e756640e35fb93 100644
+index a1d0dfc16ce23503b0985ec6e185fb54758c8893..85daa8c8c12c28571f0ee739868549335cb1f730 100644
 --- a/src/crypto/crypto_common.cc
 +++ b/src/crypto/crypto_common.cc
-@@ -164,7 +164,7 @@ const char* GetClientHelloALPN(const SSLPointer& ssl) {
+@@ -159,7 +159,7 @@ const char* GetClientHelloALPN(const SSLPointer& ssl) {
    const unsigned char* buf;
    size_t len;
    size_t rem;
@@ -43,7 +43,7 @@ index 9777737126551035430178a2e0956769865b9b1a..c13185c32a26ac9facb12106c4e75664
    if (!SSL_client_hello_get0_ext(
            ssl.get(),
            TLSEXT_TYPE_application_layer_protocol_negotiation,
-@@ -177,13 +177,15 @@ const char* GetClientHelloALPN(const SSLPointer& ssl) {
+@@ -172,13 +172,15 @@ const char* GetClientHelloALPN(const SSLPointer& ssl) {
    len = (buf[0] << 8) | buf[1];
    if (len + 2 != rem) return nullptr;
    return reinterpret_cast<const char*>(buf + 3);
@@ -60,7 +60,7 @@ index 9777737126551035430178a2e0956769865b9b1a..c13185c32a26ac9facb12106c4e75664
    if (!SSL_client_hello_get0_ext(
            ssl.get(),
            TLSEXT_TYPE_server_name,
-@@ -205,15 +207,20 @@ const char* GetClientHelloServerName(const SSLPointer& ssl) {
+@@ -200,15 +202,20 @@ const char* GetClientHelloServerName(const SSLPointer& ssl) {
    if (len + 2 > rem)
      return nullptr;
    return reinterpret_cast<const char*>(buf + 5);
@@ -84,7 +84,7 @@ index 9777737126551035430178a2e0956769865b9b1a..c13185c32a26ac9facb12106c4e75664
  
  const char* X509ErrorCode(long err) {  // NOLINT(runtime/int)
    const char* code = "UNSPECIFIED";
-@@ -1044,14 +1051,14 @@ MaybeLocal<Array> GetClientHelloCiphers(
+@@ -1039,14 +1046,14 @@ MaybeLocal<Array> GetClientHelloCiphers(
      Environment* env,
      const SSLPointer& ssl) {
    EscapableHandleScope scope(env->isolate());
@@ -191,7 +191,7 @@ index dd69323b80076d7333b80453c9cc9ef5b680ce27..6431b768c83fa27b2287588e936f93ae
      UNREACHABLE();
    }
 diff --git a/src/crypto/crypto_dsa.cc b/src/crypto/crypto_dsa.cc
-index 862c091b05f5886479cedb8b95b756e4fd1547ee..c4cf3a59677ae9640e444f2649f89de3ab3c5c9e 100644
+index 6839283fbf4ca7ee7dd586e749c80671ad965658..4e186abdf13613cbe576da5b7d547408c0ee9f93 100644
 --- a/src/crypto/crypto_dsa.cc
 +++ b/src/crypto/crypto_dsa.cc
 @@ -40,7 +40,7 @@ namespace crypto {
@@ -228,7 +228,7 @@ index 2f9e9aacb1e652202d72c69b46f8e76d6c5405a8..5f19c38a78e37d3e8d92bcc20ae1357f
      THROW_ERR_CRYPTO_OPERATION_FAILED(env, "could not generate prime");
      return Nothing<bool>();
 diff --git a/src/crypto/crypto_rsa.cc b/src/crypto/crypto_rsa.cc
-index 4eacb1f142b6e04d6db17ca267d1fb6814666a01..79ad930c8bea22cf1ca645373438cc2706777c12 100644
+index 47a42246eddfc795b735f5efd08edf2832bbf6c1..7e6afaa1d3a4612fd567924b40438a318ac93bac 100644
 --- a/src/crypto/crypto_rsa.cc
 +++ b/src/crypto/crypto_rsa.cc
 @@ -610,10 +610,11 @@ Maybe<bool> GetRsaKeyDetail(
@@ -248,10 +248,10 @@ index 4eacb1f142b6e04d6db17ca267d1fb6814666a01..79ad930c8bea22cf1ca645373438cc27
  
        if (target
 diff --git a/src/crypto/crypto_util.cc b/src/crypto/crypto_util.cc
-index f1bb7a9c7aadbc061f3de4de72f13f45a2195bee..4ea6d851450c46659e7e19f50c614419a46b30c0 100644
+index 8ead5fcbb55afbdf657603e85fddf28ac4874e04..e12ccf8162ee799beb3d4f0832054b5c4d397631 100644
 --- a/src/crypto/crypto_util.cc
 +++ b/src/crypto/crypto_util.cc
-@@ -495,24 +495,15 @@ Maybe<bool> Decorate(Environment* env, Local<Object> obj,
+@@ -507,24 +507,15 @@ Maybe<bool> Decorate(Environment* env, Local<Object> obj,
      V(BIO)                                                                    \
      V(PKCS7)                                                                  \
      V(X509V3)                                                                 \
@@ -277,7 +277,7 @@ index f1bb7a9c7aadbc061f3de4de72f13f45a2195bee..4ea6d851450c46659e7e19f50c614419
      V(USER)                                                                   \
  
  #define V(name) case ERR_LIB_##name: lib = #name "_"; break;
-@@ -686,7 +677,7 @@ void SecureBuffer(const FunctionCallbackInfo<Value>& args) {
+@@ -698,7 +689,7 @@ void SecureBuffer(const FunctionCallbackInfo<Value>& args) {
    CHECK(args[0]->IsUint32());
    Environment* env = Environment::GetCurrent(args);
    uint32_t len = args[0].As<Uint32>()->Value();
@@ -286,7 +286,7 @@ index f1bb7a9c7aadbc061f3de4de72f13f45a2195bee..4ea6d851450c46659e7e19f50c614419
    if (data == nullptr) {
      // There's no memory available for the allocation.
      // Return nothing.
-@@ -697,7 +688,7 @@ void SecureBuffer(const FunctionCallbackInfo<Value>& args) {
+@@ -709,7 +700,7 @@ void SecureBuffer(const FunctionCallbackInfo<Value>& args) {
            data,
            len,
            [](void* data, size_t len, void* deleter_data) {
@@ -295,7 +295,7 @@ index f1bb7a9c7aadbc061f3de4de72f13f45a2195bee..4ea6d851450c46659e7e19f50c614419
            },
            data);
    Local<ArrayBuffer> buffer = ArrayBuffer::New(env->isolate(), store);
-@@ -705,10 +696,12 @@ void SecureBuffer(const FunctionCallbackInfo<Value>& args) {
+@@ -717,10 +708,12 @@ void SecureBuffer(const FunctionCallbackInfo<Value>& args) {
  }
  
  void SecureHeapUsed(const FunctionCallbackInfo<Value>& args) {
@@ -309,10 +309,10 @@ index f1bb7a9c7aadbc061f3de4de72f13f45a2195bee..4ea6d851450c46659e7e19f50c614419
  }  // namespace
  
 diff --git a/src/node_metadata.cc b/src/node_metadata.cc
-index a221dcde050ad7b64cf25df1e1b3a3063a6f37e5..acf95e74882dbd65c65de75c933795c597817894 100644
+index ed28871c385532b13e102200ba549bb7d7e901e6..c69d3f1867cd1b86194b109351643d9520c661e7 100644
 --- a/src/node_metadata.cc
 +++ b/src/node_metadata.cc
-@@ -9,7 +9,7 @@
+@@ -13,7 +13,7 @@
  #include "v8.h"
  #include "zlib.h"
  
@@ -322,7 +322,7 @@ index a221dcde050ad7b64cf25df1e1b3a3063a6f37e5..acf95e74882dbd65c65de75c933795c5
  #if NODE_OPENSSL_HAS_QUIC
  #include <openssl/quic.h>
 diff --git a/src/node_metadata.h b/src/node_metadata.h
-index b7cacae4c3d430c888fa7b5c66d8ed822e18f59d..d3b2ba33b06e1ebe140a30c777907f2bdffa098c 100644
+index 2a924141d6edbaade371dd29d553eb1107ff5f75..be37169bb1d5e70e11601ccf00db0552ee3511ed 100644
 --- a/src/node_metadata.h
 +++ b/src/node_metadata.h
 @@ -6,7 +6,7 @@
@@ -335,7 +335,7 @@ index b7cacae4c3d430c888fa7b5c66d8ed822e18f59d..d3b2ba33b06e1ebe140a30c777907f2b
  #if NODE_OPENSSL_HAS_QUIC
  #include <openssl/quic.h>
 diff --git a/src/node_options.cc b/src/node_options.cc
-index e2a051d03c7edefea4a2fc34e841f3ef59931c04..635b8f60806854e4e02be546c40824b9a95b88a2 100644
+index 6eabf78f1b67c8f31a9faac16386e00f2f9427f3..bc3c58b0ce8666f978de39ef57832b077bb181a3 100644
 --- a/src/node_options.cc
 +++ b/src/node_options.cc
 @@ -5,7 +5,7 @@
@@ -348,7 +348,7 @@ index e2a051d03c7edefea4a2fc34e841f3ef59931c04..635b8f60806854e4e02be546c40824b9
  #endif
  
 diff --git a/src/node_options.h b/src/node_options.h
-index 7346fc7441eb3c3c6f8b0ea2d3cafa73308abe14..a13647f171f6e87b5be2f4863c87d981e12a09a2 100644
+index 665ea4ceb779f7c7747e53aba4beba0494fa7ebe..22a346eb23274374d5a5aa4a1b2219e6ebdee48a 100644
 --- a/src/node_options.h
 +++ b/src/node_options.h
 @@ -11,7 +11,7 @@

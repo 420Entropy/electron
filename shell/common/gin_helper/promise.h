@@ -30,6 +30,7 @@ class PromiseBase {
  public:
   explicit PromiseBase(v8::Isolate* isolate);
   PromiseBase(v8::Isolate* isolate, v8::Local<v8::Promise::Resolver> handle);
+  PromiseBase();
   ~PromiseBase();
 
   // disable copy
@@ -118,7 +119,8 @@ class Promise : public PromiseBase {
   v8::Maybe<bool> Resolve(const RT& value) {
     gin_helper::Locker locker(isolate());
     v8::HandleScope handle_scope(isolate());
-    gin_helper::MicrotasksScope microtasks_scope(isolate());
+    gin_helper::MicrotasksScope microtasks_scope(
+        isolate(), GetContext()->GetMicrotaskQueue());
     v8::Context::Scope context_scope(GetContext());
 
     return GetInner()->Resolve(GetContext(),

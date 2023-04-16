@@ -8,8 +8,9 @@
 // python-dbusmock.
 import { expect } from 'chai';
 import * as dbus from 'dbus-native';
-import { ifdescribe, delay } from './spec-helpers';
+import { ifdescribe, startRemoteControlApp } from './lib/spec-helpers';
 import { promisify } from 'util';
+import { setTimeout } from 'timers/promises';
 
 describe('powerMonitor', () => {
   let logindMock: any, dbusMockPowerMonitor: any, getCalls: any, emitSignal: any, reset: any;
@@ -59,7 +60,7 @@ describe('powerMonitor', () => {
         while (retriesRemaining-- > 0) {
           calls = await getCalls();
           if (calls.length > 0) break;
-          await delay(1000);
+          await setTimeout(1000);
         }
         expect(calls).to.be.an('array').that.has.lengthOf(1);
         expect(calls[0].slice(1)).to.deep.equal([
@@ -132,6 +133,11 @@ describe('powerMonitor', () => {
         });
       });
     });
+  });
+
+  it('is usable before app ready', async () => {
+    const remoteApp = await startRemoteControlApp(['--boot-eval=globalThis.initialValue=require("electron").powerMonitor.getSystemIdleTime()']);
+    expect(await remoteApp.remoteEval('globalThis.initialValue')).to.be.a('number');
   });
 
   describe('when powerMonitor module is loaded', () => {

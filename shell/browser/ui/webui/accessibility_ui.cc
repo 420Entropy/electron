@@ -9,9 +9,9 @@
 #include <utility>
 #include <vector>
 
-#include "base/bind.h"
-#include "base/callback_helpers.h"
 #include "base/command_line.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
 #include "base/json/json_writer.h"
 #include "base/strings/escape.h"
 #include "base/strings/pattern.h"
@@ -99,7 +99,7 @@ base::Value::Dict BuildTargetDescriptor(
   target_data.Set(kPidField, static_cast<int>(base::GetProcId(handle)));
   target_data.Set(kFaviconUrlField, favicon_url.spec());
   target_data.Set(kAccessibilityModeField,
-                  static_cast<int>(accessibility_mode.mode()));
+                  static_cast<int>(accessibility_mode.flags()));
   target_data.Set(kTypeField, kPage);
   return target_data;
 }
@@ -282,7 +282,7 @@ void HandleAccessibilityRequestCallback(
     descriptor.Set(kNative, is_native_enabled);
     descriptor.Set(kWeb, is_web_enabled);
     descriptor.Set(kLabelImages, are_accessibility_image_labels_enabled);
-    rvh_list.Append(base::Value(std::move(descriptor)));
+    rvh_list.Append(std::move(descriptor));
   }
 
   data.Set(kPagesField, std::move(rvh_list));
@@ -295,7 +295,7 @@ void HandleAccessibilityRequestCallback(
   data.Set(kBrowsersField, std::move(window_list));
 
   std::string json_string;
-  base::JSONWriter::Write(base::Value(std::move(data)), &json_string);
+  base::JSONWriter::Write(data, &json_string);
 
   std::move(callback).Run(
       base::MakeRefCounted<base::RefCountedString>(std::move(json_string)));
@@ -307,7 +307,9 @@ ElectronAccessibilityUI::ElectronAccessibilityUI(content::WebUI* web_ui)
     : content::WebUIController(web_ui) {
   // Set up the chrome://accessibility source.
   content::WebUIDataSource* html_source =
-      content::WebUIDataSource::Create(chrome::kChromeUIAccessibilityHost);
+      content::WebUIDataSource::CreateAndAdd(
+          web_ui->GetWebContents()->GetBrowserContext(),
+          chrome::kChromeUIAccessibilityHost);
 
   // Add required resources.
   html_source->UseStringsJs();
@@ -318,10 +320,6 @@ ElectronAccessibilityUI::ElectronAccessibilityUI(content::WebUI* web_ui)
       base::BindRepeating(&ShouldHandleAccessibilityRequestCallback),
       base::BindRepeating(&HandleAccessibilityRequestCallback,
                           web_ui->GetWebContents()->GetBrowserContext()));
-
-  content::BrowserContext* browser_context =
-      web_ui->GetWebContents()->GetBrowserContext();
-  content::WebUIDataSource::Add(browser_context, html_source);
 
   web_ui->AddMessageHandler(
       std::make_unique<ElectronAccessibilityUIMessageHandler>());

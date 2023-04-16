@@ -12,7 +12,7 @@ Electron's [autoUpdater](../api/auto-updater.md) module.
 
 ## Using update.electronjs.org
 
-The Electron team maintains [update.electronjs.org], a free and open-source
+The Electron team maintains [update.electronjs.org][], a free and open-source
 webservice that Electron apps can use to self-update. The service is designed
 for Electron apps that meet the following criteria:
 
@@ -21,7 +21,7 @@ for Electron apps that meet the following criteria:
 - Builds are published to [GitHub Releases][gh-releases]
 - Builds are [code-signed](./code-signing.md)
 
-The easiest way to use this service is by installing [update-electron-app],
+The easiest way to use this service is by installing [update-electron-app][],
 a Node.js module preconfigured for use with update.electronjs.org.
 
 Install the module using your Node.js package manager of choice:
@@ -67,7 +67,7 @@ Depending on your needs, you can choose from one of these:
   to minify server cost.
 
 Once you've deployed your update server, you can instrument your app code to receive and
-apply the updates with Electron's [autoUpdater] module.
+apply the updates with Electron's [autoUpdater](../api/auto-updater.md) module.
 
 ### Step 2: Receiving updates in your app
 
@@ -104,8 +104,7 @@ setInterval(() => {
 ```
 
 Once your application is [packaged](./application-distribution.md),
-it will receive an update for each new
-[GitHub Release](https://help.github.com/articles/creating-releases/) that you
+it will receive an update for each new [GitHub Release][gh-releases] that you
 publish.
 
 ### Step 3: Notifying users when updates are available
@@ -155,7 +154,7 @@ server-communication aspect of the process by loading your update from a local d
 [vercel]: https://vercel.com
 [hazel]: https://github.com/vercel/hazel
 [nuts]: https://github.com/GitbookIO/nuts
-[gh-releases]: https://help.github.com/articles/creating-releases/
+[gh-releases]: https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository#creating-a-release
 [electron-release-server]: https://github.com/ArekSredzki/electron-release-server
 [nucleus]: https://github.com/atlassian/nucleus
 [update.electronjs.org]: https://github.com/electron/update.electronjs.org

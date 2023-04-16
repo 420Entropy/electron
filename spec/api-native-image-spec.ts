@@ -1,6 +1,6 @@
 import { expect } from 'chai';
 import { nativeImage } from 'electron/common';
-import { ifdescribe, ifit } from './spec-helpers';
+import { ifdescribe, ifit } from './lib/spec-helpers';
 import * as path from 'path';
 
 describe('nativeImage module', () => {
@@ -446,6 +446,30 @@ describe('nativeImage module', () => {
       const goodSize = { width: 100, height: 100 };
       const result = await nativeImage.createThumbnailFromPath(goodPath, goodSize);
       expect(result.isEmpty()).to.equal(false);
+    });
+
+    it('returns the correct size if larger than the initial image', async () => {
+      // capybara.png is a 128x128 image.
+      const imgPath = path.join(fixturesPath, 'assets', 'capybara.png');
+      const size = { width: 256, height: 256 };
+      const result = await nativeImage.createThumbnailFromPath(imgPath, size);
+      expect(result.getSize()).to.deep.equal(size);
+    });
+
+    it('returns the correct size if is the same as the initial image', async () => {
+      // capybara.png is a 128x128 image.
+      const imgPath = path.join(fixturesPath, 'assets', 'capybara.png');
+      const size = { width: 128, height: 128 };
+      const result = await nativeImage.createThumbnailFromPath(imgPath, size);
+      expect(result.getSize()).to.deep.equal(size);
+    });
+
+    it('returns the correct size if smaller than the initial image', async () => {
+      // capybara.png is a 128x128 image.
+      const imgPath = path.join(fixturesPath, 'assets', 'capybara.png');
+      const maxSize = { width: 64, height: 64 };
+      const result = await nativeImage.createThumbnailFromPath(imgPath, maxSize);
+      expect(result.getSize()).to.deep.equal(maxSize);
     });
   });
 

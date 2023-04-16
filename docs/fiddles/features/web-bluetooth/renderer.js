@@ -1,15 +1,21 @@
-async function testIt() {
+async function testIt () {
   const device = await navigator.bluetooth.requestDevice({
     acceptAllDevices: true
   })
   document.getElementById('device-name').innerHTML = device.name || `ID: ${device.id}`
 }
 
-document.getElementById('clickme').addEventListener('click',testIt)
+document.getElementById('clickme').addEventListener('click', testIt)
+
+function cancelRequest() {
+  window.electronAPI.cancelBluetoothRequest()
+}
+
+document.getElementById('cancel').addEventListener('click', cancelRequest)
 
 window.electronAPI.bluetoothPairingRequest((event, details) => {
   const response = {}
-  
+
   switch (details.pairingKind) {
     case 'confirm': {
       response.confirmed = confirm(`Do you want to connect to device ${details.deviceId}?`)

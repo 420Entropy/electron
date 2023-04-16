@@ -7,7 +7,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as psList from 'ps-list';
 import { AddressInfo } from 'net';
-import { ifdescribe, ifit } from './spec-helpers';
+import { ifdescribe, ifit } from './lib/spec-helpers';
 import * as uuid from 'uuid';
 import { systemPreferences } from 'electron';
 
@@ -29,6 +29,7 @@ ifdescribe(process.platform === 'darwin' && !(process.env.CI && process.arch ===
       if (process.env.CI && !process.env.CIRCLE_PR_NUMBER) {
         throw new Error('No valid signing identity available to run autoUpdater specs');
       }
+
       this.skip();
     } else {
       identity = result.stdout.toString().trim();

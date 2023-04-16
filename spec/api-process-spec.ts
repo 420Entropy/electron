@@ -2,9 +2,9 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { expect } from 'chai';
 import { BrowserWindow } from 'electron';
-import { defer, ifdescribe } from './spec-helpers';
+import { defer, ifdescribe } from './lib/spec-helpers';
 import { app } from 'electron/main';
-import { closeAllWindows } from './window-helpers';
+import { closeAllWindows } from './lib/window-helpers';
 
 describe('process module', () => {
   describe('renderer process', () => {
@@ -204,9 +204,9 @@ describe('process module', () => {
     });
 
     describe('process.takeHeapSnapshot()', () => {
-      // TODO(nornagon): this seems to take a really long time when run in the
+      // DISABLED-FIXME(nornagon): this seems to take a really long time when run in the
       // main process, for unknown reasons.
-      it.skip('returns true on success', () => {
+      it('returns true on success', () => {
         const filePath = path.join(app.getPath('temp'), 'test.heapsnapshot');
         defer(() => {
           try {

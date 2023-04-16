@@ -9,10 +9,12 @@ check out our [Electron Versioning](./electron-versioning.md) doc.
 
 | Electron | Alpha | Beta | Stable | EOL | Chrome | Node | Supported |
 | ------- | ----- | ------- | ------ | ------ | ---- | ---- | ---- |
-| 23.0.0 | 2022-Dec-01 | 2023-Jan-10 | 2023-Feb-07 | TBD | M110 | TBD | ✅ |
-| 22.0.0 | 2022-Sep-29 | 2022-Oct-25 | 2022-Nov-29 | TBD | M108 | v16.17 | ✅ |
-| 21.0.0 | 2022-Aug-04 | 2022-Aug-30 | 2022-Sep-27 | TBD | M106 | v16.16 | ✅ |
-| 20.0.0 | 2022-May-26 | 2022-Jun-21 | 2022-Aug-02 | TBD | M104 | v16.15 | ✅ |
+| 25.0.0 | 2023-Apr-10 | 2023-May-02 | 2023-May-30 | 2023-Dec-05 | M114 | TBD | ✅ |
+| 24.0.0 | 2022-Feb-09 | 2023-Mar-07 | 2023-Apr-04 | 2023-Oct-03 | M112 | v18.14 | ✅ |
+| 23.0.0 | 2022-Dec-01 | 2023-Jan-10 | 2023-Feb-07 | 2023-Aug-08 | M110 | v18.12 | ✅ |
+| 22.0.0 | 2022-Sep-29 | 2022-Oct-25 | 2022-Nov-29 | 2023-Oct-10 | M108 | v16.17 | ✅ |
+| 21.0.0 | 2022-Aug-04 | 2022-Aug-30 | 2022-Sep-27 | 2023-Apr-04 | M106 | v16.16 | 🚫 |
+| 20.0.0 | 2022-May-26 | 2022-Jun-21 | 2022-Aug-02 | 2023-Feb-07 | M104 | v16.15 | 🚫 |
 | 19.0.0 | 2022-Mar-31 | 2022-Apr-26 | 2022-May-24 | 2022-Nov-29 | M102 | v16.14 | 🚫 |
 | 18.0.0 | 2022-Feb-03 | 2022-Mar-03 | 2022-Mar-29 | 2022-Sep-27 | M100 | v16.13 | 🚫 |
 | 17.0.0 | 2021-Nov-18 | 2022-Jan-06 | 2022-Feb-01 | 2022-Aug-02 | M98 | v16.13 | 🚫 |
@@ -63,7 +65,7 @@ the Electron team will drop support back to the latest three stable major versio
 
 :::
 
-The latest three *stable* major versions are supported by the Electron team.
+The latest three _stable_ major versions are supported by the Electron team.
 For example, if the latest release is 6.1.x, then the 5.0.x as well
 as the 4.2.x series are supported. We only support the latest minor release
 for each stable release series. This means that in the case of a security fix,

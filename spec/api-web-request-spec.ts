@@ -1,12 +1,16 @@
 import { expect } from 'chai';
 import * as http from 'http';
+import * as http2 from 'http2';
 import * as qs from 'querystring';
 import * as path from 'path';
+import * as fs from 'fs';
 import * as url from 'url';
 import * as WebSocket from 'ws';
 import { ipcMain, protocol, session, WebContents, webContents } from 'electron/main';
 import { AddressInfo, Socket } from 'net';
-import { emittedOnce } from './events-helpers';
+import { listen, defer } from './lib/spec-helpers';
+import { once } from 'events';
+import { ReadableStream } from 'stream/web';
 
 const fixturesPath = path.resolve(__dirname, 'fixtures');
 
@@ -34,28 +38,47 @@ describe('webRequest module', () => {
     }
   });
   let defaultURL: string;
+  let http2URL: string;
 
-  before((done) => {
+  const certPath = path.join(fixturesPath, 'certificates');
+  const h2server = http2.createSecureServer({
+    key: fs.readFileSync(path.join(certPath, 'server.key')),
+    cert: fs.readFileSync(path.join(certPath, 'server.pem'))
+  }, async (req, res) => {
+    if (req.method === 'POST') {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      res.end(Buffer.concat(chunks).toString('utf8'));
+    } else {
+      res.end('<html></html>');
+    }
+  });
+
+  before(async () => {
     protocol.registerStringProtocol('cors', (req, cb) => cb(''));
-    server.listen(0, '127.0.0.1', () => {
-      const port = (server.address() as AddressInfo).port;
-      defaultURL = `http://127.0.0.1:${port}/`;
-      done();
+    defaultURL = (await listen(server)).url + '/';
+    await new Promise<void>((resolve) => {
+      h2server.listen(0, '127.0.0.1', () => resolve());
     });
+    http2URL = `https://127.0.0.1:${(h2server.address() as AddressInfo).port}/`;
+    console.log(http2URL);
   });
 
   after(() => {
     server.close();
+    h2server.close();
     protocol.unregisterProtocol('cors');
   });
 
-  let contents: WebContents = null as unknown as WebContents;
+  let contents: WebContents;
   // NB. sandbox: true is used because it makes navigations much (~8x) faster.
   before(async () => {
-    contents = (webContents as any).create({ sandbox: true });
+    contents = (webContents as typeof ElectronInternal.WebContents).create({ sandbox: true });
+    // const w = new BrowserWindow({webPreferences: {sandbox: true}})
+    // contents = w.webContents
     await contents.loadFile(path.join(fixturesPath, 'pages', 'fetch.html'));
   });
-  after(() => (contents as any).destroy());
+  after(() => contents.destroy());
 
   async function ajax (url: string, options = {}) {
     return contents.executeJavaScript(`ajax("${url}", ${JSON.stringify(options)})`);
@@ -66,23 +89,34 @@ describe('webRequest module', () => {
       ses.webRequest.onBeforeRequest(null);
     });
 
+    const cancel = (details: Electron.OnBeforeRequestListenerDetails, callback: (response: Electron.CallbackResponse) => void) => {
+      callback({ cancel: true });
+    };
+
     it('can cancel the request', async () => {
-      ses.webRequest.onBeforeRequest((details, callback) => {
-        callback({
-          cancel: true
-        });
-      });
+      ses.webRequest.onBeforeRequest(cancel);
       await expect(ajax(defaultURL)).to.eventually.be.rejected();
     });
 
     it('can filter URLs', async () => {
       const filter = { urls: [defaultURL + 'filter/*'] };
-      ses.webRequest.onBeforeRequest(filter, (details, callback) => {
-        callback({ cancel: true });
-      });
+      ses.webRequest.onBeforeRequest(filter, cancel);
       const { data } = await ajax(`${defaultURL}nofilter/test`);
       expect(data).to.equal('/nofilter/test');
       await expect(ajax(`${defaultURL}filter/test`)).to.eventually.be.rejected();
+    });
+
+    it('can filter URLs and types', async () => {
+      const filter1: Electron.WebRequestFilter = { urls: [defaultURL + 'filter/*'], types: ['xhr'] };
+      ses.webRequest.onBeforeRequest(filter1, cancel);
+      const { data } = await ajax(`${defaultURL}nofilter/test`);
+      expect(data).to.equal('/nofilter/test');
+      await expect(ajax(`${defaultURL}filter/test`)).to.eventually.be.rejected();
+
+      const filter2: Electron.WebRequestFilter = { urls: [defaultURL + 'filter/*'], types: ['stylesheet'] };
+      ses.webRequest.onBeforeRequest(filter2, cancel);
+      expect((await ajax(`${defaultURL}nofilter/test`)).data).to.equal('/nofilter/test');
+      expect((await ajax(`${defaultURL}filter/test`)).data).to.equal('/filter/test');
     });
 
     it('receives details object', async () => {
@@ -152,6 +186,92 @@ describe('webRequest module', () => {
         slashes: true
       });
       await expect(ajax(fileURL)).to.eventually.be.rejected();
+    });
+
+    it('can handle a streaming upload', async () => {
+      // Streaming fetch uploads are only supported on HTTP/2, which is only
+      // supported over TLS, so...
+      session.defaultSession.setCertificateVerifyProc((req, cb) => cb(0));
+      defer(() => {
+        session.defaultSession.setCertificateVerifyProc(null);
+      });
+      const contents = (webContents as typeof ElectronInternal.WebContents).create({ sandbox: true });
+      defer(() => contents.close());
+      await contents.loadURL(http2URL);
+
+      ses.webRequest.onBeforeRequest((details, callback) => {
+        callback({});
+      });
+
+      const result = await contents.executeJavaScript(`
+        const stream = new ReadableStream({
+          async start(controller) {
+            controller.enqueue('hello world');
+            controller.close();
+          },
+        }).pipeThrough(new TextEncoderStream());
+        fetch("${http2URL}", {
+          method: 'POST',
+          body: stream,
+          duplex: 'half',
+        }).then(r => r.text())
+      `);
+      expect(result).to.equal('hello world');
+    });
+
+    it('can handle a streaming upload if the uploadData is read', async () => {
+      // Streaming fetch uploads are only supported on HTTP/2, which is only
+      // supported over TLS, so...
+      session.defaultSession.setCertificateVerifyProc((req, cb) => cb(0));
+      defer(() => {
+        session.defaultSession.setCertificateVerifyProc(null);
+      });
+      const contents = (webContents as typeof ElectronInternal.WebContents).create({ sandbox: true });
+      defer(() => contents.close());
+      await contents.loadURL(http2URL);
+
+      function makeStreamFromPipe (pipe: any): ReadableStream {
+        const buf = new Uint8Array(1024 * 1024 /* 1 MB */);
+        return new ReadableStream({
+          async pull (controller) {
+            try {
+              const rv = await pipe.read(buf);
+              if (rv > 0) {
+                controller.enqueue(buf.subarray(0, rv));
+              } else {
+                controller.close();
+              }
+            } catch (e) {
+              controller.error(e);
+            }
+          }
+        });
+      }
+
+      ses.webRequest.onBeforeRequest(async (details, callback) => {
+        const chunks = [];
+        for await (const chunk of makeStreamFromPipe((details.uploadData[0] as any).body)) { chunks.push(chunk); }
+        callback({});
+      });
+
+      const result = await contents.executeJavaScript(`
+        const stream = new ReadableStream({
+          async start(controller) {
+            controller.enqueue('hello world');
+            controller.close();
+          },
+        }).pipeThrough(new TextEncoderStream());
+        fetch("${http2URL}", {
+          method: 'POST',
+          body: stream,
+          duplex: 'half',
+        }).then(r => r.text())
+      `);
+
+      // NOTE: since the upload stream was consumed by the onBeforeRequest
+      // handler, it can't be used again to upload to the actual server.
+      // This is a limitation of the WebRequest API.
+      expect(result).to.equal('');
     });
   });
 
@@ -489,8 +609,7 @@ describe('webRequest module', () => {
       });
 
       // Start server.
-      await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
-      const port = String((server.address() as AddressInfo).port);
+      const { port } = await listen(server);
 
       // Use a separate session for testing.
       const ses = session.fromPartition('WebRequestWebSocket');
@@ -529,7 +648,7 @@ describe('webRequest module', () => {
         }
       });
 
-      const contents = (webContents as any).create({
+      const contents = (webContents as typeof ElectronInternal.WebContents).create({
         session: ses,
         nodeIntegration: true,
         webSecurity: false,
@@ -548,8 +667,8 @@ describe('webRequest module', () => {
         ses.webRequest.onCompleted(null);
       });
 
-      contents.loadFile(path.join(fixturesPath, 'api', 'webrequest.html'), { query: { port } });
-      await emittedOnce(ipcMain, 'websocket-success');
+      contents.loadFile(path.join(fixturesPath, 'api', 'webrequest.html'), { query: { port: `${port}` } });
+      await once(ipcMain, 'websocket-success');
 
       expect(receivedHeaders['/websocket'].Upgrade[0]).to.equal('websocket');
       expect(receivedHeaders['/'].foo1[0]).to.equal('bar1');

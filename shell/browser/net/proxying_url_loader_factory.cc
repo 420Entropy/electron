@@ -7,9 +7,9 @@
 #include <memory>
 #include <utility>
 
-#include "base/bind.h"
-#include "base/callback_helpers.h"
 #include "base/command_line.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
@@ -806,18 +806,23 @@ void ProxyingURLLoaderFactory::CreateLoaderAndStart(
   }
 
   // Check if user has intercepted this scheme.
-  auto it = intercepted_handlers_.find(request.url.scheme());
-  if (it != intercepted_handlers_.end()) {
-    mojo::PendingRemote<network::mojom::URLLoaderFactory> loader_remote;
-    this->Clone(loader_remote.InitWithNewPipeAndPassReceiver());
+  bool bypass_custom_protocol_handlers =
+      options & kBypassCustomProtocolHandlers;
+  if (!bypass_custom_protocol_handlers) {
+    auto it = intercepted_handlers_.find(request.url.scheme());
+    if (it != intercepted_handlers_.end()) {
+      mojo::PendingRemote<network::mojom::URLLoaderFactory> loader_remote;
+      this->Clone(loader_remote.InitWithNewPipeAndPassReceiver());
 
-    // <scheme, <type, handler>>
-    it->second.second.Run(
-        request, base::BindOnce(&ElectronURLLoaderFactory::StartLoading,
-                                std::move(loader), request_id, options, request,
-                                std::move(client), traffic_annotation,
-                                std::move(loader_remote), it->second.first));
-    return;
+      // <scheme, <type, handler>>
+      it->second.second.Run(
+          request,
+          base::BindOnce(&ElectronURLLoaderFactory::StartLoading,
+                         std::move(loader), request_id, options, request,
+                         std::move(client), traffic_annotation,
+                         std::move(loader_remote), it->second.first));
+      return;
+    }
   }
 
   // The loader of ServiceWorker forbids loading scripts from file:// URLs, and

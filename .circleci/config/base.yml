@@ -4,7 +4,7 @@ parameters:
   run-docs-only:
     type: boolean
     default: false
-  
+
   upload-to-storage:
     type: string
     default: '1'
@@ -54,7 +54,7 @@ executors:
         type: enum
         enum: ["macos.x86.medium.gen2", "large"]
     macos:
-      xcode: 13.3.0
+      xcode: 14.0.0
     resource_class: << parameters.size >>
 
   # Electron Runners
@@ -141,7 +141,7 @@ env-mas-apple-silicon: &env-mas-apple-silicon
 
 env-send-slack-notifications: &env-send-slack-notifications
   NOTIFY_SLACK: true
-  
+
 env-global: &env-global
   ELECTRON_OUT_DIR: Default
 
@@ -218,6 +218,7 @@ step-maybe-cleanup-arm64-mac: &step-maybe-cleanup-arm64-mac
         security delete-generic-password -l "Chromium Safe Storage" || echo "✓ Keychain does not contain password from tests"
         security delete-generic-password -l "Electron Test Main Safe Storage" || echo "✓ Keychain does not contain password from tests"
         security delete-generic-password -a "electron-test-safe-storage" || echo "✓ Keychain does not contain password from tests"
+        security delete-generic-password -l "electron-test-safe-storage Safe Storage" || echo "✓ Keychain does not contain password from tests"
       elif [ "$TARGET_ARCH" == "arm" ] || [ "$TARGET_ARCH" == "arm64" ]; then
         XVFB=/usr/bin/Xvfb
         /sbin/start-stop-daemon --stop --exec $XVFB || echo "Xvfb not running"
@@ -412,6 +413,15 @@ step-get-more-space-on-mac: &step-get-more-space-on-mac
         tmpify ~/.rubies
         tmpify ~/Library/Caches/Homebrew
         tmpify /usr/local/Homebrew
+
+        # the contents of build/linux/strip_binary.gni aren't used, but
+        # https://chromium-review.googlesource.com/c/chromium/src/+/4278307
+        # needs the file to exist.
+        mv ~/project/src/build/linux/strip_binary.gni "${TMPDIR}"/
+        tmpify ~/project/src/build/linux/
+        mkdir -p ~/project/src/build/linux
+        mv "${TMPDIR}/strip_binary.gni" ~/project/src/build/linux/
+
         sudo rm -rf $TMPDIR/del-target
 
         # sudo rm -rf "/System/Library/Desktop Pictures"
@@ -433,7 +443,6 @@ step-get-more-space-on-mac: &step-get-more-space-on-mac
         # sudo rm -rf /System/Library/PreferencePanes
         # sudo rm -rf /System/Library/AssetsV2/*
         sudo rm -rf /Applications/Safari.app
-        sudo rm -rf ~/project/src/build/linux
         sudo rm -rf ~/project/src/third_party/catapult/tracing/test_data
         sudo rm -rf ~/project/src/third_party/angle/third_party/VK-GL-CTS
 
@@ -485,7 +494,9 @@ step-fix-sync: &step-fix-sync
   run:
     name: Fix Sync
     command: |
+      SEDOPTION="-i"
       if [ "`uname`" == "Darwin" ]; then
+        SEDOPTION="-i ''"
         # Fix Clang Install (wrong binary)
         rm -rf src/third_party/llvm-build
         python3 src/tools/clang/scripts/update.py
@@ -495,12 +506,15 @@ step-fix-sync: &step-fix-sync
         # Remove extra output from calling gclient getdep which always calls update_depot_tools
         sed -i '' "s/Updating depot_tools... //g" esbuild_ensure_file
         cipd ensure --root src/third_party/devtools-frontend/src/third_party/esbuild -ensure-file esbuild_ensure_file
-
-        # Fix ninja (wrong binary)
-        echo 'infra/3pp/tools/ninja/${platform}' `gclient getdep --deps-file=src/DEPS -r 'src/third_party/ninja:infra/3pp/tools/ninja/${platform}'` > ninja_ensure_file
-        sed -i '' "s/Updating depot_tools... //g" ninja_ensure_file
-        cipd ensure --root src/third_party/ninja -ensure-file ninja_ensure_file
       fi
+
+      # Make sure we are using the right ninja
+      echo 'infra/3pp/tools/ninja/${platform}' `gclient getdep --deps-file=src/DEPS -r 'src/third_party/ninja:infra/3pp/tools/ninja/${platform}'` > ninja_ensure_file
+      sed $SEDOPTION "s/Updating depot_tools... //g" ninja_ensure_file
+      cipd ensure --root src/third_party/ninja -ensure-file ninja_ensure_file
+
+      # Explicitly add ninja to the path
+      echo 'export PATH="$PATH:'"$PWD"'/src/third_party/ninja"' >> $BASH_ENV
 
       cd src/third_party/angle
       rm .git/objects/info/alternates
@@ -509,6 +523,18 @@ step-fix-sync: &step-fix-sync
       git remote remove origin
       mv .git/config.backup .git/config
       git fetch
+
+step-fix-clang: &step-fix-clang
+  run:
+    name: Fix Clang on 32-bit Linux ARM
+    command: |
+      if [ "$TARGET_ARCH" == "arm" ]; then
+        # The following custom clang needed on 32-bit Linux ARM due to https://crbug.com/1431201.
+        # Once https://crbug.com/1425409 has been resolved this workaround can be remove
+        cd src/third_party/llvm-build/Release+Asserts
+        curl -O https://dev-cdn.electronjs.org/clang/clang-llvmorg-17-init-4759-g547e3456-2.tar.xz
+        tar xvf clang-llvmorg-17-init-4759-g547e3456-2.tar.xz
+      fi
 
 step-install-signing-cert-on-mac: &step-install-signing-cert-on-mac
   run:
@@ -688,7 +714,7 @@ step-show-goma-stats: &step-show-goma-stats
   run:
     shell: /bin/bash
     name: Check goma stats after build
-    command: |      
+    command: |
       set +e
       set +o pipefail
       $LOCAL_GOMA_DIR/goma_ctl.py stat
@@ -792,7 +818,7 @@ step-maybe-cross-arch-snapshot: &step-maybe-cross-arch-snapshot
         elif [ "$TARGET_ARCH" == "arm64" ]; then
           export MKSNAPSHOT_PATH="clang_x64_v8_arm64"
         fi
-        cp "out/Default/$MKSNAPSHOT_PATH/mksnapshot" out/Default        
+        cp "out/Default/$MKSNAPSHOT_PATH/mksnapshot" out/Default
         cp "out/Default/$MKSNAPSHOT_PATH/v8_context_snapshot_generator" out/Default
         if [ "`uname`" == "Linux" ]; then
           cp "out/Default/$MKSNAPSHOT_PATH/libffmpeg.so" out/Default
@@ -956,26 +982,13 @@ step-ts-compile: &step-ts-compile
 # List of all steps.
 steps-electron-gn-check: &steps-electron-gn-check
   steps:
-    - *step-checkout-electron
-    - *step-depot-tools-get
-    - *step-depot-tools-add-to-path
     - install-python2-mac
-    - *step-setup-env-for-build
     - *step-setup-goma-for-build
-    - *step-generate-deps-hash
-    - *step-touch-sync-done
-    - maybe-restore-portaled-src-cache
-    - run:
-        name: Ensure src checkout worked
-        command: |
-          if [ ! -d "src/third_party/blink" ]; then
-            echo src cache was not restored for an unknown reason
-            exit 1
-          fi
-    - run:
-        name: Wipe Electron
-        command: rm -rf src/electron
-    - *step-checkout-electron
+    - checkout-from-cache
+    - *step-setup-env-for-build
+    - *step-wait-for-goma
+    - *step-gn-gen-default
+    - *step-gn-check
 
 steps-electron-ts-compile-for-doc-change: &steps-electron-ts-compile-for-doc-change
   steps:
@@ -1006,7 +1019,7 @@ commands:
               else
                 echo 'Using Python install from cache'
               fi
-              sudo installer -pkg python-downloads/python-2.7.18-macosx10.9.pkg -target /        
+              sudo installer -pkg python-downloads/python-2.7.18-macosx10.9.pkg -target /
             fi
       - save_cache:
           paths:
@@ -1048,13 +1061,17 @@ commands:
     parameters:
       artifact-key:
         type: string
+      build-type:
+        type: string      
       build-nonproprietary-ffmpeg:
         type: boolean
         default: true
     steps:
       - *step-gn-gen-default
+      - *step-fix-clang
       - ninja_build_electron:
           clean-prebuilt-snapshot: false
+          build-type: << parameters.build-type >>
       - *step-maybe-electron-dist-strip
       - step-electron-dist-build:
           additional-targets: shell_browser_ui_unittests third_party/electron_node:headers third_party/electron_node:overlapped-checker electron:hunspell_dictionaries_zip
@@ -1216,9 +1233,12 @@ commands:
       clean-prebuilt-snapshot:
         type: boolean
         default: true
+      build-type:
+        type: string
+
     steps:
       - run:
-          name: Electron build
+          name: Electron << parameters.build-type >> build
           no_output_timeout: 60m
           command: |
             cd src
@@ -1286,6 +1306,8 @@ commands:
         default: true
       artifact-key:
         type: string
+      build-type:
+        type: string        
       after-build-and-save:
         type: steps
         default: []
@@ -1412,9 +1434,10 @@ commands:
           steps:
             - build_and_save_artifacts:
                 artifact-key: << parameters.artifact-key >>
+                build-type: << parameters.build-type >>
                 build-nonproprietary-ffmpeg: << parameters.build-nonproprietary-ffmpeg >>
             - steps: << parameters.after-build-and-save >>
-            
+
             # Save all data needed for a further tests run.
             - when:
                 condition: << parameters.persist >>
@@ -1557,6 +1580,8 @@ commands:
       checkout:
         type: boolean
         default: true
+      build-type:
+        type: string
     steps:
       - when:
           condition: << parameters.attach >>
@@ -1586,9 +1611,11 @@ commands:
       - *step-setup-goma-for-build
       - *step-wait-for-goma
       - *step-gn-gen-default
+      - *step-fix-clang
 
       # Electron app
-      - ninja_build_electron
+      - ninja_build_electron:
+          build-type: << parameters.build-type >>
       - *step-show-goma-stats
       - *step-maybe-generate-breakpad-symbols
       - *step-maybe-electron-dist-strip
@@ -1651,6 +1678,7 @@ jobs:
           save-git-cache: true
           checkout-to-create-src-cache: true
           artifact-key: 'nil'
+          build-type: 'nil'
 
   mac-checkout:
     executor:
@@ -1669,6 +1697,7 @@ jobs:
           persist-checkout: true
           restore-src-cache: false
           artifact-key: 'nil'
+          build-type: 'nil'
 
   mac-make-src-cache:
     executor:
@@ -1687,6 +1716,7 @@ jobs:
           save-git-cache: true
           checkout-to-create-src-cache: true
           artifact-key: 'nil'
+          build-type: 'nil'
 
   # Layer 2: Builds.
   linux-x64-testing:
@@ -1704,6 +1734,7 @@ jobs:
           checkout: false
           checkout-and-assume-cache: true
           artifact-key: 'linux-x64'
+          build-type: 'Linux'
 
   linux-x64-testing-asan:
     executor:
@@ -1722,6 +1753,7 @@ jobs:
           checkout: true
           build-nonproprietary-ffmpeg: false
           artifact-key: 'linux-x64-asan'
+          build-type: 'Linux'
 
   linux-x64-testing-no-run-as-node:
     executor:
@@ -1738,6 +1770,7 @@ jobs:
           persist: false
           checkout: true
           artifact-key: 'linux-x64-no-run-as-node'
+          build-type: 'Linux'
 
   linux-x64-testing-gn-check:
     executor:
@@ -1769,6 +1802,7 @@ jobs:
             - electron-publish:
                 attach: false
                 checkout: true
+                build-type: 'Linux'
 
 
   linux-arm-testing:
@@ -1789,6 +1823,7 @@ jobs:
           checkout: false
           checkout-and-assume-cache: true
           artifact-key: 'linux-arm'
+          build-type: 'Linux ARM'
 
   linux-arm-publish:
     executor:
@@ -1813,6 +1848,7 @@ jobs:
             - electron-publish:
                 attach: false
                 checkout: true
+                build-type: 'Linux ARM'
 
   linux-arm64-testing:
     executor:
@@ -1832,6 +1868,7 @@ jobs:
           checkout: false
           checkout-and-assume-cache: true
           artifact-key: 'linux-arm64'
+          build-type: 'Linux ARM64'
 
   linux-arm64-testing-gn-check:
     executor:
@@ -1866,6 +1903,7 @@ jobs:
             - electron-publish:
                 attach: false
                 checkout: true
+                build-type: 'Linux ARM64'
 
   osx-testing-x64:
     executor:
@@ -1884,6 +1922,7 @@ jobs:
           checkout-and-assume-cache: true
           attach: true
           artifact-key: 'darwin-x64'
+          build-type: 'Darwin'
           after-build-and-save:
             - run:
                 name: Configuring MAS build
@@ -1894,6 +1933,7 @@ jobs:
                   rm -rf src/out/Default/Electron*.app
             - build_and_save_artifacts:
                 artifact-key: 'mas-x64'
+                build-type: 'MAS'
           after-persist:
             - persist_to_workspace:
                 root: .
@@ -1930,6 +1970,7 @@ jobs:
             - electron-publish:
                 attach: true
                 checkout: false
+                build-type: 'Darwin'
 
   osx-publish-arm64:
     executor:
@@ -1952,6 +1993,7 @@ jobs:
             - electron-publish:
                 attach: true
                 checkout: false
+                build-type: 'Darwin ARM64'
 
   osx-testing-arm64:
     executor:
@@ -1972,6 +2014,7 @@ jobs:
           checkout-and-assume-cache: true
           attach: true
           artifact-key: 'darwin-arm64'
+          build-type: 'Darwin ARM64'
           after-build-and-save:
             - run:
                 name: Configuring MAS build
@@ -1982,6 +2025,7 @@ jobs:
                   rm -rf src/out/Default/Electron*.app
             - build_and_save_artifacts:
                 artifact-key: 'mas-arm64'
+                build-type: 'MAS ARM64'
           after-persist:
             - persist_to_workspace:
                 root: .
@@ -2008,6 +2052,7 @@ jobs:
             - electron-publish:
                 attach: true
                 checkout: false
+                build-type: 'MAS'
 
   mas-publish-arm64:
     executor:
@@ -2030,6 +2075,7 @@ jobs:
             - electron-publish:
                 attach: true
                 checkout: false
+                build-type: 'MAS ARM64'
 
   # Layer 3: Tests.
   linux-x64-testing-tests:
@@ -2118,7 +2164,7 @@ jobs:
       - electron-tests:
           artifact-key: darwin-x64
 
-  darwin-testing-arm64-tests:  
+  darwin-testing-arm64-tests:
     executor: apple-silicon
     environment:
       <<: *env-mac-large
@@ -2233,9 +2279,9 @@ workflows:
           filters:
             branches:
               # Do not run this on forked pull requests
-              ignore: /pull\/[0-9]+/        
+              ignore: /pull\/[0-9]+/
           requires:
-            - linux-arm-testing      
+            - linux-arm-testing
       - linux-arm64-testing:
           requires:
             - linux-make-src-cache
@@ -2243,7 +2289,7 @@ workflows:
           filters:
             branches:
               # Do not run this on forked pull requests
-              ignore: /pull\/[0-9]+/        
+              ignore: /pull\/[0-9]+/
           requires:
             - linux-arm64-testing
       - linux-arm64-testing-gn-check:

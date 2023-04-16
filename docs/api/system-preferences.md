@@ -187,7 +187,7 @@ Some popular `key` and `type`s are:
 
 * `key` string
 * `type` Type - Can be `string`, `boolean`, `integer`, `float`, `double`, `url`, `array` or `dictionary`.
-* `value` UserDefaultTypes[Type]
+* `value` UserDefaultTypes\[Type]
 
 Set the value of `key` in `NSUserDefaults`.
 
@@ -235,7 +235,7 @@ if (browserOptions.transparent) {
 }
 ```
 
-[dwm-composition]:https://msdn.microsoft.com/en-us/library/windows/desktop/aa969540.aspx
+[dwm-composition]: https://learn.microsoft.com/en-us/windows/win32/dwm/composition-ovw
 
 ### `systemPreferences.getAccentColor()` _Windows_ _macOS_
 
@@ -336,8 +336,8 @@ See the [Windows docs][windows-colors] and the [macOS docs][macos-colors] for mo
 
 The following colors are only available on macOS 10.14: `find-highlight`, `selected-content-background`, `separator`, `unemphasized-selected-content-background`, `unemphasized-selected-text-background`, and `unemphasized-selected-text`.
 
-[windows-colors]:https://msdn.microsoft.com/en-us/library/windows/desktop/ms724371(v=vs.85).aspx
-[macos-colors]:https://developer.apple.com/design/human-interface-guidelines/macos/visual-design/color#dynamic-system-colors
+[windows-colors]: https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getsyscolor
+[macos-colors]: https://developer.apple.com/design/human-interface-guidelines/macos/visual-design/color#dynamic-system-colors
 
 ### `systemPreferences.getSystemColor(color)` _macOS_
 
@@ -394,8 +394,6 @@ system default and override the value of `getEffectiveAppearance`.
 
 Returns `boolean` - whether or not this device has the ability to use Touch ID.
 
-**NOTE:** This API will return `false` on macOS systems older than Sierra 10.12.2.
-
 ### `systemPreferences.promptTouchID(reason)` _macOS_
 
 * `reason` string - The reason you are asking for Touch ID authentication
@@ -414,8 +412,6 @@ systemPreferences.promptTouchID('To get consent for a Security-Gated Thing').the
 
 This API itself will not protect your user data; rather, it is a mechanism to allow you to do so. Native apps will need to set [Access Control Constants](https://developer.apple.com/documentation/security/secaccesscontrolcreateflags?language=objc) like [`kSecAccessControlUserPresence`](https://developer.apple.com/documentation/security/secaccesscontrolcreateflags/ksecaccesscontroluserpresence?language=objc) on their keychain entry so that reading it would auto-prompt for Touch ID biometric consent. This could be done with [`node-keytar`](https://github.com/atom/node-keytar), such that one would store an encryption key with `node-keytar` and only fetch it if `promptTouchID()` resolves.
 
-**NOTE:** This API will return a rejected Promise on macOS systems older than Sierra 10.12.2.
-
 ### `systemPreferences.isTrustedAccessibilityClient(prompt)` _macOS_
 
 * `prompt` boolean - whether or not the user will be informed via prompt if the current process is untrusted.
@@ -428,7 +424,7 @@ Returns `boolean` - `true` if the current process is a trusted accessibility cli
 
 Returns `string` - Can be `not-determined`, `granted`, `denied`, `restricted` or `unknown`.
 
-This user consent was not required on macOS 10.13 High Sierra or lower so this method will always return `granted`.
+This user consent was not required on macOS 10.13 High Sierra so this method will always return `granted`.
 macOS 10.14 Mojave or higher requires consent for `microphone` and `camera` access.
 macOS 10.15 Catalina or higher requires consent for `screen` access.
 
@@ -441,9 +437,9 @@ It will always return `granted` for `screen` and for all media types on older ve
 
 Returns `Promise<boolean>` - A promise that resolves with `true` if consent was granted and `false` if it was denied. If an invalid `mediaType` is passed, the promise will be rejected. If an access request was denied and later is changed through the System Preferences pane, a restart of the app will be required for the new permissions to take effect. If access has already been requested and denied, it _must_ be changed through the preference pane; an alert will not pop up and the promise will resolve with the existing access status.
 
-**Important:** In order to properly leverage this API, you [must set](https://developer.apple.com/documentation/avfoundation/cameras_and_media_capture/requesting_authorization_for_media_capture_on_macos?language=objc) the `NSMicrophoneUsageDescription` and `NSCameraUsageDescription` strings in your app's `Info.plist` file. The values for these keys will be used to populate the permission dialogs so that the user will be properly informed as to the purpose of the permission request. See [Electron Application Distribution](../tutorial/application-distribution.md#macos) for more information about how to set these in the context of Electron.
+**Important:** In order to properly leverage this API, you [must set](https://developer.apple.com/documentation/avfoundation/cameras_and_media_capture/requesting_authorization_for_media_capture_on_macos?language=objc) the `NSMicrophoneUsageDescription` and `NSCameraUsageDescription` strings in your app's `Info.plist` file. The values for these keys will be used to populate the permission dialogs so that the user will be properly informed as to the purpose of the permission request. See [Electron Application Distribution](../tutorial/application-distribution.md#rebranding-with-downloaded-binaries) for more information about how to set these in the context of Electron.
 
-This user consent was not required until macOS 10.14 Mojave, so this method will always return `true` if your system is running 10.13 High Sierra or lower.
+This user consent was not required until macOS 10.14 Mojave, so this method will always return `true` if your system is running 10.13 High Sierra.
 
 ### `systemPreferences.getAnimationSettings()`
 

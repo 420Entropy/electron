@@ -1,11 +1,12 @@
 import * as cp from 'child_process';
 import * as path from 'path';
-import { expect } from 'chai';
+import { assert, expect } from 'chai';
 import { BrowserWindow, Menu, MenuItem } from 'electron/main';
 import { sortMenuItems } from '../lib/browser/api/menu-utils';
-import { emittedOnce } from './events-helpers';
-import { ifit, delay } from './spec-helpers';
-import { closeWindow } from './window-helpers';
+import { ifit } from './lib/spec-helpers';
+import { closeWindow } from './lib/window-helpers';
+import { once } from 'events';
+import { setTimeout } from 'timers/promises';
 
 const fixturesPath = path.resolve(__dirname, 'fixtures');
 
@@ -816,10 +817,7 @@ describe('Menu module', function () {
     it('should emit menu-will-close event', (done) => {
       menu.on('menu-will-close', () => { done(); });
       menu.popup({ window: w });
-      // https://github.com/electron/electron/issues/19411
-      setTimeout(() => {
-        menu.closePopup();
-      });
+      menu.closePopup();
     });
 
     it('returns immediately', () => {
@@ -848,18 +846,12 @@ describe('Menu module', function () {
 
       expect(x).to.equal(100);
       expect(y).to.equal(101);
-      // https://github.com/electron/electron/issues/19411
-      setTimeout(() => {
-        menu.closePopup();
-      });
+      menu.closePopup();
     });
 
     it('works with a given BrowserWindow, no options, and a callback', (done) => {
       menu.popup({ window: w, callback: () => done() });
-      // https://github.com/electron/electron/issues/19411
-      setTimeout(() => {
-        menu.closePopup();
-      });
+      menu.closePopup();
     });
 
     it('prevents menu from getting garbage-collected when popuping', async () => {
@@ -870,14 +862,14 @@ describe('Menu module', function () {
       // eslint-disable-next-line no-undef
       const wr = new WeakRef(menu);
 
-      await delay();
+      await setTimeout();
 
       // Do garbage collection, since |menu| is not referenced in this closure
       // it would be gone after next call.
       const v8Util = process._linkedBinding('electron_common_v8_util');
       v8Util.requestGarbageCollectionForTesting();
 
-      await delay();
+      await setTimeout();
 
       // Try to receive menu from weak reference.
       if (wr.deref()) {
@@ -885,6 +877,46 @@ describe('Menu module', function () {
       } else {
         throw new Error('Menu is garbage-collected while popuping');
       }
+    });
+
+    // https://github.com/electron/electron/issues/35724
+    // Maximizing window is enough to trigger the bug
+    // FIXME(dsanders11): Test always passes on CI, even pre-fix
+    ifit(process.platform === 'linux' && !process.env.CI)('does not trigger issue #35724', (done) => {
+      const showAndCloseMenu = async () => {
+        await setTimeout(1000);
+        menu.popup({ window: w, x: 50, y: 50 });
+        await setTimeout(500);
+        const closed = once(menu, 'menu-will-close');
+        menu.closePopup();
+        await closed;
+      };
+
+      const failOnEvent = () => { done(new Error('Menu closed prematurely')); };
+
+      assert(!w.isVisible());
+      w.on('show', async () => {
+        assert(!w.isMaximized());
+        // Show the menu once, then maximize window
+        await showAndCloseMenu();
+        // NOTE - 'maximize' event never fires on CI for Linux
+        const maximized = once(w, 'maximize');
+        w.maximize();
+        await maximized;
+
+        // Bug only seems to trigger programmatically after showing the menu once more
+        await showAndCloseMenu();
+
+        // Now ensure the menu stays open until we close it
+        await setTimeout(500);
+        menu.once('menu-will-close', failOnEvent);
+        menu.popup({ window: w, x: 50, y: 50 });
+        await setTimeout(1500);
+        menu.off('menu-will-close', failOnEvent);
+        menu.once('menu-will-close', () => done());
+        menu.closePopup();
+      });
+      w.show();
     });
   });
 
@@ -899,8 +931,8 @@ describe('Menu module', function () {
       expect(Menu.getApplicationMenu()).to.not.be.null('application menu');
     });
 
-    // TODO(nornagon): this causes the focus handling tests to fail
-    it.skip('unsets a menu with null', () => {
+    // DISABLED-FIXME(nornagon): this causes the focus handling tests to fail
+    it('unsets a menu with null', () => {
       Menu.setApplicationMenu(null);
       expect(Menu.getApplicationMenu()).to.be.null('application menu');
     });
@@ -929,7 +961,7 @@ describe('Menu module', function () {
       appProcess.stdout.on('data', data => { output += data; });
       appProcess.stderr.on('data', data => { output += data; });
 
-      const [code] = await emittedOnce(appProcess, 'exit');
+      const [code] = await once(appProcess, 'exit');
       if (!output.includes('Window has no menu')) {
         console.log(code, output);
       }

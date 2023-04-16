@@ -16,8 +16,8 @@
 #include "base/feature_list.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/task/thread_pool/thread_pool_instance.h"
-#include "base/threading/thread_task_runner_handle.h"
 #include "content/public/common/content_switches.h"
 #include "electron/electron_version.h"
 #include "gin/array_buffer.h"
@@ -139,15 +139,15 @@ int NodeMain(int argc, char* argv[]) {
     // Feed gin::PerIsolateData with a task runner.
     uv_loop_t* loop = uv_default_loop();
     auto uv_task_runner = base::MakeRefCounted<UvTaskRunner>(loop);
-    base::ThreadTaskRunnerHandle handle(uv_task_runner);
+    base::SingleThreadTaskRunner::CurrentDefaultHandle handle(uv_task_runner);
 
     // Initialize feature list.
     auto feature_list = std::make_unique<base::FeatureList>();
     feature_list->InitializeFromCommandLine("", "");
     base::FeatureList::SetInstance(std::move(feature_list));
 
-    // Explicitly register electron's builtin modules.
-    NodeBindings::RegisterBuiltinModules();
+    // Explicitly register electron's builtin bindings.
+    NodeBindings::RegisterBuiltinBindings();
 
     // Parse and set Node.js cli flags.
     int flags_exit_code = SetNodeCliFlags();
@@ -205,7 +205,11 @@ int NodeMain(int argc, char* argv[]) {
     uv_loop_configure(loop, UV_METRICS_IDLE_TIME);
 
     // Initialize gin::IsolateHolder.
-    JavascriptEnvironment gin_env(loop);
+    bool setup_wasm_streaming =
+        node::per_process::cli_options->get_per_isolate_options()
+            ->get_per_env_options()
+            ->experimental_fetch;
+    JavascriptEnvironment gin_env(loop, setup_wasm_streaming);
 
     v8::Isolate* isolate = gin_env.isolate();
 
@@ -222,12 +226,12 @@ int NodeMain(int argc, char* argv[]) {
       uint64_t env_flags = node::EnvironmentFlags::kDefaultFlags |
                            node::EnvironmentFlags::kHideConsoleWindows;
       env = node::CreateEnvironment(
-          isolate_data, gin_env.context(), result->args(), result->exec_args(),
+          isolate_data, isolate->GetCurrentContext(), result->args(),
+          result->exec_args(),
           static_cast<node::EnvironmentFlags::Flags>(env_flags));
       CHECK_NE(nullptr, env);
 
-      node::IsolateSettings is;
-      node::SetIsolateUpForNode(isolate, is);
+      node::SetIsolateUpForNode(isolate);
 
       gin_helper::Dictionary process(isolate, env->process_object());
       process.SetMethod("crash", &ElectronBindings::Crash);
@@ -256,41 +260,14 @@ int NodeMain(int argc, char* argv[]) {
     v8::HandleScope scope(isolate);
     node::LoadEnvironment(env, node::StartExecutionCallback{});
 
-    env->set_trace_sync_io(env->options()->trace_sync_io);
-
-    {
-      v8::SealHandleScope seal(isolate);
-      bool more;
-      env->performance_state()->Mark(
-          node::performance::NODE_PERFORMANCE_MILESTONE_LOOP_START);
-      do {
-        uv_run(env->event_loop(), UV_RUN_DEFAULT);
-
-        gin_env.platform()->DrainTasks(isolate);
-
-        more = uv_loop_alive(env->event_loop());
-        if (more && !env->is_stopping())
-          continue;
-
-        if (!uv_loop_alive(env->event_loop())) {
-          EmitBeforeExit(env);
-        }
-
-        // Emit `beforeExit` if the loop became alive either after emitting
-        // event, or after running some callbacks.
-        more = uv_loop_alive(env->event_loop());
-      } while (more && !env->is_stopping());
-      env->performance_state()->Mark(
-          node::performance::NODE_PERFORMANCE_MILESTONE_LOOP_EXIT);
-    }
-
-    env->set_trace_sync_io(false);
-
-    exit_code = node::EmitExit(env);
+    // Potential reasons we get Nothing here may include: the env
+    // is stopping, or the user hooks process.emit('exit').
+    exit_code = node::SpinEventLoop(env).FromMaybe(1);
 
     node::ResetStdio();
 
-    node::Stop(env);
+    node::Stop(env, false);
+
     node::FreeEnvironment(env);
     node::FreeIsolateData(isolate_data);
   }

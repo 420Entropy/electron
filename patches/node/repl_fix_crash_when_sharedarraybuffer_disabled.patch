@@ -10,7 +10,7 @@ isn't the case before attempting to use them in the repl or a crash occurs.
 Upstreamed at https://github.com/nodejs/node/pull/39718.
 
 diff --git a/benchmark/worker/atomics-wait.js b/benchmark/worker/atomics-wait.js
-index a771b1813731edf4f0dd60f3505799e389f1d876..b9461677e2d7d1df192e752496e62cca837717b5 100644
+index 7270f9f01c98ece3dc38bf56d270d7e08d39f66e..44db021ad37af4ae9c4526a405cea8bc3c1909a5 100644
 --- a/benchmark/worker/atomics-wait.js
 +++ b/benchmark/worker/atomics-wait.js
 @@ -7,6 +7,10 @@ const bench = common.createBenchmark(main, {
@@ -25,7 +25,7 @@ index a771b1813731edf4f0dd60f3505799e389f1d876..b9461677e2d7d1df192e752496e62cca
    bench.start();
    for (let i = 0; i < n; i++)
 diff --git a/lib/internal/main/worker_thread.js b/lib/internal/main/worker_thread.js
-index cd9ca227b9cac4ff021ce1643000ea4b45163df6..0846afec28ab5fb507eb5f3eb211f635d61dca17 100644
+index fe2e132af1166a05c3e94cdae362dd46f62bf65b..caa9214fa30a715a5eea00e7fc3b091e40c07131 100644
 --- a/lib/internal/main/worker_thread.js
 +++ b/lib/internal/main/worker_thread.js
 @@ -10,7 +10,7 @@ const {
@@ -37,7 +37,7 @@ index cd9ca227b9cac4ff021ce1643000ea4b45163df6..0846afec28ab5fb507eb5f3eb211f635
  } = primordials;
  
  const {
-@@ -157,6 +157,8 @@ port.on('message', (message) => {
+@@ -113,6 +113,8 @@ port.on('message', (message) => {
  
      process.cwd = function() {
        const currentCounter = Atomics.load(cwdCounter, 0);

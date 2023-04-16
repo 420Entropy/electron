@@ -17,10 +17,10 @@ policy->CanCommitOriginAndUrl.
 Upstreamed at https://chromium-review.googlesource.com/c/chromium/src/+/3856266.
 
 diff --git a/content/browser/renderer_host/navigation_request.cc b/content/browser/renderer_host/navigation_request.cc
-index a2cbdb022b95ba8b9c8da13e6a36865ead0b7e08..8055ab66e08e6dd7d12df596b97597b30364f10c 100644
+index 0d6a0433137a3598ff2bb102296d5f39d7b53298..1407049bc11a8f171f9cf6fe4c8567a0b80ad411 100644
 --- a/content/browser/renderer_host/navigation_request.cc
 +++ b/content/browser/renderer_host/navigation_request.cc
-@@ -6706,10 +6706,11 @@ NavigationRequest::GetOriginForURLLoaderFactoryAfterResponseWithDebugInfo() {
+@@ -7370,10 +7370,11 @@ NavigationRequest::GetOriginForURLLoaderFactoryAfterResponseWithDebugInfo() {
    if (IsForMhtmlSubframe())
      return origin_with_debug_info;
  
@@ -37,12 +37,12 @@ index a2cbdb022b95ba8b9c8da13e6a36865ead0b7e08..8055ab66e08e6dd7d12df596b97597b3
  }
  
 diff --git a/content/browser/renderer_host/render_frame_host_impl.h b/content/browser/renderer_host/render_frame_host_impl.h
-index 86c673ac5cf948ce8ecbd56fc30bccf65bd7262b..53bb47b5741eda7405991d633bea435191cab287 100644
+index c65f258cf2b012777c816727df01cdda444ce365..3f99ead141cb7b632d66a5b56bc4529a550cde1b 100644
 --- a/content/browser/renderer_host/render_frame_host_impl.h
 +++ b/content/browser/renderer_host/render_frame_host_impl.h
-@@ -2700,6 +2700,17 @@ class CONTENT_EXPORT RenderFrameHostImpl
-   RenderFrameHostImplPpapiSupport& GetPpapiSupport();
- #endif
+@@ -2894,6 +2894,17 @@ class CONTENT_EXPORT RenderFrameHostImpl
+   // last committed document.
+   CookieChangeListener::CookieChangeInfo GetCookieChangeInfo();
  
 +  // Returns whether the given origin and URL is allowed to commit in the
 +  // current RenderFrameHost. The |url| is used to ensure it matches the origin
@@ -55,10 +55,10 @@ index 86c673ac5cf948ce8ecbd56fc30bccf65bd7262b..53bb47b5741eda7405991d633bea4351
 +                                        bool is_pdf,
 +                                        bool is_sandboxed);
 +
-  protected:
-   friend class RenderFrameHostFactory;
- 
-@@ -3013,17 +3024,6 @@ class CONTENT_EXPORT RenderFrameHostImpl
+   // Sets a ResourceCache in the renderer. `this` must be active and there must
+   // be no pending navigation. `remote` must have the same and process
+   // isolation policy.
+@@ -3234,17 +3245,6 @@ class CONTENT_EXPORT RenderFrameHostImpl
    // relevant.
    void ResetWaitingState();
  

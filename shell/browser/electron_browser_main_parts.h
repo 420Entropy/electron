@@ -8,7 +8,8 @@
 #include <memory>
 #include <string>
 
-#include "base/callback.h"
+#include "base/functional/callback.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/timer/timer.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/browser_main_parts.h"
@@ -35,10 +36,6 @@ namespace display {
 class Screen;
 }
 #endif
-
-namespace device {
-class GeolocationManager;
-}
 
 namespace ui {
 class LinuxUiGetter;
@@ -89,10 +86,6 @@ class ElectronBrowserMainParts : public content::BrowserMainParts {
   // Returns the connection to GeolocationControl which can be
   // used to enable the location services once per client.
   device::mojom::GeolocationControl* GetGeolocationControl();
-
-#if BUILDFLAG(IS_MAC)
-  device::GeolocationManager* GetGeolocationManager();
-#endif
 
   // Returns handle to the class responsible for extracting file icons.
   IconManager* GetIconManager();
@@ -180,7 +173,6 @@ class ElectronBrowserMainParts : public content::BrowserMainParts {
   mojo::Remote<device::mojom::GeolocationControl> geolocation_control_;
 
 #if BUILDFLAG(IS_MAC)
-  std::unique_ptr<device::GeolocationManager> geolocation_manager_;
   std::unique_ptr<display::ScopedNativeScreen> screen_;
 #endif
 

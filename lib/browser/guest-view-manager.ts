@@ -14,7 +14,6 @@ interface GuestInstance {
 }
 
 const webViewManager = process._linkedBinding('electron_browser_web_view_manager');
-const eventBinding = process._linkedBinding('electron_browser_event');
 const netBinding = process._linkedBinding('electron_browser_net');
 
 const supportedWebViewEvents = Object.keys(webViewEvents);
@@ -82,7 +81,13 @@ function makeLoadURLOptions (params: Record<string, any>) {
 // Create a new guest instance.
 const createGuest = function (embedder: Electron.WebContents, embedderFrameId: number, elementInstanceId: number, params: Record<string, any>) {
   const webPreferences = makeWebPreferences(embedder, params);
-  const event = eventBinding.createWithSender(embedder);
+  const event = {
+    sender: embedder,
+    preventDefault () {
+      this.defaultPrevented = true;
+    },
+    defaultPrevented: false
+  };
 
   const { instanceId } = params;
 
@@ -155,6 +160,16 @@ const createGuest = function (embedder: Electron.WebContents, embedderFrameId: n
       frameId: [event.processId, event.frameId],
       channel,
       args
+    });
+  });
+
+  // Dispatch guest's frame navigation event to embedder.
+  guest.on('will-frame-navigate', function (event: Electron.WebContentsWillFrameNavigateEventParams) {
+    sendToEmbedder(IPC_MESSAGES.GUEST_VIEW_INTERNAL_DISPATCH_EVENT, 'will-frame-navigate', {
+      url: event.url,
+      isMainFrame: event.isMainFrame,
+      frameProcessId: event.frame.processId,
+      frameRoutingId: event.frame.routingId
     });
   });
 

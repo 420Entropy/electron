@@ -54,7 +54,7 @@ The `net` module has the following methods:
 
 ### `net.request(options)`
 
-* `options` (ClientRequestConstructorOptions | string) - The `ClientRequest` constructor options.
+* `options` ([ClientRequestConstructorOptions](client-request.md#new-clientrequestoptions) | string) - The `ClientRequest` constructor options.
 
 Returns [`ClientRequest`](./client-request.md)
 
@@ -62,6 +62,62 @@ Creates a [`ClientRequest`](./client-request.md) instance using the provided
 `options` which are directly forwarded to the `ClientRequest` constructor.
 The `net.request` method would be used to issue both secure and insecure HTTP
 requests according to the specified protocol scheme in the `options` object.
+
+### `net.fetch(input[, init])`
+
+* `input` string | [GlobalRequest](https://nodejs.org/api/globals.html#request)
+* `init` [RequestInit](https://developer.mozilla.org/en-US/docs/Web/API/fetch#options) & { bypassCustomProtocolHandlers?: boolean } (optional)
+
+Returns `Promise<GlobalResponse>` - see [Response](https://developer.mozilla.org/en-US/docs/Web/API/Response).
+
+Sends a request, similarly to how `fetch()` works in the renderer, using
+Chrome's network stack. This differs from Node's `fetch()`, which uses
+Node.js's HTTP stack.
+
+Example:
+
+```js
+async function example () {
+  const response = await net.fetch('https://my.app')
+  if (response.ok) {
+    const body = await response.json()
+    // ... use the result.
+  }
+}
+```
+
+This method will issue requests from the [default
+session](session.md#sessiondefaultsession). To send a `fetch` request from
+another session, use [ses.fetch()](session.md#sesfetchinput-init).
+
+See the MDN documentation for
+[`fetch()`](https://developer.mozilla.org/en-US/docs/Web/API/fetch) for more
+details.
+
+Limitations:
+
+* `net.fetch()` does not support the `data:` or `blob:` schemes.
+* The value of the `integrity` option is ignored.
+* The `.type` and `.url` values of the returned `Response` object are
+  incorrect.
+
+By default, requests made with `net.fetch` can be made to [custom
+protocols](protocol.md) as well as `file:`, and will trigger
+[webRequest](web-request.md) handlers if present. When the non-standard
+`bypassCustomProtocolHandlers` option is set in RequestInit, custom protocol
+handlers will not be called for this request. This allows forwarding an
+intercepted request to the built-in handler. [webRequest](web-request.md)
+handlers will still be triggered when bypassing custom protocols.
+
+```js
+protocol.handle('https', (req) => {
+  if (req.url === 'https://my-app.com') {
+    return new Response('<body>my app</body>')
+  } else {
+    return net.fetch(req, { bypassCustomProtocolHandlers: true })
+  }
+})
+```
 
 ### `net.isOnline()`
 

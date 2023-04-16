@@ -11,7 +11,7 @@ https://chromium-review.googlesource.com/c/chromium/src/+/3860569
 diff --git a/src/node_options-inl.h b/src/node_options-inl.h
 old mode 100644
 new mode 100755
-index 7facb22afc3c9bd7b52a61626cca1d7733acb7fc..0c1f36d072f053494258e4117cd8f43e2fe940ba
+index 01592b32b842ac96ccd3d06d7f8ddfa4222ca72e..c217a3ef1c0ff1ea7d108d1aa17e75e5433faa0d
 --- a/src/node_options-inl.h
 +++ b/src/node_options-inl.h
 @@ -387,12 +387,12 @@ void OptionsParser<Options>::Parse(

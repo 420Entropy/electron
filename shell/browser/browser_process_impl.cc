@@ -11,9 +11,10 @@
 #include "base/command_line.h"
 #include "base/files/file_path.h"
 #include "base/path_service.h"
+#include "chrome/browser/browser_process.h"
 #include "chrome/common/chrome_paths.h"
 #include "chrome/common/chrome_switches.h"
-#include "components/os_crypt/os_crypt.h"
+#include "components/os_crypt/sync/os_crypt.h"
 #include "components/prefs/in_memory_pref_store.h"
 #include "components/prefs/json_pref_store.h"
 #include "components/prefs/overlay_user_pref_store.h"
@@ -30,6 +31,7 @@
 #include "net/proxy_resolution/proxy_config.h"
 #include "net/proxy_resolution/proxy_config_service.h"
 #include "net/proxy_resolution/proxy_config_with_annotation.h"
+#include "services/device/public/cpp/geolocation/geolocation_manager.h"
 #include "services/network/public/cpp/network_switches.h"
 #include "shell/common/electron_paths.h"
 #include "shell/common/thread_restrictions.h"
@@ -82,12 +84,6 @@ void BrowserProcessImpl::ApplyProxyModeFromCommandLine(
 }
 
 BuildState* BrowserProcessImpl::GetBuildState() {
-  NOTIMPLEMENTED();
-  return nullptr;
-}
-
-breadcrumbs::BreadcrumbPersistentStorageManager*
-BrowserProcessImpl::GetBreadcrumbPersistentStorageManager() {
   NOTIMPLEMENTED();
   return nullptr;
 }
@@ -290,6 +286,10 @@ HidPolicyAllowedDevices* BrowserProcessImpl::hid_policy_allowed_devices() {
   return nullptr;
 }
 
+HidSystemTrayIcon* BrowserProcessImpl::hid_system_tray_icon() {
+  return nullptr;
+}
+
 void BrowserProcessImpl::SetSystemLocale(const std::string& locale) {
   system_locale_ = locale;
 }
@@ -318,4 +318,13 @@ printing::PrintJobManager* BrowserProcessImpl::print_job_manager() {
 
 StartupData* BrowserProcessImpl::startup_data() {
   return nullptr;
+}
+
+device::GeolocationManager* BrowserProcessImpl::geolocation_manager() {
+  return geolocation_manager_.get();
+}
+
+void BrowserProcessImpl::SetGeolocationManager(
+    std::unique_ptr<device::GeolocationManager> geolocation_manager) {
+  geolocation_manager_ = std::move(geolocation_manager);
 }

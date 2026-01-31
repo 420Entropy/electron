@@ -565,6 +565,36 @@ bool FileSelectHelper::IsAcceptTypeValid(const std::string& accept_type) {
           base::TRIM_NONE) {
     return false;
   }
+
+  if (accept_type[0] == '.') {
+    // If the type starts with a period it is assumed to be a file extension.
+    // A file extension must not contain a slash.
+    if (accept_type.find('/') != std::string::npos)
+      return false;
+  } else {
+    // If the type does not start with a period, it is assumed to be a MIME type.
+    // A MIME type must contain a slash.
+    size_t slash_pos = accept_type.find('/');
+    if (slash_pos == std::string::npos)
+      return false;
+
+    // A MIME type must not start with a slash.
+    if (slash_pos == 0)
+      return false;
+
+    // A MIME type must not end with a slash.
+    if (slash_pos == accept_type.length() - 1)
+      return false;
+
+    // A MIME type must not contain a semicolon (parameters are not allowed).
+    if (accept_type.find(';') != std::string::npos)
+      return false;
+
+    // A MIME type must not contain more than one slash.
+    if (accept_type.find('/', slash_pos + 1) != std::string::npos)
+      return false;
+  }
+
   return true;
 }
 

@@ -99,6 +99,21 @@ if (ret === null) {
 }
 ```
 
+### Removed: standalone `netLog` module
+
+The standalone `netLog` module has been removed, it can now be found as a
+property of the `session` module.
+
+```js
+// Removed in Electron 25
+const { netLog } = require('electron')
+netLog.startLogging('/path/to/log')
+
+// Replace with
+const { session } = require('electron')
+session.defaultSession.netLog.startLogging('/path/to/log')
+```
+
 ## Planned Breaking API Changes (24.0)
 
 ### API Changed: `nativeImage.createThumbnailFromPath(path, size)`

@@ -1,13 +1,20 @@
-# netLog
+# Class: NetLog
 
 > Logging network events for a session.
 
-Process: [Main](../glossary.md#main-process)
+Process: [Main](../glossary.md#main-process)<br />
+_This class is not exported from the `'electron'` module. It is only available as a return value of other methods in the Electron API._
+
+Instances of the `NetLog` class are accessed by using the `netLog` property of
+a `Session`.
+
+For example:
 
 ```javascript
-const { netLog } = require('electron')
+const { app, session } = require('electron')
 
 app.whenReady().then(async () => {
+  const netLog = session.defaultSession.netLog
   await netLog.startLogging('/path/to/net-log')
   // After some network events
   const path = await netLog.stopLogging()
@@ -20,7 +27,7 @@ See [`--log-net-log`](command-line-switches.md#--log-net-logpath) to log network
 **Note:** All methods unless specified can only be used after the `ready` event
 of the `app` module gets emitted.
 
-## Methods
+## Instance Methods
 
 ### `netLog.startLogging(path[, options])`
 
@@ -44,7 +51,7 @@ Returns `Promise<void>` - resolves when the net log has been flushed to disk.
 
 Stops recording network events. If not called, net logging will automatically end when app quits.
 
-## Properties
+## Instance Properties
 
 ### `netLog.currentlyLogging` _Readonly_
 

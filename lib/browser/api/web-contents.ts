@@ -11,6 +11,7 @@ import { MessagePortMain } from '@electron/internal/browser/message-port-main';
 import { IPC_MESSAGES } from '@electron/internal/common/ipc-messages';
 import { IpcMainImpl } from '@electron/internal/browser/ipc-main-impl';
 import * as deprecate from '@electron/internal/common/deprecate';
+import { getNextId, PDFPageSizes, paperFormats, isValidCustomPageSize, validateBoolean, validateNumber, validateString } from '@electron/internal/browser/print-utils';
 
 // session is not used here, the purpose is to make sure session is initialized
 // before the webContents module.
@@ -19,104 +20,7 @@ session
 
 const webFrameMainBinding = process._linkedBinding('electron_browser_web_frame_main');
 
-let nextId = 0;
-const getNextId = function () {
-  return ++nextId;
-};
-
 type PostData = LoadURLOptions['postData']
-
-// Stock page sizes
-const PDFPageSizes: Record<string, ElectronInternal.MediaSize> = {
-  Letter: {
-    custom_display_name: 'Letter',
-    height_microns: 279400,
-    name: 'NA_LETTER',
-    width_microns: 215900
-  },
-  Legal: {
-    custom_display_name: 'Legal',
-    height_microns: 355600,
-    name: 'NA_LEGAL',
-    width_microns: 215900
-  },
-  Tabloid: {
-    height_microns: 431800,
-    name: 'NA_LEDGER',
-    width_microns: 279400,
-    custom_display_name: 'Tabloid'
-  },
-  A0: {
-    custom_display_name: 'A0',
-    height_microns: 1189000,
-    name: 'ISO_A0',
-    width_microns: 841000
-  },
-  A1: {
-    custom_display_name: 'A1',
-    height_microns: 841000,
-    name: 'ISO_A1',
-    width_microns: 594000
-  },
-  A2: {
-    custom_display_name: 'A2',
-    height_microns: 594000,
-    name: 'ISO_A2',
-    width_microns: 420000
-  },
-  A3: {
-    custom_display_name: 'A3',
-    height_microns: 420000,
-    name: 'ISO_A3',
-    width_microns: 297000
-  },
-  A4: {
-    custom_display_name: 'A4',
-    height_microns: 297000,
-    name: 'ISO_A4',
-    is_default: 'true',
-    width_microns: 210000
-  },
-  A5: {
-    custom_display_name: 'A5',
-    height_microns: 210000,
-    name: 'ISO_A5',
-    width_microns: 148000
-  },
-  A6: {
-    custom_display_name: 'A6',
-    height_microns: 148000,
-    name: 'ISO_A6',
-    width_microns: 105000
-  }
-} as const;
-
-const paperFormats: Record<string, ElectronInternal.PageSize> = {
-  letter: { width: 8.5, height: 11 },
-  legal: { width: 8.5, height: 14 },
-  tabloid: { width: 11, height: 17 },
-  ledger: { width: 17, height: 11 },
-  a0: { width: 33.1, height: 46.8 },
-  a1: { width: 23.4, height: 33.1 },
-  a2: { width: 16.54, height: 23.4 },
-  a3: { width: 11.7, height: 16.54 },
-  a4: { width: 8.27, height: 11.7 },
-  a5: { width: 5.83, height: 8.27 },
-  a6: { width: 4.13, height: 5.83 }
-} as const;
-
-// The minimum micron size Chromium accepts is that where:
-// Per printing/units.h:
-//  * kMicronsPerInch - Length of an inch in 0.001mm unit.
-//  * kPointsPerInch - Length of an inch in CSS's 1pt unit.
-//
-// Formula: (kPointsPerInch / kMicronsPerInch) * size >= 1
-//
-// Practically, this means microns need to be > 352 microns.
-// We therefore need to verify this or it will silently fail.
-const isValidCustomPageSize = (width: number, height: number) => {
-  return [width, height].every(x => x > 352);
-};
 
 // JavaScript implementations of WebContents.
 const binding = process._linkedBinding('electron_browser_web_contents');
@@ -209,31 +113,23 @@ WebContents.prototype.printToPDF = async function (options) {
     preferCSSPageSize: false
   };
 
+  validateBoolean('landscape', options.landscape);
   if (options.landscape !== undefined) {
-    if (typeof options.landscape !== 'boolean') {
-      return Promise.reject(new Error('landscape must be a Boolean'));
-    }
     printSettings.landscape = options.landscape;
   }
 
+  validateBoolean('displayHeaderFooter', options.displayHeaderFooter);
   if (options.displayHeaderFooter !== undefined) {
-    if (typeof options.displayHeaderFooter !== 'boolean') {
-      return Promise.reject(new Error('displayHeaderFooter must be a Boolean'));
-    }
     printSettings.displayHeaderFooter = options.displayHeaderFooter;
   }
 
+  validateBoolean('printBackground', options.printBackground);
   if (options.printBackground !== undefined) {
-    if (typeof options.printBackground !== 'boolean') {
-      return Promise.reject(new Error('printBackground must be a Boolean'));
-    }
     printSettings.shouldPrintBackgrounds = options.printBackground;
   }
 
+  validateNumber('scale', options.scale);
   if (options.scale !== undefined) {
-    if (typeof options.scale !== 'number') {
-      return Promise.reject(new Error('scale must be a Number'));
-    }
     printSettings.scale = options.scale;
   }
 
@@ -242,83 +138,67 @@ WebContents.prototype.printToPDF = async function (options) {
     if (typeof pageSize === 'string') {
       const format = paperFormats[pageSize.toLowerCase()];
       if (!format) {
-        return Promise.reject(new Error(`Invalid pageSize ${pageSize}`));
+        throw new Error(`Invalid pageSize ${pageSize}`);
       }
 
       printSettings.paperWidth = format.width;
       printSettings.paperHeight = format.height;
-    } else if (typeof options.pageSize === 'object') {
+    } else if (typeof pageSize === 'object' && pageSize !== null) {
       if (!pageSize.height || !pageSize.width) {
-        return Promise.reject(new Error('height and width properties are required for pageSize'));
+        throw new Error('height and width properties are required for pageSize');
       }
 
       printSettings.paperWidth = pageSize.width;
       printSettings.paperHeight = pageSize.height;
     } else {
-      return Promise.reject(new Error('pageSize must be a String or Object'));
+      throw new Error('pageSize must be a String or Object');
     }
   }
 
   const { margins } = options;
   if (margins !== undefined) {
-    if (typeof margins !== 'object') {
-      return Promise.reject(new Error('margins must be an Object'));
+    if (typeof margins !== 'object' || margins === null) {
+      throw new Error('margins must be an Object');
     }
 
+    validateNumber('margins.top', margins.top);
     if (margins.top !== undefined) {
-      if (typeof margins.top !== 'number') {
-        return Promise.reject(new Error('margins.top must be a Number'));
-      }
       printSettings.marginTop = margins.top;
     }
 
+    validateNumber('margins.bottom', margins.bottom);
     if (margins.bottom !== undefined) {
-      if (typeof margins.bottom !== 'number') {
-        return Promise.reject(new Error('margins.bottom must be a Number'));
-      }
       printSettings.marginBottom = margins.bottom;
     }
 
+    validateNumber('margins.left', margins.left);
     if (margins.left !== undefined) {
-      if (typeof margins.left !== 'number') {
-        return Promise.reject(new Error('margins.left must be a Number'));
-      }
       printSettings.marginLeft = margins.left;
     }
 
+    validateNumber('margins.right', margins.right);
     if (margins.right !== undefined) {
-      if (typeof margins.right !== 'number') {
-        return Promise.reject(new Error('margins.right must be a Number'));
-      }
       printSettings.marginRight = margins.right;
     }
   }
 
+  validateString('pageRanges', options.pageRanges);
   if (options.pageRanges !== undefined) {
-    if (typeof options.pageRanges !== 'string') {
-      return Promise.reject(new Error('pageRanges must be a String'));
-    }
     printSettings.pageRanges = options.pageRanges;
   }
 
+  validateString('headerTemplate', options.headerTemplate);
   if (options.headerTemplate !== undefined) {
-    if (typeof options.headerTemplate !== 'string') {
-      return Promise.reject(new Error('headerTemplate must be a String'));
-    }
     printSettings.headerTemplate = options.headerTemplate;
   }
 
+  validateString('footerTemplate', options.footerTemplate);
   if (options.footerTemplate !== undefined) {
-    if (typeof options.footerTemplate !== 'string') {
-      return Promise.reject(new Error('footerTemplate must be a String'));
-    }
     printSettings.footerTemplate = options.footerTemplate;
   }
 
+  validateBoolean('preferCSSPageSize', options.preferCSSPageSize);
   if (options.preferCSSPageSize !== undefined) {
-    if (typeof options.preferCSSPageSize !== 'boolean') {
-      return Promise.reject(new Error('footerTemplate must be a String'));
-    }
     printSettings.preferCSSPageSize = options.preferCSSPageSize;
   }
 
@@ -336,13 +216,23 @@ WebContents.prototype.printToPDF = async function (options) {
 };
 
 WebContents.prototype.print = function (options: ElectronInternal.WebContentsPrintOptions = {}, callback) {
-  // TODO(codebytere): deduplicate argument sanitization by moving rest of
-  // print param logic into new file shared between printToPDF and print
-  if (typeof options === 'object') {
+  if (typeof options === 'object' && options !== null) {
+    validateBoolean('silent', options.silent);
+    validateBoolean('printBackground', options.printBackground);
+    validateString('deviceName', options.deviceName);
+    validateBoolean('color', options.color);
+    validateBoolean('landscape', options.landscape);
+    validateNumber('scaleFactor', options.scaleFactor);
+    validateNumber('pagesPerSheet', options.pagesPerSheet);
+    validateBoolean('collate', options.collate);
+    validateNumber('copies', options.copies);
+    validateString('header', options.header);
+    validateString('footer', options.footer);
+
     // Optionally set size for PDF.
     if (options.pageSize !== undefined) {
       const pageSize = options.pageSize;
-      if (typeof pageSize === 'object') {
+      if (typeof pageSize === 'object' && pageSize !== null) {
         if (!pageSize.height || !pageSize.width) {
           throw new Error('height and width properties are required for pageSize');
         }
@@ -360,7 +250,7 @@ WebContents.prototype.print = function (options: ElectronInternal.WebContentsPri
           height_microns: height,
           width_microns: width
         };
-      } else if (PDFPageSizes[pageSize]) {
+      } else if (typeof pageSize === 'string' && PDFPageSizes[pageSize]) {
         options.mediaSize = PDFPageSizes[pageSize];
       } else {
         throw new Error(`Unsupported pageSize: ${pageSize}`);

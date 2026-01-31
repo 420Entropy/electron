@@ -41,15 +41,28 @@ ipcMainUtils.handleSync(IPC_MESSAGES.BROWSER_CLIPBOARD_SYNC, function (event, me
   return (clipboard as any)[method](...args);
 });
 
-const getPreloadScript = async function (preloadPath: string) {
-  let preloadSrc = null;
-  let preloadError = null;
-  try {
-    preloadSrc = await fs.promises.readFile(preloadPath, 'utf8');
-  } catch (error) {
-    preloadError = error;
-  }
-  return { preloadPath, preloadSrc, preloadError };
+const preloadCache = new Map<string, Promise<{
+  preloadPath: string;
+  preloadSrc: string | null;
+  preloadError: any;
+}>>();
+
+const getPreloadScript = function (preloadPath: string) {
+  let promise = preloadCache.get(preloadPath);
+  if (promise != null) return promise;
+
+  promise = (async () => {
+    let preloadSrc = null;
+    let preloadError = null;
+    try {
+      preloadSrc = await fs.promises.readFile(preloadPath, 'utf8');
+    } catch (error) {
+      preloadError = error;
+    }
+    return { preloadPath, preloadSrc, preloadError };
+  })();
+  preloadCache.set(preloadPath, promise);
+  return promise;
 };
 
 ipcMainUtils.handleSync(IPC_MESSAGES.BROWSER_SANDBOX_LOAD, async function (event) {

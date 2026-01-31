@@ -19,6 +19,7 @@ const netBinding = process._linkedBinding('electron_browser_net');
 const supportedWebViewEvents = Object.keys(webViewEvents);
 
 const guestInstances = new Map<number, GuestInstance>();
+const embedderGuestsMap = new Map<Electron.WebContents, Set<number>>();
 const embedderElementsMap = new Map<string, number>();
 
 function makeWebPreferences (embedder: Electron.WebContents, params: Record<string, any>) {
@@ -109,6 +110,13 @@ const createGuest = function (embedder: Electron.WebContents, embedderFrameId: n
     guest,
     embedder
   });
+
+  let guestIds = embedderGuestsMap.get(embedder);
+  if (!guestIds) {
+    guestIds = new Set();
+    embedderGuestsMap.set(embedder, guestIds);
+  }
+  guestIds.add(guestInstanceId);
 
   // Clear the guest from map when it is destroyed.
   guest.once('destroyed', () => {
@@ -216,6 +224,14 @@ const detachGuest = function (embedder: Electron.WebContents, guestInstanceId: n
   webViewManager.removeGuest(embedder, guestInstanceId);
   guestInstances.delete(guestInstanceId);
 
+  const guestIds = embedderGuestsMap.get(embedder);
+  if (guestIds) {
+    guestIds.delete(guestInstanceId);
+    if (guestIds.size === 0) {
+      embedderGuestsMap.delete(embedder);
+    }
+  }
+
   const key = `${embedder.id}-${guestInstance.elementInstanceId}`;
   embedderElementsMap.delete(key);
 };
@@ -231,10 +247,14 @@ const watchEmbedder = function (embedder: Electron.WebContents) {
 
   // Forward embedder window visibility change events to guest
   const onVisibilityChange = function (visibilityState: VisibilityState) {
-    for (const guestInstance of guestInstances.values()) {
-      guestInstance.visibilityState = visibilityState;
-      if (guestInstance.embedder === embedder) {
-        guestInstance.guest._sendInternal(IPC_MESSAGES.GUEST_INSTANCE_VISIBILITY_CHANGE, visibilityState);
+    const guestIds = embedderGuestsMap.get(embedder);
+    if (guestIds) {
+      for (const guestId of guestIds) {
+        const guestInstance = guestInstances.get(guestId);
+        if (guestInstance) {
+          guestInstance.visibilityState = visibilityState;
+          guestInstance.guest._sendInternal(IPC_MESSAGES.GUEST_INSTANCE_VISIBILITY_CHANGE, visibilityState);
+        }
       }
     }
   };
@@ -244,14 +264,16 @@ const watchEmbedder = function (embedder: Electron.WebContents) {
     // Usually the guestInstances is cleared when guest is destroyed, but it
     // may happen that the embedder gets manually destroyed earlier than guest,
     // and the embedder will be invalid in the usual code path.
-    for (const [guestInstanceId, guestInstance] of guestInstances) {
-      if (guestInstance.embedder === embedder) {
+    const guestIds = embedderGuestsMap.get(embedder);
+    if (guestIds) {
+      for (const guestInstanceId of Array.from(guestIds)) {
         detachGuest(embedder, guestInstanceId);
       }
     }
     // Clear the listeners.
     embedder.removeListener('-window-visibility-change' as any, onVisibilityChange);
     watchedEmbedders.delete(embedder);
+    embedderGuestsMap.delete(embedder);
   });
 };
 

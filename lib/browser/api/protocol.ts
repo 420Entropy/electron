@@ -3,6 +3,12 @@ import { createReadStream } from 'fs';
 import { Readable } from 'stream';
 import { ReadableStream } from 'stream/web';
 
+type ProtocolRequestUploadData =
+  | Electron.UploadRawData
+  | Electron.UploadFile
+  | { type: 'stream', body: { read (buf: Uint8Array): Promise<number> } }
+  | { type: 'blob', blobUUID: string };
+
 // Global protocol APIs.
 const { registerSchemesAsPrivileged, getStandardSchemes, Protocol } = process._linkedBinding('electron_browser_protocol');
 
@@ -11,7 +17,7 @@ const ERR_UNEXPECTED = -9;
 
 const isBuiltInScheme = (scheme: string) => scheme === 'http' || scheme === 'https';
 
-function makeStreamFromPipe (pipe: any): ReadableStream {
+function makeStreamFromPipe (pipe: { read (buf: Uint8Array): Promise<number> }): ReadableStream {
   const buf = new Uint8Array(1024 * 1024 /* 1 MB */);
   return new ReadableStream({
     async pull (controller) {
@@ -31,10 +37,11 @@ function makeStreamFromPipe (pipe: any): ReadableStream {
 
 function convertToRequestBody (uploadData: ProtocolRequest['uploadData']): RequestInit['body'] {
   if (!uploadData) return null;
+  const chunks = [...uploadData] as any as ProtocolRequestUploadData[];
   // Optimization: skip creating a stream if the request is just a single buffer.
-  if (uploadData.length === 1 && (uploadData[0] as any).type === 'rawData') return uploadData[0].bytes;
+  const firstChunk = chunks[0];
+  if (chunks.length === 1 && firstChunk.type === 'rawData') return firstChunk.bytes;
 
-  const chunks = [...uploadData] as any[]; // TODO: types are wrong
   let current: ReadableStreamDefaultReader | null = null;
   return new ReadableStream({
     pull (controller) {

@@ -184,6 +184,7 @@ class ElectronBrowserContext : public content::BrowserContext {
     DCHECK(!IsOffTheRecord());
     return extension_system_;
   }
+  bool did_version_update() const { return did_version_update_; }
 #endif
 
   ProtocolRegistry* protocol_registry() const {
@@ -258,6 +259,7 @@ class ElectronBrowserContext : public content::BrowserContext {
   int max_cache_size_ = 0;
 
 #if BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS)
+  bool did_version_update_ = false;
   // Owned by the KeyedService system.
   extensions::ElectronExtensionSystem* extension_system_;
 #endif

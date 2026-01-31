@@ -30,6 +30,8 @@ extern const char kDeviceVendorIdKey[];
 extern const char kDeviceProductIdKey[];
 extern const char kDeviceSerialNumberKey[];
 
+extern const char kPrefLastElectronVersion[];
+
 #if BUILDFLAG(ENABLE_RUN_AS_NODE)
 extern const char kRunAsNode[];
 #endif

@@ -16,6 +16,7 @@
 #include "base/task/sequenced_task_runner.h"
 #include "base/threading/thread_restrictions.h"
 #include "base/time/time.h"
+#include "extensions/browser/event_router.h"
 #include "extensions/browser/extension_file_task_runner.h"
 #include "extensions/browser/extension_prefs.h"
 #include "extensions/browser/extension_registry.h"
@@ -23,6 +24,7 @@
 #include "extensions/common/error_utils.h"
 #include "extensions/common/file_util.h"
 #include "extensions/common/manifest_constants.h"
+#include "shell/browser/electron_browser_context.h"
 
 namespace extensions {
 
@@ -136,7 +138,28 @@ void ElectronExtensionLoader::FinishExtensionLoad(
     std::pair<scoped_refptr<const Extension>, std::string> result) {
   scoped_refptr<const Extension> extension = result.first;
   if (extension) {
+    bool is_browser_update = false;
+    ExtensionPrefs* extension_prefs = ExtensionPrefs::Get(browser_context_);
+    if (extension_prefs->HasPrefPath(extension->id(),
+                                     pref_names::kPrefPreferences)) {
+      is_browser_update = static_cast<electron::ElectronBrowserContext*>(
+                              browser_context_)
+                              ->did_version_update();
+    }
+
     extension_registrar_.AddExtension(extension);
+
+    if (is_browser_update) {
+      base::Value::List args;
+      base::Value::Dict details;
+      details.Set("reason", "browser_update");
+      args.Append(std::move(details));
+
+      auto event = std::make_unique<Event>(events::UNKNOWN,
+                                           "runtime.onInstalled", std::move(args));
+      EventRouter::Get(browser_context_)
+          ->DispatchEventToExtension(extension->id(), std::move(event));
+    }
 
     // Write extension install time to ExtensionPrefs. This is required by
     // WebRequestAPI which calls extensions::ExtensionPrefs::GetInstallTime.

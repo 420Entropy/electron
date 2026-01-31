@@ -29,6 +29,8 @@ const char kDeviceVendorIdKey[] = "vendorId";
 const char kDeviceProductIdKey[] = "productId";
 const char kDeviceSerialNumberKey[] = "serialNumber";
 
+const char kPrefLastElectronVersion[] = "extensions.last_electron_version";
+
 #if BUILDFLAG(ENABLE_RUN_AS_NODE)
 const char kRunAsNode[] = "ELECTRON_RUN_AS_NODE";
 #endif

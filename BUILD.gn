@@ -1378,6 +1378,7 @@ if (is_mac) {
 
 test("shell_browser_ui_unittests") {
   sources = [
+    "//electron/shell/browser/file_select_helper_unittest.cc",
     "//electron/shell/browser/ui/accelerator_util_unittests.cc",
     "//electron/shell/browser/ui/run_all_unittests.cc",
   ]

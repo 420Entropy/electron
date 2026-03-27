@@ -120,7 +120,6 @@ These individual tutorials expand on topics discussed in the guide above.
 * [MessagePortMain](api/message-port-main.md)
 * [nativeTheme](api/native-theme.md)
 * [net](api/net.md)
-* [netLog](api/net-log.md)
 * [Notification](api/notification.md)
 * [powerMonitor](api/power-monitor.md)
 * [powerSaveBlocker](api/power-save-blocker.md)

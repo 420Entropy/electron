@@ -18,7 +18,6 @@ export const browserModuleList: ElectronInternal.ModuleEntry[] = [
   { name: 'MessageChannelMain', loader: () => require('./message-channel') },
   { name: 'nativeTheme', loader: () => require('./native-theme') },
   { name: 'net', loader: () => require('./net') },
-  { name: 'netLog', loader: () => require('./net-log') },
   { name: 'Notification', loader: () => require('./notification') },
   { name: 'powerMonitor', loader: () => require('./power-monitor') },
   { name: 'powerSaveBlocker', loader: () => require('./power-save-blocker') },

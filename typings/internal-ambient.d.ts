@@ -186,7 +186,9 @@ declare namespace NodeJS {
     _linkedBinding(name: 'electron_common_v8_util'): V8UtilBinding;
     _linkedBinding(name: 'electron_browser_app'): { app: Electron.App, App: Function };
     _linkedBinding(name: 'electron_browser_auto_updater'): { autoUpdater: Electron.AutoUpdater };
+    _linkedBinding(name: 'electron_browser_base_window'): { BaseWindow: typeof Electron.BaseWindow };
     _linkedBinding(name: 'electron_browser_browser_view'): { BrowserView: typeof Electron.BrowserView };
+    _linkedBinding(name: 'electron_browser_content_tracing'): any;
     _linkedBinding(name: 'electron_browser_crash_reporter'): Omit<Electron.CrashReporter, 'start'> & {
       start(submitUrl: string,
         uploadToServer: boolean,
@@ -200,12 +202,14 @@ declare namespace NodeJS {
     _linkedBinding(name: 'electron_browser_desktop_capturer'): {
       createDesktopCapturer(): ElectronInternal.DesktopCapturer;
     };
+    _linkedBinding(name: 'electron_browser_dialog'): any;
     _linkedBinding(name: 'electron_browser_event_emitter'): {
       setEventEmitterPrototype(prototype: Object): void;
     };
     _linkedBinding(name: 'electron_browser_global_shortcut'): { globalShortcut: Electron.GlobalShortcut };
     _linkedBinding(name: 'electron_browser_image_view'): { ImageView: any };
     _linkedBinding(name: 'electron_browser_in_app_purchase'): { inAppPurchase: Electron.InAppPurchase };
+    _linkedBinding(name: 'electron_browser_menu'): { Menu: typeof Electron.Menu };
     _linkedBinding(name: 'electron_browser_message_port'): {
       createPair(): { port1: Electron.MessagePortMain, port2: Electron.MessagePortMain };
     };
@@ -219,12 +223,14 @@ declare namespace NodeJS {
       net: any;
       createURLLoader(options: CreateURLLoaderOptions): URLLoader;
     };
+    _linkedBinding(name: 'electron_browser_net_log'): any;
     _linkedBinding(name: 'electron_browser_notification'): {
       isSupported(): boolean;
       Notification: typeof Electron.Notification;
     }
     _linkedBinding(name: 'electron_browser_power_monitor'): PowerMonitorBinding;
     _linkedBinding(name: 'electron_browser_power_save_blocker'): { powerSaveBlocker: Electron.PowerSaveBlocker };
+    _linkedBinding(name: 'electron_browser_protocol'): any;
     _linkedBinding(name: 'electron_browser_push_notifications'): { pushNotifications: Electron.PushNotifications };
     _linkedBinding(name: 'electron_browser_safe_storage'): { safeStorage: Electron.SafeStorage };
     _linkedBinding(name: 'electron_browser_session'): {fromPartition: typeof Electron.Session.fromPartition, fromPath: typeof Electron.Session.fromPath, Session: typeof Electron.Session};
@@ -232,6 +238,7 @@ declare namespace NodeJS {
     _linkedBinding(name: 'electron_browser_system_preferences'): { systemPreferences: Electron.SystemPreferences };
     _linkedBinding(name: 'electron_browser_tray'): { Tray: Electron.Tray };
     _linkedBinding(name: 'electron_browser_view'): { View: Electron.View };
+    _linkedBinding(name: 'electron_browser_web_contents'): { WebContents: typeof ElectronInternal.WebContents };
     _linkedBinding(name: 'electron_browser_web_contents_view'): { WebContentsView: typeof Electron.WebContentsView };
     _linkedBinding(name: 'electron_browser_web_view_manager'): WebViewManagerBinding;
     _linkedBinding(name: 'electron_browser_web_frame_main'): {
@@ -239,6 +246,7 @@ declare namespace NodeJS {
       fromId(processId: number, routingId: number): Electron.WebFrameMain;
       fromIdOrNull(processId: number, routingId: number): Electron.WebFrameMain | null;
     }
+    _linkedBinding(name: 'electron_browser_window'): { BrowserWindow: typeof Electron.BrowserWindow };
     _linkedBinding(name: 'electron_renderer_crash_reporter'): Electron.CrashReporter;
     _linkedBinding(name: 'electron_renderer_ipc'): { ipc: IpcRendererBinding };
     _linkedBinding(name: 'electron_renderer_web_frame'): WebFrameBinding;

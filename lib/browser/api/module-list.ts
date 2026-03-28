@@ -1,4 +1,8 @@
-// TODO: Updating this file also required updating the module-keys file
+// TODO(codebytere): Updating this file also requires updating:
+// - shell/common/node_bindings.cc (if it's a native module)
+// - typings/internal-ambient.d.ts (if it's a native module)
+// - docs/api/*.md (to ensure it's documented)
+// Use script/verify-module-list.js to verify these requirements.
 
 // Browser side modules, please sort alphabetically.
 export const browserModuleList: ElectronInternal.ModuleEntry[] = [
@@ -11,8 +15,8 @@ export const browserModuleList: ElectronInternal.ModuleEntry[] = [
   { name: 'crashReporter', loader: () => require('./crash-reporter') },
   { name: 'dialog', loader: () => require('./dialog') },
   { name: 'globalShortcut', loader: () => require('./global-shortcut') },
-  { name: 'ipcMain', loader: () => require('./ipc-main') },
   { name: 'inAppPurchase', loader: () => require('./in-app-purchase') },
+  { name: 'ipcMain', loader: () => require('./ipc-main') },
   { name: 'Menu', loader: () => require('./menu') },
   { name: 'MenuItem', loader: () => require('./menu-item') },
   { name: 'MessageChannelMain', loader: () => require('./message-channel') },
@@ -22,8 +26,8 @@ export const browserModuleList: ElectronInternal.ModuleEntry[] = [
   { name: 'Notification', loader: () => require('./notification') },
   { name: 'powerMonitor', loader: () => require('./power-monitor') },
   { name: 'powerSaveBlocker', loader: () => require('./power-save-blocker') },
-  { name: 'pushNotifications', loader: () => require('./push-notifications') },
   { name: 'protocol', loader: () => require('./protocol') },
+  { name: 'pushNotifications', loader: () => require('./push-notifications') },
   { name: 'safeStorage', loader: () => require('./safe-storage') },
   { name: 'screen', loader: () => require('./screen') },
   { name: 'session', loader: () => require('./session') },

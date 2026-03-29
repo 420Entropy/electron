@@ -37,6 +37,7 @@
 #include "services/network/public/cpp/features.h"
 #include "services/network/public/cpp/wrapper_shared_url_loader_factory.h"
 #include "services/network/public/mojom/network_context.mojom.h"
+#include "shell/browser/browser.h"
 #include "shell/browser/cookie_change_notifier.h"
 #include "shell/browser/electron_browser_client.h"
 #include "shell/browser/electron_browser_main_parts.h"
@@ -210,6 +211,7 @@ void ElectronBrowserContext::InitPrefs() {
   MediaDeviceIDSalt::RegisterPrefs(registry.get());
   ZoomLevelDelegate::RegisterPrefs(registry.get());
   PrefProxyConfigTrackerImpl::RegisterPrefs(registry.get());
+  registry->RegisterStringPref(kPrefLastElectronVersion, "");
 #if BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS)
   if (!in_memory_)
     extensions::ExtensionPrefs::RegisterProfilePrefs(registry.get());
@@ -223,6 +225,16 @@ void ElectronBrowserContext::InitPrefs() {
 #endif
 
   prefs_ = prefs_factory.Create(registry.get());
+
+#if BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS)
+  std::string last_version = prefs_->GetString(kPrefLastElectronVersion);
+  std::string current_version = electron::Browser::Get()->GetVersion();
+  if (last_version != current_version) {
+    did_version_update_ = true;
+    prefs_->SetString(kPrefLastElectronVersion, current_version);
+  }
+#endif
+
 #if BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS) || \
     BUILDFLAG(ENABLE_BUILTIN_SPELLCHECKER)
   user_prefs::UserPrefs::Set(this, prefs_.get());

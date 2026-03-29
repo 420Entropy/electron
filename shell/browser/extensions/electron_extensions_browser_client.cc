@@ -274,8 +274,7 @@ ElectronExtensionsBrowserClient::
 
 bool ElectronExtensionsBrowserClient::DidVersionUpdate(
     BrowserContext* context) {
-  // TODO(jamescook): We might want to tell extensions when app_shell updates.
-  return false;
+  return static_cast<ElectronBrowserContext*>(context)->did_version_update();
 }
 
 void ElectronExtensionsBrowserClient::PermitExternalProtocolHandler() {}

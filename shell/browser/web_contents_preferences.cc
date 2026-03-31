@@ -99,15 +99,14 @@ std::vector<WebContentsPreferences*>& Instances() {
 WebContentsPreferences::WebContentsPreferences(
     content::WebContents* web_contents,
     const gin_helper::Dictionary& web_preferences)
-    : content::WebContentsUserData<WebContentsPreferences>(*web_contents),
-      web_contents_(web_contents) {
+    : content::WebContentsUserData<WebContentsPreferences>(*web_contents) {
   web_contents->SetUserData(UserDataKey(), base::WrapUnique(this));
   Instances().push_back(this);
   SetFromDictionary(web_preferences);
 
   // If this is a <webview> tag, and the embedder is offscreen-rendered, then
   // this WebContents is also offscreen-rendered.
-  if (auto* api_web_contents = api::WebContents::From(web_contents_)) {
+  if (auto* api_web_contents = api::WebContents::From(web_contents)) {
     if (electron::api::WebContents* embedder = api_web_contents->embedder()) {
       auto* embedder_preferences =
           WebContentsPreferences::From(embedder->web_contents());
@@ -320,7 +319,7 @@ bool WebContentsPreferences::IsSandboxed() const {
 content::WebContents* WebContentsPreferences::GetWebContentsFromProcessID(
     int process_id) {
   for (WebContentsPreferences* preferences : Instances()) {
-    content::WebContents* web_contents = preferences->web_contents_;
+    content::WebContents* web_contents = preferences->GetWebContents();
     if (web_contents->GetPrimaryMainFrame()->GetProcess()->GetID() ==
         process_id)
       return web_contents;
@@ -468,7 +467,7 @@ void WebContentsPreferences::OverrideWebkitPrefs(
   prefs->hidden_page = false;
   // Webview `document.visibilityState` tracks window visibility so we need
   // to let it know if the window happens to be hidden right now.
-  if (auto* api_web_contents = api::WebContents::From(web_contents_)) {
+  if (auto* api_web_contents = api::WebContents::From(GetWebContents())) {
     if (electron::api::WebContents* embedder = api_web_contents->embedder()) {
       if (auto* relay =
               NativeWindowRelay::FromWebContents(embedder->web_contents())) {

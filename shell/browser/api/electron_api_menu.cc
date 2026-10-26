@@ -4,49 +4,45 @@
 
 #include "shell/browser/api/electron_api_menu.h"
 
+#include <string>
+#include <string_view>
 #include <utility>
 
+#include "base/logging.h"
+#include "base/no_destructor.h"
+#include "base/strings/strcat.h"
+#include "base/strings/string_number_conversions.h"
+#include "base/strings/utf_string_conversions.h"
+#include "gin/dictionary.h"
+#include "gin/per_isolate_data.h"
+#include "shell/browser/api/electron_api_base_window.h"
+#include "shell/browser/api/electron_api_menu_item.h"
+#include "shell/browser/api/electron_api_menu_roles.h"
+#include "shell/browser/api/electron_api_web_contents.h"
+#include "shell/browser/api/electron_api_web_frame_main.h"
 #include "shell/browser/api/ui_event.h"
 #include "shell/browser/javascript_environment.h"
 #include "shell/browser/native_window.h"
+#include "shell/browser/window_list.h"
 #include "shell/common/gin_converters/accelerator_converter.h"
 #include "shell/common/gin_converters/callback_converter.h"
+#include "shell/common/gin_converters/content_converter.h"
 #include "shell/common/gin_converters/file_path_converter.h"
 #include "shell/common/gin_converters/gurl_converter.h"
 #include "shell/common/gin_converters/image_converter.h"
+#include "shell/common/gin_converters/optional_converter.h"
 #include "shell/common/gin_helper/dictionary.h"
 #include "shell/common/gin_helper/object_template_builder.h"
+#include "shell/common/gin_helper/wrappable_pointer_tags.h"
 #include "shell/common/node_includes.h"
 #include "ui/base/models/image_model.h"
-
-#if BUILDFLAG(IS_MAC)
-
-namespace gin {
-
-using SharingItem = electron::ElectronMenuModel::SharingItem;
-
-template <>
-struct Converter<SharingItem> {
-  static bool FromV8(v8::Isolate* isolate,
-                     v8::Local<v8::Value> val,
-                     SharingItem* out) {
-    gin_helper::Dictionary dict;
-    if (!ConvertFromV8(isolate, val, &dict))
-      return false;
-    dict.GetOptional("texts", &(out->texts));
-    dict.GetOptional("filePaths", &(out->file_paths));
-    dict.GetOptional("urls", &(out->urls));
-    return true;
-  }
-};
-
-}  // namespace gin
-
-#endif
+#include "v8/include/cppgc/allocation.h"
+#include "v8/include/cppgc/persistent.h"
 
 namespace electron::api {
 
-gin::WrapperInfo Menu::kWrapperInfo = {gin::kEmbedderNativeGin};
+const gin::WrapperInfo Menu::kWrapperInfo =
+    electron::MakeWrapperInfo(electron::kElectronMenu);
 
 Menu::Menu(gin::Arguments* args)
     : model_(std::make_unique<ElectronMenuModel>(this)) {
@@ -54,7 +50,7 @@ Menu::Menu(gin::Arguments* args)
 
 #if BUILDFLAG(IS_MAC)
   gin_helper::Dictionary options;
-  if (args->GetNext(&options)) {
+  if (args && args->GetNext(&options)) {
     ElectronMenuModel::SharingItem item;
     if (options.Get("sharingItem", &item))
       model_->SetSharingItem(std::move(item));
@@ -62,175 +58,440 @@ Menu::Menu(gin::Arguments* args)
 #endif
 }
 
+// static
+Menu* Menu::New(gin::Arguments* args) {
+  return Create(args->isolate(), args);
+}
+
 Menu::~Menu() {
+  RemoveModelObserver();
+}
+
+void Menu::Trace(cppgc::Visitor* visitor) const {
+  gin::Wrappable<Menu>::Trace(visitor);
+  visitor->Trace(parent_);
+  visitor->Trace(first_entry_);
+  visitor->Trace(last_entry_);
+  visitor->Trace(items_);
+}
+
+void Menu::RemoveModelObserver() {
   if (model_) {
     model_->RemoveObserver(this);
   }
 }
 
-bool InvokeBoolMethod(const Menu* menu,
-                      const char* method,
-                      int command_id,
-                      bool default_value = false) {
-  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
-  v8::HandleScope scope(isolate);
-  // We need to cast off const here because GetWrapper() is non-const, but
-  // ui::SimpleMenuModel::Delegate's methods are const.
-  v8::Local<v8::Value> val = gin_helper::CallMethod(
-      isolate, const_cast<Menu*>(menu), method, command_id);
-  bool ret = false;
-  return gin::ConvertFromV8(isolate, val, &ret) ? ret : default_value;
+namespace {
+
+cppgc::Persistent<Menu>& ApplicationMenu() {
+  static base::NoDestructor<cppgc::Persistent<Menu>> menu;
+  return *menu;
+}
+bool g_application_menu_was_set = false;
+
+}  // namespace
+
+Menu::Entry::Entry(MenuItem* item, Entry* next) : item(item), next(next) {}
+Menu::Entry::~Entry() = default;
+
+void Menu::Entry::Trace(cppgc::Visitor* visitor) const {
+  visitor->Trace(item);
+  visitor->Trace(next);
 }
 
-bool Menu::IsCommandIdChecked(int command_id) const {
-  return InvokeBoolMethod(this, "_isCommandIdChecked", command_id);
-}
-
-bool Menu::IsCommandIdEnabled(int command_id) const {
-  return InvokeBoolMethod(this, "_isCommandIdEnabled", command_id);
-}
-
-bool Menu::IsCommandIdVisible(int command_id) const {
-  return InvokeBoolMethod(this, "_isCommandIdVisible", command_id);
-}
-
-bool Menu::ShouldCommandIdWorkWhenHidden(int command_id) const {
-  return InvokeBoolMethod(this, "_shouldCommandIdWorkWhenHidden", command_id);
-}
-
-bool Menu::GetAcceleratorForCommandIdWithParams(
-    int command_id,
-    bool use_default_accelerator,
-    ui::Accelerator* accelerator) const {
-  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
-  v8::HandleScope scope(isolate);
-  v8::Local<v8::Value> val = gin_helper::CallMethod(
-      isolate, const_cast<Menu*>(this), "_getAcceleratorForCommandId",
-      command_id, use_default_accelerator);
-  return gin::ConvertFromV8(isolate, val, accelerator);
-}
-
-bool Menu::ShouldRegisterAcceleratorForCommandId(int command_id) const {
-  return InvokeBoolMethod(this, "_shouldRegisterAcceleratorForCommandId",
-                          command_id);
-}
-
-#if BUILDFLAG(IS_MAC)
-bool Menu::GetSharingItemForCommandId(
-    int command_id,
-    ElectronMenuModel::SharingItem* item) const {
-  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
-  v8::HandleScope handle_scope(isolate);
-  v8::Local<v8::Value> val =
-      gin_helper::CallMethod(isolate, const_cast<Menu*>(this),
-                             "_getSharingItemForCommandId", command_id);
-  return gin::ConvertFromV8(isolate, val, item);
-}
-#endif
-
-void Menu::ExecuteCommand(int command_id, int flags) {
-  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
-  v8::HandleScope scope(isolate);
-  gin_helper::CallMethod(isolate, const_cast<Menu*>(this), "_executeCommand",
-                         CreateEventFromFlags(flags), command_id);
-}
-
-void Menu::OnMenuWillShow(ui::SimpleMenuModel* source) {
-  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
-  v8::HandleScope scope(isolate);
-  gin_helper::CallMethod(isolate, const_cast<Menu*>(this), "_menuWillShow");
-}
-
-base::OnceClosure Menu::BindSelfToClosure(base::OnceClosure callback) {
-  // return ((callback, ref) => { callback() }).bind(null, callback, this)
-  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
-  v8::HandleScope scope(isolate);
-  v8::Local<v8::Object> self;
-  if (GetWrapper(isolate).ToLocal(&self)) {
-    v8::Global<v8::Value> ref(isolate, self);
-    return base::BindOnce(
-        [](base::OnceClosure callback, v8::Global<v8::Value> ref) {
-          std::move(callback).Run();
-        },
-        std::move(callback), std::move(ref));
-  } else {
-    return base::DoNothing();
+void Menu::ForEachInRadioGroup(int group_id,
+                               base::FunctionRef<void(MenuItem*)> fn) const {
+  for (size_t i = 0; i < GetItemCount(); ++i) {
+    MenuItem* item = ItemAt(i);
+    if (item->type() == MenuItem::Type::kRadio && item->group_id() == group_id)
+      fn(item);
   }
 }
 
-void Menu::InsertItemAt(int index,
-                        int command_id,
-                        const std::u16string& label) {
-  model_->InsertItemAt(index, command_id, label);
+size_t Menu::GetItemCount() const {
+  return model_->GetItemCount();
 }
 
-void Menu::InsertSeparatorAt(int index) {
-  model_->InsertSeparatorAt(index, ui::NORMAL_SEPARATOR);
+MenuItem* Menu::ItemAt(size_t index) const {
+  return static_cast<MenuItem*>(model_->item_at(index));
 }
 
-void Menu::InsertCheckItemAt(int index,
-                             int command_id,
-                             const std::u16string& label) {
-  model_->InsertCheckItemAt(index, command_id, label);
+void Menu::ActivatedAt(size_t index, int flags) {
+  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
+  v8::HandleScope handle_scope(isolate);
+  v8::Local<v8::Object> wrapper;
+  if (!GetWrapper(isolate).ToLocal(&wrapper))
+    return;
+  node::CallbackScope callback_scope(isolate, wrapper, {0, 0});
+  ItemAt(index)->Activate(BaseWindow::GetFocusedWindow(),
+                          WebContents::GetFocusedWebContents(), flags);
 }
 
-void Menu::InsertRadioItemAt(int index,
-                             int command_id,
-                             const std::u16string& label,
-                             int group_id) {
-  model_->InsertRadioItemAt(index, command_id, label, group_id);
+void Menu::MenuWillShow() {
+  // Ensure radio groups have at least one item selected.
+  for (size_t i = 0; i < GetItemCount(); ++i) {
+    MenuItem* item = ItemAt(i);
+    if (item->type() != MenuItem::Type::kRadio)
+      continue;
+    bool any_checked = false;
+    ForEachInRadioGroup(item->group_id(), [&](MenuItem* other) {
+      any_checked = any_checked || other->checked_flag();
+    });
+    if (!any_checked)
+      item->SetCheckedForRadioGroup();
+  }
 }
 
-void Menu::InsertSubMenuAt(int index,
-                           int command_id,
-                           const std::u16string& label,
-                           Menu* menu) {
-  menu->parent_ = this;
-  model_->InsertSubMenuAt(index, command_id, label, menu->model_.get());
+// Search between separators around |pos| for a radio item and return its
+// group id, else start a new group.
+int Menu::GenerateGroupId(int pos) {
+  static int next_group_id = 0;
+  if (pos > 0) {
+    // The nearest radio item before |pos| with no separator in between.
+    for (int i = pos - 1; i >= 0; --i) {
+      if (ItemAt(i)->type() == MenuItem::Type::kRadio)
+        return ItemAt(i)->group_id();
+      if (ItemAt(i)->type() == MenuItem::Type::kSeparator)
+        break;
+    }
+  } else {
+    // The first radio item from |pos| on, before any separator.
+    for (size_t i = 0; i < GetItemCount(); ++i) {
+      if (ItemAt(i)->type() == MenuItem::Type::kRadio)
+        return ItemAt(i)->group_id();
+      if (ItemAt(i)->type() == MenuItem::Type::kSeparator)
+        break;
+    }
+  }
+  return ++next_group_id;
 }
 
-void Menu::SetIcon(int index, const gfx::Image& image) {
-  model_->SetIcon(index, ui::ImageModel::FromImage(image));
+void Menu::Insert(gin_helper::ErrorThrower thrower,
+                  int pos,
+                  v8::Local<v8::Value> item_value) {
+  v8::Isolate* isolate = thrower.isolate();
+  MenuItem* item = MenuItem::FromV8(isolate, item_value);
+  if (!item) {
+    thrower.ThrowTypeError("Invalid item");
+    return;
+  }
+  if (pos < 0) {
+    thrower.ThrowRangeError(base::StrCat(
+        {"Position ", base::NumberToString(pos), " cannot be less than 0"}));
+    return;
+  }
+  if (pos > static_cast<int>(GetItemCount())) {
+    thrower.ThrowRangeError(
+        base::StrCat({"Position ", base::NumberToString(pos),
+                      " cannot be greater than the total MenuItem count"}));
+    return;
+  }
+  InsertItem(isolate, pos, item, &thrower);
 }
 
-void Menu::SetSublabel(int index, const std::u16string& sublabel) {
-  model_->SetSecondaryLabel(index, sublabel);
+void Menu::Append(gin_helper::ErrorThrower thrower, v8::Local<v8::Value> item) {
+  Insert(thrower, GetItemCount(), item);
 }
 
-void Menu::SetToolTip(int index, const std::u16string& toolTip) {
-  model_->SetToolTip(index, toolTip);
+void Menu::AppendItem(v8::Isolate* isolate, MenuItem* item) {
+  InsertItem(isolate, GetItemCount(), item);
 }
 
-void Menu::SetRole(int index, const std::u16string& role) {
-  model_->SetRole(index, role);
+void Menu::InsertItem(v8::Isolate* isolate,
+                      int pos,
+                      MenuItem* item,
+                      gin_helper::ErrorThrower* thrower) {
+  const int count = static_cast<int>(GetItemCount());
+  CHECK_GE(pos, 0);
+  CHECK_LE(pos, count);
+  if ((item->type() == MenuItem::Type::kSubmenu ||
+       item->type() == MenuItem::Type::kPalette) &&
+      !item->submenu()) {
+    if (thrower)
+      thrower->ThrowTypeError("Invalid submenu");
+    return;
+  }
+  if (item->GetSubmenuModel())
+    item->submenu()->parent_ = this;
+  int group_id = 0;
+  if (item->type() == MenuItem::Type::kRadio)
+    group_id = item->group_id() ? item->group_id() : GenerateGroupId(pos);
+  item->AttachToMenu(this, group_id);
+
+  cppgc::AllocationHandle& heap = isolate->GetCppHeap()->GetAllocationHandle();
+  if (pos == count) {
+    Entry* entry = cppgc::MakeGarbageCollected<Entry>(heap, item, nullptr);
+    if (last_entry_)
+      last_entry_->next = entry;
+    else
+      first_entry_ = entry;
+    last_entry_ = entry;
+  } else if (pos == 0) {
+    first_entry_ =
+        cppgc::MakeGarbageCollected<Entry>(heap, item, first_entry_.Get());
+  } else {
+    Entry* before = first_entry_.Get();
+    for (int i = 1; i < pos; ++i)
+      before = before->next.Get();
+    before->next =
+        cppgc::MakeGarbageCollected<Entry>(heap, item, before->next.Get());
+  }
+  model_->InsertItemAt(pos, item);
+  items_.Reset();
 }
 
-void Menu::Clear() {
-  model_->Clear();
+v8::Local<v8::Value> Menu::Items(v8::Isolate* isolate) {
+  if (items_.IsEmpty()) {
+    v8::Local<v8::Context> context = isolate->GetCurrentContext();
+    v8::Local<v8::Array> items = v8::Array::New(isolate);
+    for (uint32_t i = 0; i < GetItemCount(); ++i) {
+      v8::Local<v8::Object> wrapper;
+      if (ItemAt(i)->GetWrapper(isolate).ToLocal(&wrapper))
+        items->Set(context, i, wrapper).Check();
+    }
+    items_.Reset(isolate, items);
+  }
+  return items_.Get(isolate);
+}
+
+v8::Local<v8::Value> Menu::GetMenuItemById(gin::Arguments* args) {
+  v8::Local<v8::Value> id;
+  if (!args->GetNext(&id))
+    id = v8::Undefined(args->isolate());
+  return FindItemById(args->isolate(), id);
+}
+
+v8::Local<v8::Value> Menu::FindItemById(v8::Isolate* isolate,
+                                        v8::Local<v8::Value> id) {
+  for (size_t i = 0; i < GetItemCount(); ++i) {
+    v8::Local<v8::Object> wrapper;
+    if (!ItemAt(i)->GetWrapper(isolate).ToLocal(&wrapper))
+      continue;
+    v8::Local<v8::Value> item_id;
+    if (!gin_helper::Dictionary(isolate, wrapper).Get("id", &item_id))
+      item_id = v8::Undefined(isolate);
+    if (item_id->StrictEquals(id))
+      return wrapper;
+  }
+  for (size_t i = 0; i < GetItemCount(); ++i) {
+    if (Menu* submenu = ItemAt(i)->submenu()) {
+      v8::Local<v8::Value> found = submenu->FindItemById(isolate, id);
+      if (!found->IsNull())
+        return found;
+    }
+  }
+  return v8::Null(isolate);
+}
+
+v8::Local<v8::Value> Menu::Popup(gin::Arguments* args) {
+  v8::Isolate* isolate = args->isolate();
+  gin_helper::ErrorThrower thrower(isolate);
+  v8::Local<v8::Value> options_value;
+  if (!args->GetNext(&options_value) || options_value->IsUndefined())
+    options_value = v8::Object::New(isolate);
+  if (!options_value->IsObject() || options_value->IsNull()) {
+    thrower.ThrowTypeError("Options must be an object");
+    return v8::Undefined(isolate);
+  }
+  v8::Local<v8::Object> options = options_value.As<v8::Object>();
+
+  gin_helper::Dictionary dict(isolate, options);
+  v8::Local<v8::Value> window_value;
+  int x = -1;
+  int y = -1;
+  int positioning_item = -1;
+  ui::mojom::MenuSourceType source_type = ui::mojom::MenuSourceType::kMouse;
+  WebFrameMain* frame_ptr = nullptr;
+  dict.Get("window", &window_value);
+  // A number must be an int32; anything else takes the default.
+  bool bad_number = false;
+  auto get_int = [&](std::string_view key, int* out) {
+    v8::Local<v8::Value> value;
+    if (!dict.Get(key, &value) || !value->IsNumber())
+      return;
+    if (value->IsInt32())
+      *out = value.As<v8::Int32>()->Value();
+    else
+      bad_number = true;
+  };
+  get_int("x", &x);
+  get_int("y", &y);
+  get_int("positioningItem", &positioning_item);
+  if (bad_number) {
+    thrower.ThrowTypeError("x, y and positioningItem must be integers");
+    return v8::Undefined(isolate);
+  }
+  std::string source_type_name;
+  if (dict.Get("sourceType", &source_type_name) && !source_type_name.empty() &&
+      !gin::ConvertFromV8(isolate, gin::StringToV8(isolate, source_type_name),
+                          &source_type)) {
+    thrower.ThrowTypeError("Invalid sourceType: " + source_type_name);
+    return v8::Undefined(isolate);
+  }
+  dict.Get("frame", &frame_ptr);
+
+  BaseWindow* window = nullptr;
+  if (!window_value.IsEmpty())
+    window = BaseWindow::FromValue(isolate, window_value);
+  if (!window) {
+    window = BaseWindow::GetFocusedWindow();
+    if (!window && !BaseWindow::GetAllNative().empty())
+      window = BaseWindow::GetAllNative().front();
+    if (!window) {
+      thrower.ThrowError("Cannot open Menu without a BaseWindow present");
+      return v8::Undefined(isolate);
+    }
+    window_value = window->GetWrapper();
+  }
+  std::optional<WebFrameMain*> frame;
+  if (frame_ptr)
+    frame = frame_ptr;
+  // Anything but a function means no callback.
+  base::OnceClosure callback;
+  if (!dict.Get("callback", &callback))
+    callback = base::DoNothing();
+  PopupAt(window, frame, x, y, positioning_item, source_type,
+          std::move(callback));
+
+  gin::Dictionary result = gin::Dictionary::CreateEmpty(isolate);
+  result.Set("browserWindow", window_value);
+  result.Set("x", x);
+  result.Set("y", y);
+  result.Set("position", positioning_item);
+  return gin::ConvertToV8(isolate, result);
+}
+
+void Menu::ClosePopup(gin::Arguments* args) {
+  v8::Isolate* isolate = args->isolate();
+  v8::Local<v8::Value> window_value;
+  BaseWindow* window = nullptr;
+  if (args->GetNext(&window_value))
+    window = BaseWindow::FromValue(isolate, window_value);
+  if (window) {
+    ClosePopupAt(window->weak_map_id());
+  } else {
+    // Passing -1 (invalid) would make closePopupAt close all menu runners
+    // belonging to this menu.
+    ClosePopupAt(-1);
+  }
+}
+
+// static
+void Menu::SetApplicationMenuFromJS(gin::Arguments* args) {
+  v8::Isolate* isolate = args->isolate();
+  gin_helper::ErrorThrower thrower(isolate);
+  v8::Local<v8::Value> value;
+  args->GetNext(&value);
+  Menu* menu = nullptr;
+  if (!value.IsEmpty() && value->BooleanValue(isolate)) {
+    if (!value->IsObject() || !gin::ConvertFromV8(isolate, value, &menu) ||
+        !menu) {
+      thrower.ThrowTypeError("Invalid menu");
+      return;
+    }
+  }
+  ChangeApplicationMenu(menu);
+}
+
+// static
+void Menu::ChangeApplicationMenu(Menu* menu) {
+  g_application_menu_was_set = true;
+  if (menu)
+    ApplicationMenu() = cppgc::Persistent<Menu>(menu);
+  else
+    ApplicationMenu().Clear();
+#if BUILDFLAG(IS_MAC)
+  if (!menu)
+    return;
+  SetApplicationMenu(menu);
+#else
+  // Setting a menu can run app JS (e.g. 'resize'), which can open or close
+  // windows; iterate a copy.
+  std::vector<BaseWindow*> windows = BaseWindow::GetAllNative();
+  for (BaseWindow* window : windows) {
+    if (!BaseWindow::IsLive(window))
+      continue;
+    if (menu)
+      window->SetMenuNatively(menu);
+    else
+      window->RemoveMenu();
+  }
+#endif
+}
+
+// static
+v8::Local<v8::Value> Menu::GetApplicationMenu(v8::Isolate* isolate) {
+  Menu* menu = ApplicationMenu().Get();
+  v8::Local<v8::Object> wrapper;
+  if (menu && menu->GetWrapper(isolate).ToLocal(&wrapper))
+    return wrapper;
+  return v8::Null(isolate);
+}
+
+// static
+Menu* Menu::application_menu() {
+  return ApplicationMenu().Get();
+}
+
+// static
+void Menu::InstallDefaultApplicationMenu(v8::Isolate* isolate) {
+  if (g_application_menu_was_set)
+    return;
+  v8::HandleScope handle_scope(isolate);
+  v8::Local<v8::Context> context = isolate->GetCurrentContext();
+  // Nothing need have touched electron.Menu yet; the wrappers created below
+  // get their templates from the constructors.
+  gin::PerIsolateData* data = gin::PerIsolateData::From(isolate);
+  if (!data)
+    return;
+  if (data->GetObjectTemplate(&kWrapperInfo).IsEmpty())
+    GetConstructor(isolate, context, &kWrapperInfo);
+  if (data->GetObjectTemplate(&MenuItem::kWrapperInfo).IsEmpty())
+    MenuItem::GetConstructor(isolate, context, &MenuItem::kWrapperInfo);
+  v8::LocalVector<v8::Value> entries(isolate);
+  for (std::string_view role : {
+#if BUILDFLAG(IS_MAC)
+           "appMenu",
+#endif
+           "fileMenu", "editMenu", "viewMenu", "windowMenu"}) {
+    gin_helper::Dictionary entry = gin::Dictionary::CreateEmpty(isolate);
+    entry.Set("role", role);
+    entries.push_back(entry.GetHandle());
+  }
+  v8::TryCatch try_catch(isolate);
+  v8::Local<v8::Value> built = BuildFromTemplate(
+      gin_helper::ErrorThrower(isolate),
+      v8::Array::New(isolate, entries.data(), entries.size()));
+  Menu* menu = nullptr;
+  if (built.IsEmpty() || !gin::ConvertFromV8(isolate, built, &menu) || !menu) {
+    LOG(ERROR) << "Failed to build the default application menu";
+    return;
+  }
+  v8::Context::Scope context_scope(context);
+  ChangeApplicationMenu(menu);
+}
+
+void Menu::ActivateForTesting(int command_id) {
+  if (std::optional<size_t> index = model_->GetIndexOfCommandId(command_id)) {
+    ItemAt(*index)->Activate(BaseWindow::GetFocusedWindow(),
+                             WebContents::GetFocusedWebContents(), 0);
+  }
+}
+
+void Menu::MenuWillShowForTesting() {
+  MenuWillShow();
+}
+
+base::OnceClosure Menu::BindSelfToClosure(base::OnceClosure callback) {
+  return base::BindOnce(
+      [](base::OnceClosure callback, cppgc::Persistent<Menu> prevent_gc) {
+        std::move(callback).Run();
+      },
+      std::move(callback), cppgc::Persistent<Menu>(this));
 }
 
 int Menu::GetIndexOfCommandId(int command_id) const {
   return model_->GetIndexOfCommandId(command_id).value_or(-1);
-}
-
-int Menu::GetItemCount() const {
-  return model_->GetItemCount();
-}
-
-int Menu::GetCommandIdAt(int index) const {
-  return model_->GetCommandIdAt(index);
-}
-
-std::u16string Menu::GetLabelAt(int index) const {
-  return model_->GetLabelAt(index);
-}
-
-std::u16string Menu::GetSublabelAt(int index) const {
-  return model_->GetSecondaryLabelAt(index);
-}
-
-std::u16string Menu::GetToolTipAt(int index) const {
-  return model_->GetToolTipAt(index);
 }
 
 std::u16string Menu::GetAcceleratorTextAtForTesting(int index) const {
@@ -239,29 +500,13 @@ std::u16string Menu::GetAcceleratorTextAtForTesting(int index) const {
   return accelerator.GetShortcutText();
 }
 
-bool Menu::IsItemCheckedAt(int index) const {
-  return model_->IsItemCheckedAt(index);
-}
-
-bool Menu::IsEnabledAt(int index) const {
-  return model_->IsEnabledAt(index);
-}
-
-bool Menu::IsVisibleAt(int index) const {
-  return model_->IsVisibleAt(index);
-}
-
-bool Menu::WorksWhenHiddenAt(int index) const {
-  return model_->WorksWhenHiddenAt(index);
-}
-
 void Menu::OnMenuWillClose() {
-  Unpin();
   Emit("menu-will-close");
+  keep_alive_.Clear();
 }
 
 void Menu::OnMenuWillShow() {
-  Pin(JavascriptEnvironment::GetIsolate());
+  keep_alive_ = this;
   Emit("menu-will-show");
 }
 
@@ -269,33 +514,44 @@ void Menu::OnMenuWillShow() {
 void Menu::FillObjectTemplate(v8::Isolate* isolate,
                               v8::Local<v8::ObjectTemplate> templ) {
   gin::ObjectTemplateBuilder(isolate, "Menu", templ)
-      .SetMethod("insertItem", &Menu::InsertItemAt)
-      .SetMethod("insertCheckItem", &Menu::InsertCheckItemAt)
-      .SetMethod("insertRadioItem", &Menu::InsertRadioItemAt)
-      .SetMethod("insertSeparator", &Menu::InsertSeparatorAt)
-      .SetMethod("insertSubMenu", &Menu::InsertSubMenuAt)
-      .SetMethod("setIcon", &Menu::SetIcon)
-      .SetMethod("setSublabel", &Menu::SetSublabel)
-      .SetMethod("setToolTip", &Menu::SetToolTip)
-      .SetMethod("setRole", &Menu::SetRole)
-      .SetMethod("clear", &Menu::Clear)
-      .SetMethod("getIndexOfCommandId", &Menu::GetIndexOfCommandId)
+      .SetMethod("insert", &Menu::Insert)
+      .SetMethod("append", &Menu::Append)
+      .SetMethod("getMenuItemById", &Menu::GetMenuItemById)
+      .SetMethod("popup", &Menu::Popup)
+      .SetMethod("closePopup", &Menu::ClosePopup)
       .SetMethod("getItemCount", &Menu::GetItemCount)
-      .SetMethod("getCommandIdAt", &Menu::GetCommandIdAt)
-      .SetMethod("getLabelAt", &Menu::GetLabelAt)
-      .SetMethod("getSublabelAt", &Menu::GetSublabelAt)
-      .SetMethod("getToolTipAt", &Menu::GetToolTipAt)
-      .SetMethod("isItemCheckedAt", &Menu::IsItemCheckedAt)
-      .SetMethod("isEnabledAt", &Menu::IsEnabledAt)
-      .SetMethod("worksWhenHiddenAt", &Menu::WorksWhenHiddenAt)
-      .SetMethod("isVisibleAt", &Menu::IsVisibleAt)
-      .SetMethod("popupAt", &Menu::PopupAt)
-      .SetMethod("closePopupAt", &Menu::ClosePopupAt)
+      .SetMethod("getIndexOfCommandId", &Menu::GetIndexOfCommandId)
+      .SetMethod("_activate", &Menu::ActivateForTesting)
+      .SetMethod("_menuWillShow", &Menu::MenuWillShowForTesting)
       .SetMethod("_getAcceleratorTextAt", &Menu::GetAcceleratorTextAtForTesting)
 #if BUILDFLAG(IS_MAC)
-      .SetMethod("_getUserAcceleratorAt", &Menu::GetUserAcceleratorAt)
+      .SetMethod("_simulateSubmenuCloseSequenceForTesting",
+                 &Menu::SimulateSubmenuCloseSequenceForTesting)
 #endif
       .Build();
+}
+
+// static
+void Menu::FillInstanceTemplate(v8::Isolate* isolate,
+                                v8::Local<v8::ObjectTemplate> templ) {
+  // An own, enumerable property so that a serialised menu includes it.
+  templ->SetNativeDataProperty(
+      gin::StringToSymbol(isolate, "items"),
+      [](v8::Local<v8::Name>, const v8::PropertyCallbackInfo<v8::Value>& info) {
+        Menu* self = nullptr;
+        if (gin::ConvertFromV8(info.GetIsolate(), info.Holder(), &self) && self)
+          info.GetReturnValue().Set(self->Items(info.GetIsolate()));
+      },
+      nullptr, v8::Local<v8::Value>(),
+      static_cast<v8::PropertyAttribute>(v8::ReadOnly | v8::DontDelete));
+}
+
+const gin::WrapperInfo* Menu::wrapper_info() const {
+  return &kWrapperInfo;
+}
+
+const char* Menu::GetHumanReadableName() const {
+  return "Electron / Menu";
 }
 
 }  // namespace electron::api
@@ -308,14 +564,22 @@ void Initialize(v8::Local<v8::Object> exports,
                 v8::Local<v8::Value> unused,
                 v8::Local<v8::Context> context,
                 void* priv) {
-  v8::Isolate* isolate = context->GetIsolate();
-
-  gin_helper::Dictionary dict(isolate, exports);
-  dict.Set("Menu", Menu::GetConstructor(context));
+  v8::Isolate* const isolate = electron::JavascriptEnvironment::GetIsolate();
+  gin_helper::Dictionary dict{isolate, exports};
+  v8::Local<v8::Function> menu =
+      Menu::GetConstructor(isolate, context, &Menu::kWrapperInfo);
+  dict.Set("Menu", menu);
+  dict.Set("MenuItem",
+           electron::api::MenuItem::GetConstructor(
+               isolate, context, &electron::api::MenuItem::kWrapperInfo));
+  gin_helper::Dictionary statics(isolate, menu);
+  statics.SetMethod<&Menu::BuildFromTemplate>("buildFromTemplate");
+  statics.SetMethod<&Menu::SetApplicationMenuFromJS>("setApplicationMenu");
+  statics.SetMethod<&Menu::GetApplicationMenu>("getApplicationMenu");
+  statics.SetMethod<&electron::api::menu_roles::Defaults>("_roleDefaults");
 #if BUILDFLAG(IS_MAC)
-  dict.SetMethod("setApplicationMenu", &Menu::SetApplicationMenu);
-  dict.SetMethod("sendActionToFirstResponder",
-                 &Menu::SendActionToFirstResponder);
+  statics.SetMethod<&Menu::SendActionToFirstResponder>(
+      "sendActionToFirstResponder");
 #endif
 }
 

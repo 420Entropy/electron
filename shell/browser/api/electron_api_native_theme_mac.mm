@@ -8,25 +8,26 @@
 
 namespace electron::api {
 
-void NativeTheme::UpdateMacOSAppearanceForOverrideValue(
-    ui::NativeTheme::ThemeSource override) {
-  if (@available(macOS 10.14, *)) {
-    NSAppearance* new_appearance;
-    switch (override) {
-      case ui::NativeTheme::ThemeSource::kForcedDark:
-        new_appearance =
-            [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
-        break;
-      case ui::NativeTheme::ThemeSource::kForcedLight:
-        new_appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
-        break;
-      case ui::NativeTheme::ThemeSource::kSystem:
-      default:
-        new_appearance = nil;
-        break;
-    }
-    [[NSApplication sharedApplication] setAppearance:new_appearance];
+void NativeTheme::UpdateMacOSAppearanceForOverrideValue(ThemeSource override) {
+  NSAppearance* new_appearance;
+  switch (override) {
+    case ThemeSource::kForcedDark:
+      new_appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
+      break;
+    case ThemeSource::kForcedLight:
+      new_appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
+      break;
+    case ThemeSource::kSystem:
+    default:
+      new_appearance = nil;
+      break;
   }
+  [[NSApplication sharedApplication] setAppearance:new_appearance];
+}
+
+bool NativeTheme::ShouldDifferentiateWithoutColor() {
+  return [[NSWorkspace sharedWorkspace]
+      accessibilityDisplayShouldDifferentiateWithoutColor];
 }
 
 }  // namespace electron::api

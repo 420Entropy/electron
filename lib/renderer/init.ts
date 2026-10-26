@@ -1,10 +1,22 @@
-import * as path from 'path';
 import { IPC_MESSAGES } from '@electron/internal/common/ipc-messages';
-
 import type * as ipcRendererInternalModule from '@electron/internal/renderer/ipc-renderer-internal';
-import type * as ipcRendererUtilsModule from '@electron/internal/renderer/ipc-renderer-internal-utils';
 
-const Module = require('module');
+import * as path from 'path';
+import { pathToFileURL } from 'url';
+
+const Module = require('module') as NodeJS.ModuleInternal;
+
+// We do not want to allow use of the VM module in the renderer process as
+// it conflicts with Blink's V8::Context internal logic.
+const originalModuleLoad = Module._load;
+Module._load = function (request: string) {
+  if (request === 'vm') {
+    console.warn(
+      "The vm module of Node.js is unsupported in Electron's renderer process due to incompatibilities with the Blink rendering engine. Crashes are likely and avoiding the module is highly recommended. This module may be removed in a future release."
+    );
+  }
+  return originalModuleLoad.apply(this, arguments as any);
+};
 
 // Make sure globals like "process" and "global" are always available in preload
 // scripts even after they are deleted in "loaded" script.
@@ -17,29 +29,22 @@ const Module = require('module');
 // "Module.wrapper" we can force Node to use the old code path to wrap module
 // code with JavaScript.
 //
-// Note 3: We provide the equivalent extra variables internally through the
-// webpack ProvidePlugin in webpack.config.base.js.  If you add any extra
-// variables to this wrapper please ensure to update that plugin as well.
+// Note 3: We provide the equivalent extra variables internally by injecting
+// lib/common/node-globals.ts (see `inject` in build/bundle/bundle.mjs). If you
+// add any extra variables to this wrapper please ensure to update that as well.
 Module.wrapper = [
   '(function (exports, require, module, __filename, __dirname, process, global, Buffer) { ' +
-  // By running the code in a new closure, it would be possible for the module
-  // code to override "process" and "Buffer" with local variables.
-  'return function (exports, require, module, __filename, __dirname) { ',
+    // By running the code in a new closure, it would be possible for the module
+    // code to override "process" and "Buffer" with local variables.
+    'return function (exports, require, module, __filename, __dirname) { ',
   '\n}.call(this, exports, require, module, __filename, __dirname); });'
 ];
-
-// We modified the original process.argv to let node.js load the
-// init.js, we need to restore it here.
-process.argv.splice(1, 1);
-
-// Clear search paths.
-require('../common/reset-search-paths');
 
 // Import common settings.
 require('@electron/internal/common/init');
 
-const { ipcRendererInternal } = require('@electron/internal/renderer/ipc-renderer-internal') as typeof ipcRendererInternalModule;
-const ipcRendererUtils = require('@electron/internal/renderer/ipc-renderer-internal-utils') as typeof ipcRendererUtilsModule;
+const { ipcRendererInternal } =
+  require('@electron/internal/renderer/ipc-renderer-internal') as typeof ipcRendererInternalModule;
 
 process.getProcessMemoryInfo = () => {
   return ipcRendererInternal.invoke<Electron.ProcessMemoryInfo>(IPC_MESSAGES.BROWSER_GET_PROCESS_MEMORY_INFO);
@@ -47,6 +52,7 @@ process.getProcessMemoryInfo = () => {
 
 // Process command line arguments.
 const { hasSwitch, getSwitchValue } = process._linkedBinding('electron_common_command_line');
+const v8Util = process._linkedBinding('electron_common_v8_util');
 const { mainFrame } = process._linkedBinding('electron_renderer_web_frame');
 
 const nodeIntegration = mainFrame.getWebPreference('nodeIntegration');
@@ -57,9 +63,10 @@ require('@electron/internal/renderer/common-init');
 
 if (nodeIntegration) {
   // Export node bindings to global.
-  const { makeRequireFunction } = __non_webpack_require__('internal/modules/cjs/helpers') // eslint-disable-line
-  global.module = new Module('electron/js2c/renderer_init');
-  global.require = makeRequireFunction(global.module);
+  const { makeRequireFunction } =
+    require('internal/modules/helpers') as typeof import('@node/lib/internal/modules/helpers');
+  global.module = new Module('internal/electron/js2c/renderer_init');
+  global.require = makeRequireFunction(global.module) as NodeRequire;
 
   // Set the __filename to the path of html file if it is file: protocol.
   if (window.location.protocol === 'file:') {
@@ -106,31 +113,68 @@ if (nodeIntegration) {
       return false;
     }
   };
-} else {
-  // Delete Node's symbols after the Environment has been loaded in a
-  // non context-isolated environment
-  if (!process.contextIsolated) {
-    process.once('loaded', function () {
-      delete (global as any).process;
-      delete (global as any).Buffer;
-      delete (global as any).setImmediate;
-      delete (global as any).clearImmediate;
-      delete (global as any).global;
-      delete (global as any).root;
-      delete (global as any).GLOBAL;
-    });
-  }
 }
 
-const { preloadPaths } = ipcRendererUtils.invokeSync(IPC_MESSAGES.BROWSER_NONSANDBOX_LOAD);
-// Load the preload scripts.
-for (const preloadScript of preloadPaths) {
-  try {
-    Module._load(preloadScript);
-  } catch (error) {
-    console.error(`Unable to load preload script: ${preloadScript}`);
-    console.error(error);
+// In a non context-isolated renderer without Node integration, the Node
+// globals (process, Buffer, ...) must be removed from the renderer's main
+// world before the page's own scripts run, but only after the preload
+// scripts have had a chance to use them. The 'loaded' event fires on the
+// next tick after init returns, which is before any async ESM preload
+// finishes executing, leaving its code with no `process` (#46142). So we
+// instead schedule the deletion explicitly once preloads are loaded.
+const shouldDeleteRendererNodeGlobals = !nodeIntegration && !process.contextIsolated;
 
-    ipcRendererInternal.send(IPC_MESSAGES.BROWSER_PRELOAD_ERROR, preloadScript, error);
+const { appCodeLoaded } = process;
+delete process.appCodeLoaded;
+
+const onPreloadsLoaded = () => {
+  if (shouldDeleteRendererNodeGlobals) {
+    delete (global as any).process;
+    delete (global as any).Buffer;
+    delete (global as any).setImmediate;
+    delete (global as any).clearImmediate;
+    delete (global as any).global;
+    delete (global as any).root;
+    delete (global as any).GLOBAL;
   }
+  appCodeLoaded!();
+};
+
+// Pushed by the browser ahead of this navigation; see
+// ElectronRendererClient::DidCreateScriptContext.
+const preloadPaths: string[] = v8Util.getHiddenValue(process, 'preloadPaths') ?? [];
+const cjsPreloads = preloadPaths.filter((p) => path.extname(p) !== '.mjs');
+const esmPreloads = preloadPaths.filter((p) => path.extname(p) === '.mjs');
+if (cjsPreloads.length) {
+  // Load the preload scripts.
+  for (const preloadScript of cjsPreloads) {
+    try {
+      Module._load(preloadScript);
+    } catch (error) {
+      console.error(`Unable to load preload script: ${preloadScript}`);
+      console.error(error);
+
+      ipcRendererInternal.send(IPC_MESSAGES.BROWSER_PRELOAD_ERROR, preloadScript, error);
+    }
+  }
+}
+if (esmPreloads.length) {
+  const { runEntryPointWithESMLoader } =
+    require('internal/modules/run_main') as typeof import('@node/lib/internal/modules/run_main');
+
+  runEntryPointWithESMLoader(async (cascadedLoader: any) => {
+    // Load the preload scripts.
+    for (const preloadScript of esmPreloads) {
+      await cascadedLoader
+        .import(pathToFileURL(preloadScript).toString(), undefined, Object.create(null))
+        .catch((err: Error) => {
+          console.error(`Unable to load preload script: ${preloadScript}`);
+          console.error(err);
+
+          ipcRendererInternal.send(IPC_MESSAGES.BROWSER_PRELOAD_ERROR, preloadScript, err);
+        });
+    }
+  }).finally(onPreloadsLoaded);
+} else {
+  onPreloadsLoaded();
 }

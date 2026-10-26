@@ -24,8 +24,8 @@ If you prefer the manual approach, there are 2 ways to distribute your applicati
 
 ### With prebuilt binaries
 
-To distribute your app manually, you need to download Electron's [prebuilt
-binaries](https://github.com/electron/electron/releases). Next, the folder
+To distribute your app manually, you need to download Electron's
+[prebuilt binaries](https://github.com/electron/electron/releases). Next, the folder
 containing your app should be named `app` and placed in Electron's resources
 directory as shown in the following examples.
 
@@ -83,6 +83,9 @@ before distributing it to users.
 
 - **Windows:** You can rename `electron.exe` to any name you like, and edit
   its icon and other information with tools like [rcedit](https://github.com/electron/rcedit).
+  Rename `electron_wer.dll` to match (for example `myapp_wer.dll` next to
+  `myapp.exe`) so the [crash reporter](../api/crash-reporter.md) can still
+  capture fail-fast crashes.
 - **Linux:** You can rename the `electron` executable to any name you like.
 - **macOS:** You can rename `Electron.app` to any name you want, and you also have to rename
   the `CFBundleDisplayName`, `CFBundleIdentifier` and `CFBundleName` fields in the

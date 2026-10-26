@@ -32,7 +32,7 @@ at [https://update.electronjs.org](https://update.electronjs.org). Its requireme
 - Your app runs on macOS or Windows
 - Your app has a public GitHub repository
 - Builds are published to [GitHub releases][]
-- Builds are [code signed][code-signed]
+- Builds are [code signed][code-signed] **(macOS only)**
 
 At this point, we'll assume that you have already pushed all your
 code to a public GitHub repository.
@@ -86,13 +86,13 @@ module.exports = {
       config: {
         repository: {
           owner: 'github-user-name',
-          name: 'github-repo-name',
+          name: 'github-repo-name'
         },
         prerelease: false,
-        draft: true,
-      },
-    },
-  ],
+        draft: true
+      }
+    }
+  ]
 }
 ```
 
@@ -112,9 +112,9 @@ You also need to make the Publisher aware of your authentication token.
 By default, it will use the value stored in the `GITHUB_TOKEN` environment
 variable.
 
-### Running the publish command
+### Running the release command
 
-Add Forge's [publish command][] to your npm scripts.
+Add Forge's [release command][] to your npm scripts.
 
 ```json {6} title='package.json'
   //...
@@ -122,7 +122,7 @@ Add Forge's [publish command][] to your npm scripts.
     "start": "electron-forge start",
     "package": "electron-forge package",
     "make": "electron-forge make",
-    "publish": "electron-forge publish"
+    "release": "electron-forge release"
   },
   //...
 ```
@@ -131,7 +131,7 @@ This command will run your configured makers and publish the output distributabl
 GitHub release.
 
 ```sh npm2yarn
-npm run publish
+npm run release
 ```
 
 By default, this will only publish a single distributable for your host operating system and
@@ -152,7 +152,7 @@ command that can handle the version bumping and tagging for you.
 #### Bonus: Publishing in GitHub Actions
 
 Publishing locally can be painful, especially because you can only create distributables
-for your host operating system (i.e. you can't publish a Window `.exe` file from macOS).
+for your host operating system (i.e. you can't publish a Windows `.exe` file from macOS).
 
 A solution for this would be to publish your app via automation workflows
 such as [GitHub Actions][], which can run tasks in the
@@ -188,7 +188,7 @@ npm install update-electron-app
 
 Then, import the module and call it immediately in the main process.
 
-```js title='main.js'
+```js title='main.js' @ts-nocheck
 require('update-electron-app')()
 ```
 
@@ -213,24 +213,22 @@ own update server and configure the autoUpdater module yourself.
 :::info 🌟 You're done!
 
 From here, you have officially completed our tutorial to Electron. Feel free to explore the
-rest of our docs and happy developing! If you have questions, please stop by our community
-[Discord server][].
+rest of our docs and happy developing!
 
 :::
 
 [autoupdater]: ../api/auto-updater.md
 [code-signed]: ./code-signing.md
-[discord server]: https://discord.gg/electronjs
-[electron fiddle]: https://electronjs.org/fiddle
-[fiddle-build]: https://github.com/electron/fiddle/blob/main/.github/workflows/build.yaml
-[fiddle-forge-config]: https://github.com/electron/fiddle/blob/main/forge.config.js
+[electron fiddle]: https://www.electronjs.org/fiddle
+[fiddle-build]: https://github.com/electron/fiddle/blob/main/.circleci/config.yml
+[fiddle-forge-config]: https://github.com/electron/fiddle/blob/main/forge.config.ts
 [github actions]: https://github.com/features/actions
 [github publisher]: https://www.electronforge.io/config/publishers/github
 [github releases]: https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository
 [git-tag]: https://git-scm.com/book/en/v2/Git-Basics-Tagging
 [new-pat]: https://github.com/settings/tokens/new
-[publish command]: https://www.electronforge.io/cli#publish
 [publisher]: https://www.electronforge.io/config/publishers
+[release command]: https://www.electronforge.io/cli#release
 [`publishergithubconfig`]: https://js.electronforge.io/interfaces/_electron_forge_publisher_github.PublisherGitHubConfig.html
 [`update-electron-app`]: https://github.com/electron/update-electron-app
 [update-server]: ./updates.md

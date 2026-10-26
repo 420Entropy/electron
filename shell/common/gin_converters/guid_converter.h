@@ -7,6 +7,7 @@
 
 #include <string>
 
+#include "base/uuid.h"
 #include "gin/converter.h"
 
 #if BUILDFLAG(IS_WIN)
@@ -37,22 +38,44 @@ typedef struct {
 namespace gin {
 
 template <>
+struct Converter<base::Uuid> {
+  static bool FromV8(v8::Isolate* isolate,
+                     v8::Local<v8::Value> val,
+                     base::Uuid* out) {
+    std::string guid;
+    if (!gin::ConvertFromV8(isolate, val, &guid))
+      return false;
+
+    base::Uuid parsed = base::Uuid::ParseCaseInsensitive(guid);
+    if (!parsed.is_valid())
+      return false;
+
+    *out = std::move(parsed);
+    return true;
+  }
+
+  static v8::Local<v8::Value> ToV8(v8::Isolate* isolate,
+                                   const base::Uuid& val) {
+    return gin::ConvertToV8(isolate, val.AsLowercaseString());
+  }
+};
+
+#if BUILDFLAG(IS_WIN)
+template <>
 struct Converter<UUID> {
   static bool FromV8(v8::Isolate* isolate,
                      v8::Local<v8::Value> val,
                      UUID* out) {
-#if BUILDFLAG(IS_WIN)
     std::string guid;
     if (!gin::ConvertFromV8(isolate, val, &guid))
       return false;
 
     UUID uid;
-
     if (!guid.empty()) {
       if (guid[0] == '{' && guid[guid.length() - 1] == '}') {
         guid = guid.substr(1, guid.length() - 2);
       }
-      unsigned char* uid_cstr = (unsigned char*)guid.c_str();
+      auto* uid_cstr = reinterpret_cast<unsigned char*>(guid.data());
       RPC_STATUS result = UuidFromStringA(uid_cstr, &uid);
       if (result == RPC_S_INVALID_STRING_UUID) {
         return false;
@@ -62,24 +85,18 @@ struct Converter<UUID> {
       }
     }
     return false;
-#else
-    return false;
-#endif
   }
   static v8::Local<v8::Value> ToV8(v8::Isolate* isolate, UUID val) {
-#if BUILDFLAG(IS_WIN)
     const GUID GUID_NULL = {};
     if (val == GUID_NULL) {
-      return StringToV8(isolate, "");
+      return v8::String::Empty(isolate);
     } else {
       std::wstring uid = base::win::WStringFromGUID(val);
       return StringToV8(isolate, base::SysWideToUTF8(uid));
     }
-#else
-    return v8::Undefined(isolate);
-#endif
   }
 };
+#endif
 
 }  // namespace gin
 

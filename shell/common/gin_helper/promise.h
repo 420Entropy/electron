@@ -5,19 +5,21 @@
 #ifndef ELECTRON_SHELL_COMMON_GIN_HELPER_PROMISE_H_
 #define ELECTRON_SHELL_COMMON_GIN_HELPER_PROMISE_H_
 
-#include <string>
+#include <string_view>
 #include <tuple>
 #include <type_traits>
 #include <utility>
 
-#include "base/strings/string_piece.h"
-#include "content/public/browser/browser_task_traits.h"
-#include "content/public/browser/browser_thread.h"
+#include "base/memory/scoped_refptr.h"
+#include "base/task/task_runner.h"
 #include "shell/common/gin_converters/std_converter.h"
-#include "shell/common/gin_helper/locker.h"
-#include "shell/common/gin_helper/microtasks_scope.h"
+#include "v8/include/cppgc/persistent.h"
+#include "v8/include/v8-context.h"
+#include "v8/include/v8-microtask-queue.h"
 
 namespace gin_helper {
+
+class PromiseHandle;
 
 // A wrapper around the v8::Promise.
 //
@@ -41,44 +43,57 @@ class PromiseBase {
   PromiseBase(PromiseBase&&);
   PromiseBase& operator=(PromiseBase&&);
 
-  // Helper for rejecting promise with error message.
-  //
-  // Note: The parameter type is PromiseBase&& so it can take the instances of
-  // Promise<T> type.
-  static void RejectPromise(PromiseBase&& promise, base::StringPiece errmsg) {
-    if (gin_helper::Locker::IsBrowserProcess() &&
-        !content::BrowserThread::CurrentlyOn(content::BrowserThread::UI)) {
-      content::GetUIThreadTaskRunner({})->PostTask(
-          FROM_HERE,
-          base::BindOnce(
-              // Note that this callback can not take StringPiece,
-              // as StringPiece only references string internally and
-              // will blow when a temporary string is passed.
-              [](PromiseBase&& promise, std::string str) {
-                promise.RejectWithErrorMessage(str);
-              },
-              std::move(promise), std::string(errmsg.data(), errmsg.size())));
-    } else {
-      promise.RejectWithErrorMessage(errmsg);
-    }
+  v8::Maybe<bool> Reject(v8::Local<v8::Value> except);
+  v8::Maybe<bool> RejectWithErrorMessage(std::string_view message);
+  v8::Maybe<bool> Resolve();
+
+  template <typename T>
+  v8::Maybe<bool> Resolve(const T& value) {
+    if (!IsAlive())
+      return v8::Nothing<bool>();
+    SettleScope settle_scope{*this};
+    return GetInner()->Resolve(settle_scope.context_,
+                               gin::ConvertToV8(isolate(), value));
   }
 
-  v8::Maybe<bool> Reject();
-  v8::Maybe<bool> Reject(v8::Local<v8::Value> except);
-  v8::Maybe<bool> RejectWithErrorMessage(base::StringPiece message);
+  template <typename... ResolveType>
+  v8::MaybeLocal<v8::Promise> Then(
+      base::OnceCallback<void(ResolveType...)> cb) {
+    if (!IsAlive())
+      return v8::MaybeLocal<v8::Promise>();
+    SettleScope settle_scope{*this};
+    v8::Local<v8::Value> value = gin::ConvertToV8(isolate(), std::move(cb));
+    return GetHandle()->Then(settle_scope.context_, value.As<v8::Function>());
+  }
 
   v8::Local<v8::Context> GetContext() const;
   v8::Local<v8::Promise> GetHandle() const;
 
-  v8::Isolate* isolate() const { return isolate_; }
+  v8::Isolate* isolate() const { return v8::Isolate::TryGetCurrent(); }
 
  protected:
-  v8::Local<v8::Promise::Resolver> GetInner() const;
+  static scoped_refptr<base::TaskRunner> GetTaskRunner();
 
  private:
-  v8::Isolate* isolate_;
-  v8::Global<v8::Context> context_;
-  v8::Global<v8::Promise::Resolver> resolver_;
+  // Returns true if the underlying V8 handles are still valid.
+  bool IsAlive() const;
+  v8::Local<v8::Promise::Resolver> GetInner() const;
+  v8::Maybe<bool> ResolveWith(v8::Local<v8::Value> value);
+
+  struct SettleScope {
+    CPPGC_STACK_ALLOCATED();
+
+   public:
+    explicit SettleScope(const PromiseBase& base);
+    ~SettleScope();
+
+    v8::HandleScope handle_scope_;
+    v8::Local<v8::Context> context_;
+    v8::MicrotasksScope microtasks_scope_;
+    v8::Context::Scope context_scope_;
+  };
+
+  cppgc::Persistent<PromiseHandle> handle_;
 };
 
 // Template implementation that returns values.
@@ -87,11 +102,12 @@ class Promise : public PromiseBase {
  public:
   using PromiseBase::PromiseBase;
 
+  explicit Promise(PromiseBase&& other) : PromiseBase(std::move(other)) {}
+
   // Helper for resolving the promise with |result|.
   static void ResolvePromise(Promise<RT> promise, RT result) {
-    if (gin_helper::Locker::IsBrowserProcess() &&
-        !content::BrowserThread::CurrentlyOn(content::BrowserThread::UI)) {
-      content::GetUIThreadTaskRunner({})->PostTask(
+    if (auto task_runner = GetTaskRunner()) {
+      task_runner->PostTask(
           FROM_HERE, base::BindOnce([](Promise<RT> promise,
                                        RT result) { promise.Resolve(result); },
                                     std::move(promise), std::move(result)));
@@ -108,23 +124,9 @@ class Promise : public PromiseBase {
     return resolved.GetHandle();
   }
 
-  // Convert to another type.
   template <typename NT>
   Promise<NT> As() {
-    return Promise<NT>(isolate(), GetInner());
-  }
-
-  // Promise resolution is a microtask
-  // We use the MicrotasksRunner to trigger the running of pending microtasks
-  v8::Maybe<bool> Resolve(const RT& value) {
-    gin_helper::Locker locker(isolate());
-    v8::HandleScope handle_scope(isolate());
-    gin_helper::MicrotasksScope microtasks_scope(
-        isolate(), GetContext()->GetMicrotaskQueue());
-    v8::Context::Scope context_scope(GetContext());
-
-    return GetInner()->Resolve(GetContext(),
-                               gin::ConvertToV8(isolate(), value));
+    return Promise<NT>{std::move(*this)};
   }
 
   template <typename... ResolveType>
@@ -137,14 +139,7 @@ class Promise : public PromiseBase {
         std::is_same<RT, std::tuple_element_t<0, std::tuple<ResolveType...>>>(),
         "A promises's 'Then' callback must handle the same type as the "
         "promises resolve type");
-    gin_helper::Locker locker(isolate());
-    v8::HandleScope handle_scope(isolate());
-    v8::Context::Scope context_scope(GetContext());
-
-    v8::Local<v8::Value> value = gin::ConvertToV8(isolate(), std::move(cb));
-    v8::Local<v8::Function> handler = value.As<v8::Function>();
-
-    return GetHandle()->Then(GetContext(), handler);
+    return PromiseBase::Then(std::move(cb));
   }
 };
 
@@ -159,8 +154,6 @@ class Promise<void> : public PromiseBase {
 
   // Returns an already-resolved promise.
   static v8::Local<v8::Promise> ResolvedPromise(v8::Isolate* isolate);
-
-  v8::Maybe<bool> Resolve();
 };
 
 }  // namespace gin_helper

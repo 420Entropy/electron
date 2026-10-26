@@ -5,24 +5,58 @@
 #ifndef ELECTRON_SHELL_COMMON_GIN_CONVERTERS_STD_CONVERTER_H_
 #define ELECTRON_SHELL_COMMON_GIN_CONVERTERS_STD_CONVERTER_H_
 
+#include <array>
+#include <cstddef>
+#include <functional>
 #include <map>
 #include <set>
+#include <span>
+#include <type_traits>
 #include <utility>
 
 #include "gin/converter.h"
 
-#if BUILDFLAG(IS_WIN)
-#include "base/strings/string_util_win.h"
-#endif
+#include "base/strings/string_util.h"
 
 namespace gin {
 
 // Make it possible to convert move-only types.
 template <typename T>
-v8::Local<v8::Value> ConvertToV8(v8::Isolate* isolate, T&& input) {
+std::conditional_t<
+    internal::ToV8ReturnsMaybe<typename std::remove_reference<T>::type>,
+    v8::MaybeLocal<v8::Value>,
+    v8::Local<v8::Value>>
+ConvertToV8(v8::Isolate* isolate, T&& input) {
   return Converter<typename std::remove_reference<T>::type>::ToV8(
       isolate, std::forward<T>(input));
 }
+
+template <typename T>
+struct Converter<std::span<T>> {
+  static v8::Local<v8::Value> ToV8(v8::Isolate* isolate,
+                                   const std::span<const T>& span) {
+    uint32_t idx = 0;
+    auto context = isolate->GetCurrentContext();
+    auto result = v8::Array::New(isolate, static_cast<int>(span.size()));
+    for (const auto& val : span) {
+      v8::MaybeLocal<v8::Value> maybe = Converter<T>::ToV8(isolate, val);
+      v8::Local<v8::Value> element;
+      if (!maybe.ToLocal(&element))
+        return {};
+      if (!result->CreateDataProperty(context, idx++, element).FromMaybe(false))
+        NOTREACHED() << "CreateDataProperty should always succeed here.";
+    }
+    return result;
+  }
+};
+
+template <typename T, size_t N>
+struct Converter<std::array<T, N>> {
+  static v8::Local<v8::Value> ToV8(v8::Isolate* isolate,
+                                   const std::array<T, N>& array) {
+    return Converter<std::span<T>>::ToV8(isolate, std::span{array});
+  }
+};
 
 #if !BUILDFLAG(IS_LINUX)
 template <>
@@ -50,28 +84,10 @@ struct Converter<std::nullptr_t> {
   }
 };
 
-template <>
-struct Converter<const char*> {
-  static v8::Local<v8::Value> ToV8(v8::Isolate* isolate, const char* val) {
-    return v8::String::NewFromUtf8(isolate, val, v8::NewStringType::kNormal)
-        .ToLocalChecked();
-  }
-};
-
-template <>
-struct Converter<char[]> {
-  static v8::Local<v8::Value> ToV8(v8::Isolate* isolate, const char* val) {
-    return v8::String::NewFromUtf8(isolate, val, v8::NewStringType::kNormal)
-        .ToLocalChecked();
-  }
-};
-
-template <size_t n>
-struct Converter<char[n]> {
-  static v8::Local<v8::Value> ToV8(v8::Isolate* isolate, const char* val) {
-    return v8::String::NewFromUtf8(isolate, val, v8::NewStringType::kNormal,
-                                   n - 1)
-        .ToLocalChecked();
+template <size_t N>
+struct Converter<char[N]> {
+  static v8::Local<v8::Value> ToV8(v8::Isolate* isolate, const char (&val)[N]) {
+    return v8::String::NewFromUtf8Literal(isolate, val);
   }
 };
 
@@ -87,6 +103,22 @@ struct Converter<v8::Local<v8::Array>> {
     if (!val->IsArray())
       return false;
     *out = val.As<v8::Array>();
+    return true;
+  }
+};
+
+template <>
+struct Converter<v8::Local<v8::ArrayBufferView>> {
+  static v8::Local<v8::Value> ToV8(v8::Isolate* isolate,
+                                   v8::Local<v8::ArrayBufferView> val) {
+    return val;
+  }
+  static bool FromV8(v8::Isolate* isolate,
+                     v8::Local<v8::Value> val,
+                     v8::Local<v8::ArrayBufferView>* out) {
+    if (!val->IsArrayBufferView())
+      return false;
+    *out = val.As<v8::ArrayBufferView>();
     return true;
   }
 };
@@ -114,10 +146,12 @@ struct Converter<std::set<T>> {
     v8::Local<v8::Array> result(
         v8::Array::New(isolate, static_cast<int>(val.size())));
     auto context = isolate->GetCurrentContext();
-    typename std::set<T>::const_iterator it;
-    int i;
-    for (i = 0, it = val.begin(); it != val.end(); ++it, ++i)
-      result->Set(context, i, Converter<T>::ToV8(isolate, *it)).Check();
+    uint32_t i = 0;
+    for (const T& item : val) {
+      result
+          ->CreateDataProperty(context, i++, Converter<T>::ToV8(isolate, item))
+          .Check();
+    }
     return result;
   }
   static bool FromV8(v8::Isolate* isolate,
@@ -131,11 +165,13 @@ struct Converter<std::set<T>> {
     v8::Local<v8::Array> array = val.As<v8::Array>();
     uint32_t length = array->Length();
     for (uint32_t i = 0; i < length; ++i) {
-      T item;
-      if (!Converter<T>::FromV8(isolate,
-                                array->Get(context, i).ToLocalChecked(), &item))
+      v8::Local<v8::Value> v8_item;
+      if (!array->Get(context, i).ToLocal(&v8_item))
         return false;
-      result.insert(item);
+      T item;
+      if (!Converter<T>::FromV8(isolate, v8_item, &item))
+        return false;
+      result.insert(std::move(item));
     }
 
     out->swap(result);
@@ -143,18 +179,21 @@ struct Converter<std::set<T>> {
   }
 };
 
-template <typename K, typename V>
-struct Converter<std::map<K, V>> {
+template <typename K, typename V, typename Compare>
+struct Converter<std::map<K, V, Compare>> {
   static bool FromV8(v8::Isolate* isolate,
                      v8::Local<v8::Value> value,
-                     std::map<K, V>* out) {
+                     std::map<K, V, Compare>* out) {
     if (!value->IsObject())
       return false;
     out->clear();
     v8::Local<v8::Context> context = isolate->GetCurrentContext();
     v8::Local<v8::Object> obj = value.As<v8::Object>();
-    v8::Local<v8::Array> keys = obj->GetPropertyNames(context).ToLocalChecked();
-    for (uint32_t i = 0; i < keys->Length(); ++i) {
+    v8::Local<v8::Array> keys;
+    if (!obj->GetPropertyNames(context).ToLocal(&keys))
+      return false;
+    const uint32_t length = keys->Length();
+    for (uint32_t i = 0; i < length; ++i) {
       v8::MaybeLocal<v8::Value> maybe_v8key = keys->Get(context, i);
       if (maybe_v8key.IsEmpty())
         return false;
@@ -167,13 +206,13 @@ struct Converter<std::map<K, V>> {
       if (!ConvertFromV8(isolate, v8key, &key) ||
           !ConvertFromV8(isolate, maybe_v8value.ToLocalChecked(), &out_value))
         return false;
-      (*out)[key] = std::move(out_value);
+      (*out)[std::move(key)] = std::move(out_value);
     }
     return true;
   }
 
   static v8::Local<v8::Value> ToV8(v8::Isolate* isolate,
-                                   const std::map<K, V>& dict) {
+                                   const std::map<K, V, Compare>& dict) {
     v8::Local<v8::Object> obj = v8::Object::New(isolate);
     v8::Local<v8::Context> context = isolate->GetCurrentContext();
     for (const auto& it : dict) {
@@ -209,6 +248,61 @@ struct Converter<std::wstring> {
   }
 };
 #endif
+
+namespace detail {
+
+// Get a key from `key_val` and check `lookup` for a matching entry.
+// Return true iff a match is found, and set `*out` to the entry's value.
+template <typename KeyType, typename Out, typename Map>
+bool FromV8WithLookup(v8::Isolate* isolate,
+                      v8::Local<v8::Value> key_val,
+                      const Map& table,
+                      Out* out,
+                      std::function<void(KeyType&)> key_transform = {}) {
+  static_assert(std::is_same_v<typename Map::mapped_type, Out>);
+
+  auto key = KeyType{};
+  if (!ConvertFromV8(isolate, key_val, &key))
+    return false;
+
+  if (key_transform)
+    key_transform(key);
+
+  if (auto iter = table.find(key); iter != table.end()) {
+    *out = iter->second;
+    return true;
+  }
+
+  return false;
+}
+
+}  // namespace detail
+
+// Convert `key_val to a string key and check `lookup` for a matching entry.
+// Return true iff a match is found, and set `*out` to the entry's value.
+template <typename Out, typename Map>
+bool FromV8WithLookup(v8::Isolate* isolate,
+                      v8::Local<v8::Value> key_val,
+                      const Map& table,
+                      Out* out) {
+  return detail::FromV8WithLookup<std::string>(isolate, key_val, table, out);
+}
+
+// Convert `key_val` to a lowercase string key and check `lookup` for a matching
+// entry. Return true iff a match is found, and set `*out` to the entry's value.
+template <typename Out, typename Map>
+bool FromV8WithLowerLookup(v8::Isolate* isolate,
+                           v8::Local<v8::Value> key_val,
+                           const Map& table,
+                           Out* out) {
+  static constexpr auto to_lower_ascii_inplace = [](std::string& str) {
+    for (auto& ch : str)
+      ch = base::ToLowerASCII(ch);
+  };
+
+  return detail::FromV8WithLookup<std::string>(isolate, key_val, table, out,
+                                               to_lower_ascii_inplace);
+}
 
 }  // namespace gin
 

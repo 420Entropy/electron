@@ -15,14 +15,14 @@
 namespace {
 
 bool MonitorHasAutohideTaskbarForEdge(UINT edge, HMONITOR monitor) {
-  APPBARDATA taskbar_data = {sizeof(APPBARDATA), NULL, 0, edge};
+  APPBARDATA taskbar_data = {sizeof(APPBARDATA), nullptr, 0, edge};
   taskbar_data.hWnd = ::GetForegroundWindow();
 
   // MSDN documents an ABM_GETAUTOHIDEBAREX, which supposedly takes a monitor
   // rect and returns autohide bars on that monitor.  This sounds like a good
   // idea for multi-monitor systems.  Unfortunately, it appears to not work at
-  // least some of the time (erroneously returning NULL) and there's almost no
-  // online documentation or other sample code using it that suggests ways to
+  // least some of the time (erroneously returning nullptr) and there's almost
+  // no online documentation or other sample code using it that suggests ways to
   // address this problem. We do the following:-
   // 1. Use the ABM_GETAUTOHIDEBAR message. If it works, i.e. returns a valid
   //    window we are done.
@@ -34,13 +34,13 @@ bool MonitorHasAutohideTaskbarForEdge(UINT edge, HMONITOR monitor) {
   HWND taskbar = reinterpret_cast<HWND>(
       SHAppBarMessage(ABM_GETAUTOHIDEBAR, &taskbar_data));
   if (!::IsWindow(taskbar)) {
-    APPBARDATA new_taskbar_data = {sizeof(APPBARDATA), 0, 0, 0};
+    APPBARDATA new_taskbar_data = {sizeof(APPBARDATA), nullptr, 0, 0};
     unsigned int taskbar_state =
         SHAppBarMessage(ABM_GETSTATE, &new_taskbar_data);
     if (!(taskbar_state & ABS_AUTOHIDE))
       return false;
 
-    new_taskbar_data.hWnd = ::FindWindow(L"Shell_TrayWnd", NULL);
+    new_taskbar_data.hWnd = ::FindWindow(L"Shell_TrayWnd", nullptr);
     if (!::IsWindow(new_taskbar_data.hWnd))
       return false;
 
@@ -103,16 +103,12 @@ namespace electron {
 
 HICON ViewsDelegate::GetDefaultWindowIcon() const {
   // Use current exe's icon as default window icon.
-  return LoadIcon(GetModuleHandle(NULL),
+  return LoadIcon(GetModuleHandle(nullptr),
                   MAKEINTRESOURCE(1 /* IDR_MAINFRAME */));
 }
 
 HICON ViewsDelegate::GetSmallWindowIcon() const {
   return GetDefaultWindowIcon();
-}
-
-bool ViewsDelegate::IsWindowInMetro(gfx::NativeWindow window) const {
-  return false;
 }
 
 int ViewsDelegate::GetAppbarAutohideEdges(HMONITOR monitor,
@@ -123,8 +119,8 @@ int ViewsDelegate::GetAppbarAutohideEdges(HMONITOR monitor,
   // in us thinking there is no auto-hide edges. By returning at least one edge
   // we don't initially go fullscreen until we figure out the real auto-hide
   // edges.
-  if (!appbar_autohide_edge_map_.count(monitor))
-    appbar_autohide_edge_map_[monitor] = EDGE_BOTTOM;
+  auto [iter, _] = appbar_autohide_edge_map_.try_emplace(monitor, EDGE_BOTTOM);
+  const int edges{iter->second};
 
   // We use the SHAppBarMessage API to get the taskbar autohide state. This API
   // spins a modal loop which could cause callers to be reentered. To avoid
@@ -137,9 +133,9 @@ int ViewsDelegate::GetAppbarAutohideEdges(HMONITOR monitor,
         base::BindOnce(&GetAppbarAutohideEdgesOnWorkerThread, monitor),
         base::BindOnce(&ViewsDelegate::OnGotAppbarAutohideEdges,
                        weak_factory_.GetWeakPtr(), std::move(callback), monitor,
-                       appbar_autohide_edge_map_[monitor]));
+                       edges));
   }
-  return appbar_autohide_edge_map_[monitor];
+  return edges;
 }
 
 void ViewsDelegate::OnGotAppbarAutohideEdges(base::OnceClosure callback,

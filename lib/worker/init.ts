@@ -1,13 +1,6 @@
 import * as path from 'path';
 
-const Module = require('module');
-
-// We modified the original process.argv to let node.js load the
-// init.js, we need to restore it here.
-process.argv.splice(1, 1);
-
-// Clear search paths.
-require('../common/reset-search-paths');
+const Module = require('module') as NodeJS.ModuleInternal;
 
 // Import common settings.
 require('@electron/internal/common/init');
@@ -16,14 +9,18 @@ require('@electron/internal/common/init');
 const { hasSwitch, getSwitchValue } = process._linkedBinding('electron_common_command_line');
 
 // Export node bindings to global.
-const { makeRequireFunction } = __non_webpack_require__('internal/modules/cjs/helpers') // eslint-disable-line
-global.module = new Module('electron/js2c/worker_init');
-global.require = makeRequireFunction(global.module);
+const { makeRequireFunction } =
+  require('internal/modules/helpers') as typeof import('@node/lib/internal/modules/helpers');
+global.module = new Module('internal/electron/js2c/worker_init');
+global.require = makeRequireFunction(global.module) as NodeRequire;
 
 // Set the __filename to the path of html file if it is file: protocol.
 // NB. 'self' isn't defined in an AudioWorklet.
 if (typeof self !== 'undefined' && self.location.protocol === 'file:') {
-  const pathname = process.platform === 'win32' && self?.location.pathname[0] === '/' ? self?.location.pathname.substr(1) : self?.location.pathname;
+  const pathname =
+    process.platform === 'win32' && self?.location.pathname[0] === '/'
+      ? self?.location.pathname.substr(1)
+      : self?.location.pathname;
   global.__filename = path.normalize(decodeURIComponent(pathname));
   global.__dirname = path.dirname(global.__filename);
 

@@ -28,7 +28,7 @@ with breakpoints inside Electron's source code.
   format.
 
 * **ProcMon**: The [free SysInternals tool][sys-internals] allows you to inspect
-  a processes parameters, file handles, and registry operations.
+  a process's parameters, file handles, and registry operations.
 
 ## Attaching to and Debugging Electron
 
@@ -88,7 +88,7 @@ is doing to the operating system, it can be a valuable resource.
 For an introduction to ProcMon's basic and advanced debugging features, go check
 out [this video tutorial][procmon-instructions] provided by Microsoft.
 
-[sys-internals]: https://technet.microsoft.com/en-us/sysinternals/processmonitor.aspx
+[sys-internals]: https://learn.microsoft.com/en-us/sysinternals/downloads/procmon
 [procmon-instructions]: https://learn.microsoft.com/en-us/shows/defrag-tools/4-process-monitor
 
 ## Using WinDbg

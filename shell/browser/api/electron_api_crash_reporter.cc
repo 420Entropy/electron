@@ -4,30 +4,38 @@
 
 #include "shell/browser/api/electron_api_crash_reporter.h"
 
-#include <limits>
+#include <algorithm>
 #include <map>
+#include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "base/command_line.h"
-#include "base/functional/bind.h"
+#include "base/containers/to_vector.h"
 #include "base/no_destructor.h"
 #include "base/path_service.h"
+#include "base/strings/strcat.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/trace_event/trace_event.h"
 #include "chrome/common/chrome_paths.h"
 #include "components/upload_list/crash_upload_list.h"
 #include "components/upload_list/text_log_upload_list.h"
-#include "content/public/common/content_switches.h"
-#include "gin/arguments.h"
+#include "electron/mas.h"
+#include "gin/converter.h"
 #include "gin/data_object_builder.h"
+#include "shell/browser/browser.h"
+#include "shell/browser/javascript_environment.h"
 #include "shell/common/electron_paths.h"
 #include "shell/common/gin_converters/callback_converter.h"
 #include "shell/common/gin_converters/file_path_converter.h"
+#include "shell/common/gin_converters/std_converter.h"
 #include "shell/common/gin_converters/time_converter.h"
 #include "shell/common/gin_helper/dictionary.h"
+#include "shell/common/gin_helper/error_thrower.h"
 #include "shell/common/node_includes.h"
+#include "shell/common/node_util.h"
+#include "shell/common/process_util.h"
 #include "shell/common/thread_restrictions.h"
 
 #if !IS_MAS_BUILD()
@@ -40,9 +48,8 @@
 #endif
 
 #if BUILDFLAG(IS_LINUX)
-#include "base/containers/span.h"
 #include "base/files/file_util.h"
-#include "base/guid.h"
+#include "base/uuid.h"
 #include "components/crash/core/common/crash_keys.h"
 #include "components/upload_list/combining_upload_list.h"
 #include "v8/include/v8-wasm-trap-handler-posix.h"
@@ -51,15 +58,9 @@
 
 namespace {
 
-#if BUILDFLAG(IS_LINUX)
-std::map<std::string, std::string>& GetGlobalCrashKeysMutable() {
-  static base::NoDestructor<std::map<std::string, std::string>>
-      global_crash_keys;
-  return *global_crash_keys;
-}
-#endif  // BUILDFLAG(IS_LINUX)
-
+#if !IS_MAS_BUILD()
 bool g_crash_reporter_initialized = false;
+#endif
 
 }  // namespace
 
@@ -73,14 +74,8 @@ void NoOp() {}
 }  // namespace
 #endif
 
-bool IsCrashReporterEnabled() {
-  return g_crash_reporter_initialized;
-}
-
 #if BUILDFLAG(IS_LINUX)
-const std::map<std::string, std::string>& GetGlobalCrashKeys() {
-  return GetGlobalCrashKeysMutable();
-}
+namespace {
 
 bool GetClientIdPath(base::FilePath* path) {
   if (base::PathService::Get(electron::DIR_CRASH_DUMPS, path)) {
@@ -98,7 +93,7 @@ std::string ReadClientId() {
   if (GetClientIdPath(&client_id_path) &&
       (!base::ReadFileToStringWithMaxSize(client_id_path, &client_id, 36) ||
        client_id.size() != 36))
-    return std::string();
+    return {};
   return client_id;
 }
 
@@ -110,13 +105,15 @@ void WriteClientId(const std::string& client_id) {
     base::WriteFile(client_id_path, client_id);
 }
 
+}  // namespace
+
 std::string GetClientId() {
   static base::NoDestructor<std::string> client_id;
   if (!client_id->empty())
     return *client_id;
   *client_id = ReadClientId();
   if (client_id->empty()) {
-    *client_id = base::GenerateGUID();
+    *client_id = base::Uuid::GenerateRandomV4().AsLowercaseString();
     WriteClientId(*client_id);
   }
   return *client_id;
@@ -142,17 +139,13 @@ void Start(const std::string& submit_url,
   ElectronCrashReporterClient::Get()->SetShouldRateLimit(rate_limit);
   ElectronCrashReporterClient::Get()->SetShouldCompressUploads(compress);
   ElectronCrashReporterClient::Get()->SetGlobalAnnotations(global_extra);
-  auto* command_line = base::CommandLine::ForCurrentProcess();
-  std::string process_type =
-      is_node_process
-          ? "node"
-          : command_line->GetSwitchValueASCII(::switches::kProcessType);
+  std::string process_type = is_node_process ? "node" : GetProcessType();
 #if BUILDFLAG(IS_LINUX)
   for (const auto& pair : extra)
     electron::crash_keys::SetCrashKey(pair.first, pair.second);
   {
     electron::ScopedAllowBlockingForElectron allow_blocking;
-    ::crash_reporter::InitializeCrashpad(process_type.empty(), process_type);
+    ::crash_reporter::InitializeCrashpad(IsBrowserProcess(), process_type);
   }
   if (ignore_system_crash_handler) {
     crashpad::CrashpadInfo::GetCrashpadInfo()
@@ -161,7 +154,7 @@ void Start(const std::string& submit_url,
 #elif BUILDFLAG(IS_MAC)
   for (const auto& pair : extra)
     electron::crash_keys::SetCrashKey(pair.first, pair.second);
-  ::crash_reporter::InitializeCrashpad(process_type.empty(), process_type);
+  ::crash_reporter::InitializeCrashpad(IsBrowserProcess(), process_type);
   if (ignore_system_crash_handler) {
     crashpad::CrashpadInfo::GetCrashpadInfo()
         ->set_system_crash_reporter_forwarding(crashpad::TriState::kDisabled);
@@ -169,11 +162,15 @@ void Start(const std::string& submit_url,
 #elif BUILDFLAG(IS_WIN)
   for (const auto& pair : extra)
     electron::crash_keys::SetCrashKey(pair.first, pair.second);
+  // Make electron_wer.dll loadable by Windows Error Reporting for this user
+  // before crashpad registers it, so crashes that bypass the in-process
+  // handler (__fastfail etc.) still produce a minidump.
+  ElectronCrashReporterClient::RegisterWerHelperModuleForCurrentUser();
   base::FilePath user_data_dir;
   base::PathService::Get(chrome::DIR_USER_DATA, &user_data_dir);
   ::crash_reporter::InitializeCrashpadWithEmbeddedHandler(
-      process_type.empty(), process_type,
-      base::WideToUTF8(user_data_dir.value()), base::FilePath());
+      IsBrowserProcess(), process_type, base::WideToUTF8(user_data_dir.value()),
+      base::FilePath());
 #endif
 #endif
 }
@@ -183,22 +180,36 @@ void Start(const std::string& submit_url,
 namespace {
 
 #if IS_MAS_BUILD()
-void GetUploadedReports(
-    v8::Isolate* isolate,
-    base::OnceCallback<void(v8::Local<v8::Value>)> callback) {
-  std::move(callback).Run(v8::Array::New(isolate));
+v8::Local<v8::Value> GetUploadedReports(v8::Isolate* isolate) {
+  return v8::Array::New(isolate);
+}
+
+v8::Local<v8::Value> GetLastCrashReport(v8::Isolate* isolate) {
+  return v8::Null(isolate);
 }
 #else
-scoped_refptr<UploadList> CreateCrashUploadList() {
+// UploadList only loads asynchronously; this exposes the protected
+// synchronous reader for the deprecated sync getUploadedReports().
+template <typename T>
+class SyncUploadList final : public T {
+ public:
+  using T::LoadUploadList;
+  using T::T;
+
+ private:
+  ~SyncUploadList() override = default;
+};
+
+std::vector<std::unique_ptr<UploadList::UploadInfo>> LoadUploadedReports() {
+  electron::ScopedAllowBlockingForElectron allow_blocking;
 #if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
-  return base::MakeRefCounted<CrashUploadListCrashpad>();
+  return base::MakeRefCounted<SyncUploadList<CrashUploadListCrashpad>>()
+      ->LoadUploadList();
 #else
   base::FilePath crash_dir_path;
   base::PathService::Get(electron::DIR_CRASH_DUMPS, &crash_dir_path);
   base::FilePath upload_log_path =
       crash_dir_path.AppendASCII(CrashUploadList::kReporterLogFilename);
-  scoped_refptr<UploadList> result =
-      base::MakeRefCounted<TextLogUploadList>(upload_log_path);
   // Crashpad keeps the records of C++ crashes (segfaults, etc) in its
   // internal database. The JavaScript error reporter writes JS error upload
   // records to the older text format. Combine the two to present a complete
@@ -206,40 +217,106 @@ scoped_refptr<UploadList> CreateCrashUploadList() {
   // TODO(nornagon): what is "The JavaScript error reporter", and do we care
   // about it?
   std::vector<scoped_refptr<UploadList>> uploaders = {
-      base::MakeRefCounted<CrashUploadListCrashpad>(), std::move(result)};
-  result = base::MakeRefCounted<CombiningUploadList>(std::move(uploaders));
-  return result;
+      base::MakeRefCounted<CrashUploadListCrashpad>(),
+      base::MakeRefCounted<TextLogUploadList>(upload_log_path)};
+  return base::MakeRefCounted<SyncUploadList<CombiningUploadList>>(
+             std::move(uploaders))
+      ->LoadUploadList();
 #endif  // BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
 }
 
-v8::Local<v8::Value> GetUploadedReports(v8::Isolate* isolate) {
-  auto list = CreateCrashUploadList();
-  // TODO(nornagon): switch to using Load() instead of LoadSync() once the
-  // synchronous version of getUploadedReports is deprecated so we can remove
-  // our patch.
-  {
-    electron::ScopedAllowBlockingForElectron allow_blocking;
-    list->LoadSync();
-  }
+v8::Local<v8::Object> ToReportObject(
+    v8::Isolate* isolate,
+    const std::unique_ptr<UploadList::UploadInfo>& upload) {
+  return gin::DataObjectBuilder{isolate}
+      .Set("date", upload->upload_time)
+      .Set("id", upload->upload_id)
+      .Build();
+}
 
-  constexpr size_t kMaxUploadReportsToList = std::numeric_limits<size_t>::max();
-  const std::vector<const UploadList::UploadInfo*> uploads =
-      list->GetUploads(kMaxUploadReportsToList);
-  std::vector<v8::Local<v8::Object>> result;
-  for (auto* const upload : uploads) {
-    result.push_back(gin::DataObjectBuilder(isolate)
-                         .Set("date", upload->upload_time)
-                         .Set("id", upload->upload_id)
-                         .Build());
-  }
-  v8::Local<v8::Value> v8_result = gin::ConvertToV8(isolate, result);
-  return v8_result;
+v8::Local<v8::Value> GetUploadedReports(v8::Isolate* isolate) {
+  // TODO(nornagon): switch to using UploadList::Load() once the synchronous
+  // version of getUploadedReports is removed.
+  return gin::ConvertToV8(
+      isolate, base::ToVector(LoadUploadedReports(), [isolate](const auto& u) {
+        return ToReportObject(isolate, u);
+      }));
+}
+
+v8::Local<v8::Value> GetLastCrashReport(v8::Isolate* isolate) {
+  auto reports = LoadUploadedReports();
+  auto last = std::ranges::max_element(
+      reports, {}, [](const auto& upload) { return upload->upload_time; });
+  if (last == reports.end())
+    return v8::Null(isolate);
+  return ToReportObject(isolate, *last);
 }
 #endif
+
+void Start(gin_helper::ErrorThrower thrower,
+           std::optional<gin_helper::Dictionary> maybe_options) {
+  gin_helper::Dictionary options = maybe_options.value_or(
+      gin_helper::Dictionary::CreateEmpty(thrower.isolate()));
+  std::string product_name = electron::Browser::Get()->GetName();
+  std::string company_name;
+  std::string submit_url;
+  std::map<std::string, std::string> extra;
+  std::map<std::string, std::string> global_extra;
+  bool ignore_system_crash_handler = false;
+  bool upload_to_server = true;
+  bool rate_limit = false;
+  bool compress = true;
+  // Reads options[key] if present; a value of the wrong type throws.
+  auto read = [&](std::string_view key, auto* out, std::string_view type) {
+    v8::Local<v8::Value> value;
+    if (!options.Get(key, &value) || value->IsUndefined() ||
+        gin::ConvertFromV8(thrower.isolate(), value, out)) {
+      return true;
+    }
+    thrower.ThrowTypeError(base::StrCat({key, " must be ", type}));
+    return false;
+  };
+  if (!read("productName", &product_name, "a string") ||
+      !read("companyName", &company_name, "a string") ||
+      !read("extra", &extra, "an object with string values") ||
+      !read("globalExtra", &global_extra, "an object with string values") ||
+      !read("ignoreSystemCrashHandler", &ignore_system_crash_handler,
+            "a boolean") ||
+      !read("submitURL", &submit_url, "a string") ||
+      !read("uploadToServer", &upload_to_server, "a boolean") ||
+      !read("rateLimit", &rate_limit, "a boolean") ||
+      !read("compress", &compress, "a boolean")) {
+    return;
+  }
+
+  if (upload_to_server && submit_url.empty()) {
+    thrower.ThrowError(
+        "submitURL must be specified when uploadToServer is true");
+    return;
+  }
+  if (upload_to_server && !compress) {
+    electron::util::EmitDeprecationWarning(
+        thrower.isolate(),
+        "Sending uncompressed crash reports is deprecated and will be removed "
+        "in a future version of Electron. Set { compress: true } to opt-in to "
+        "the new behavior. Crash reports will be uploaded gzipped, which most "
+        "crash reporting servers support.");
+  }
+  if (!company_name.empty())
+    global_extra.try_emplace("_companyName", company_name);
+  global_extra.try_emplace("_productName", product_name);
+  global_extra.try_emplace("_version", electron::Browser::Get()->GetVersion());
+
+  electron::api::crash_reporter::Start(submit_url, upload_to_server,
+                                       ignore_system_crash_handler, rate_limit,
+                                       compress, global_extra, extra, false);
+}
 
 void SetUploadToServer(bool upload) {
 #if !IS_MAS_BUILD()
   ElectronCrashReporterClient::Get()->SetCollectStatsConsent(upload);
+  // Reads the consent set above back through IsRunningUnattended().
+  crash_reporter::SetUploadConsent(upload);
 #endif
 }
 
@@ -263,19 +340,21 @@ void Initialize(v8::Local<v8::Object> exports,
                 v8::Local<v8::Value> unused,
                 v8::Local<v8::Context> context,
                 void* priv) {
-  gin_helper::Dictionary dict(context->GetIsolate(), exports);
-  dict.SetMethod("start", &electron::api::crash_reporter::Start);
+  v8::Isolate* const isolate = electron::JavascriptEnvironment::GetIsolate();
+  gin_helper::Dictionary dict(isolate, exports);
+  dict.SetMethod<&Start>("start");
+  dict.SetMethod<&GetLastCrashReport>("getLastCrashReport");
 #if IS_MAS_BUILD()
-  dict.SetMethod("addExtraParameter", &electron::api::crash_reporter::NoOp);
-  dict.SetMethod("removeExtraParameter", &electron::api::crash_reporter::NoOp);
+  dict.SetMethod<&electron::api::crash_reporter::NoOp>("addExtraParameter");
+  dict.SetMethod<&electron::api::crash_reporter::NoOp>("removeExtraParameter");
 #else
-  dict.SetMethod("addExtraParameter", &electron::crash_keys::SetCrashKey);
-  dict.SetMethod("removeExtraParameter", &electron::crash_keys::ClearCrashKey);
+  dict.SetMethod<&electron::crash_keys::SetCrashKey>("addExtraParameter");
+  dict.SetMethod<&electron::crash_keys::ClearCrashKey>("removeExtraParameter");
 #endif
-  dict.SetMethod("getParameters", &GetParameters);
-  dict.SetMethod("getUploadedReports", &GetUploadedReports);
-  dict.SetMethod("setUploadToServer", &SetUploadToServer);
-  dict.SetMethod("getUploadToServer", &GetUploadToServer);
+  dict.SetMethod<&GetParameters>("getParameters");
+  dict.SetMethod<&GetUploadedReports>("getUploadedReports");
+  dict.SetMethod<&SetUploadToServer>("setUploadToServer");
+  dict.SetMethod<&GetUploadToServer>("getUploadToServer");
 }
 
 }  // namespace

@@ -6,8 +6,9 @@ You can use [app.commandLine.appendSwitch][append-switch] to append them in
 your app's main script before the [ready][ready] event of the [app][app] module
 is emitted:
 
-```javascript
+```js
 const { app } = require('electron')
+
 app.commandLine.appendSwitch('remote-debugging-port', '8315')
 app.commandLine.appendSwitch('host-rules', 'MAP * 127.0.0.1')
 
@@ -38,7 +39,7 @@ Without `*` prefix the URL has to match exactly.
 
 ### --disable-ntlm-v2
 
-Disables NTLM v2 for posix platforms, no effect elsewhere.
+Disables NTLM v2 for POSIX platforms, no effect elsewhere.
 
 ### --disable-http-cache
 
@@ -47,6 +48,10 @@ Disables the disk cache for HTTP requests.
 ### --disable-http2
 
 Disable HTTP/2 and SPDY/3.1 protocols.
+
+### --disable-geolocation _macOS_
+
+Disables the Geolocation API. Permission requests for geolocation will be denied internally regardless of the decision made by a handler set via `session.setPermissionRequestHandler`. This functionality is currently implemented only for macOS. Has no effect on other platforms.
 
 ### --disable-renderer-backgrounding
 
@@ -73,7 +78,8 @@ Passing `--enable-logging=file` will result in logs being saved to the file
 specified by `--log-file=...`, or to `electron_debug.log` in the user-data
 directory if `--log-file` is not specified.
 
-> **Note:** On Windows, logs from child processes cannot be sent to stderr.
+> [!NOTE]
+> On Windows, logs from child processes cannot be sent to stderr.
 > Logging to a file is the most reliable way to collect logs on Windows.
 
 See also `--log-file`, `--log-level`, `--v`, and `--vmodule`.
@@ -84,7 +90,7 @@ Field trials to be forcefully enabled or disabled.
 
 For example: `WebRTC-Audio-Red-For-Opus/Enabled/`
 
-### --host-rules=`rules`
+### --host-rules=`rules` _Deprecated_
 
 A comma-separated list of `rules` that control how hostnames are mapped.
 
@@ -102,9 +108,23 @@ These mappings apply to the endpoint host in a net request (the TCP connect
 and host resolver in a direct connection, and the `CONNECT` in an HTTP proxy
 connection, and the endpoint host in a `SOCKS` proxy connection).
 
+**Deprecated:** Use the `--host-resolver-rules` switch instead.
+
 ### --host-resolver-rules=`rules`
 
-Like `--host-rules` but these `rules` only apply to the host resolver.
+A comma-separated list of `rules` that control how hostnames are mapped.
+
+For example:
+
+* `MAP * 127.0.0.1` Forces all hostnames to be mapped to 127.0.0.1
+* `MAP *.google.com proxy` Forces all google.com subdomains to be resolved to
+  "proxy".
+* `MAP test.com [::1]:77` Forces "test.com" to resolve to IPv6 loopback. Will
+  also force the port of the resulting socket address to be 77.
+* `MAP * baz, EXCLUDE www.google.com` Remaps everything to "baz", except for
+  "www.google.com".
+
+These `rules` only apply to the host resolver.
 
 ### --ignore-certificate-errors
 
@@ -116,14 +136,20 @@ Ignore the connections limit for `domains` list separated by `,`.
 
 ### --js-flags=`flags`
 
-Specifies the flags passed to the Node.js engine. It has to be passed when starting
-Electron if you want to enable the `flags` in the main process.
+Specifies the flags passed to the [V8 engine](https://v8.dev). In order to enable the `flags` in the main process,
+this switch must be passed on startup.
 
 ```sh
 $ electron --js-flags="--harmony_proxies --harmony_collections" your-app
 ```
 
-See the [Node.js documentation][node-cli] or run `node --help` in your terminal for a list of available flags. Additionally, run `node --v8-options` to see a list of flags that specifically refer to Node.js's V8 JavaScript engine.
+Run `node --v8-options` or `electron --js-flags="--help"` in your terminal for the list of available flags.  These can be used to enable early-stage JavaScript features, or log and manipulate garbage collection, among other things.
+
+For example, to trace V8 optimization and deoptimization:
+
+```sh
+$ electron --js-flags="--trace-opt --trace-deopt" your-app
+```
 
 ### --lang
 
@@ -146,7 +172,7 @@ Enables net log events to be saved and writes them to `path`.
 Sets the verbosity of logging when used together with `--enable-logging`.
 `N` should be one of [Chrome's LogSeverities][severities].
 
-Note that two complimentary logging mechanisms in Chromium -- `LOG()`
+Note that two complementary logging mechanisms in Chromium -- `LOG()`
 and `VLOG()` -- are controlled by different switches. `--log-level`
 controls `LOG()` messages, while `--v` and `--vmodule` control `VLOG()`
 messages. So you may want to use a combination of these three switches
@@ -171,6 +197,38 @@ Disables the Chromium [sandbox](https://www.chromium.org/developers/design-docum
 Forces renderer process and Chromium helper processes to run un-sandboxed.
 Should only be used for testing.
 
+### --ozone-platform=`platform` _Linux_
+
+Forces Electron to use a specific display backend instead of choosing one
+automatically. `platform` can be:
+
+* `x11` - Connect to an X server (this includes XWayland).
+* `wayland` - Connect to a Wayland compositor as a native Wayland client.
+* `headless` - Don't connect to any display server. No windows are shown on
+  screen, which is useful for automated testing and CI.
+
+For example, `my-app --ozone-platform=x11` runs the app under XWayland on a
+Wayland desktop.
+
+This switch must be passed on the command line (for example in a `.desktop`
+file or launcher script). Setting it with `app.commandLine.appendSwitch` does
+not work, because the display backend is chosen before your app's main script
+runs.
+
+When this switch is not passed, Electron picks a backend at startup:
+
+1. It checks which display servers it can reach.
+   * X11 is reachable if `DISPLAY` is set to a non-empty value or `--display`
+     is passed.
+   * Wayland is reachable if a Wayland connection is configured. Electron checks
+     `WAYLAND_SOCKET`, then `WAYLAND_DISPLAY`, then whether `XDG_RUNTIME_DIR`
+     contains `wayland-0`, the same order libwayland uses. Only the first of
+     these that is set is considered, so an empty `WAYLAND_DISPLAY` marks
+     Wayland as unreachable even if `wayland-0` exists.
+2. If exactly one display server is reachable, Electron uses it.
+3. If both or neither are reachable, Electron uses Wayland when
+   `XDG_SESSION_TYPE` is `wayland`, and X11 otherwise.
+
 ### --proxy-bypass-list=`hosts`
 
 Instructs Electron to bypass the proxy server for the given semi-colon-separated
@@ -179,8 +237,9 @@ list of hosts. This flag has an effect only if used in tandem with
 
 For example:
 
-```javascript
+```js
 const { app } = require('electron')
+
 app.commandLine.appendSwitch('proxy-bypass-list', '<local>;*.google.com;*foo.com;1.2.3.4:5678')
 ```
 
@@ -227,6 +286,40 @@ This switch only works when `--enable-logging` is also passed.
 
 See also `--enable-logging`, `--log-level`, and `--v`.
 
+### --widevine-cdm-path=`path` _Experimental_
+
+Specifies the directory containing Widevine CDM files.
+
+Electron looks for `manifest.json` in this directory and then loads the
+platform-specific Widevine CDM library. If this switch is not set, Electron
+checks for bundled Widevine CDM files at
+`<Electron executable directory>/WidevineCdm`.
+
+This switch is ignored in packaged applications to prevent loading library
+code from an arbitrary command-line path. Packaged applications must bundle
+the `WidevineCdm` directory beside the Electron executable.
+
+For unpackaged applications on Linux, pass this switch on Electron's process
+command line. Calling `app.commandLine.appendSwitch` from the app's main script
+is too late because the zygote loads library CDMs before that script runs. When
+the manifest does not contain a version, pass `--widevine-cdm-version` on the
+process command line as well. Alternatively, bundle the `WidevineCdm` directory
+beside the Electron executable.
+
+This switch is only effective in builds where Widevine support is enabled
+(`enable_widevine = true`).
+
+For CDM packaging, licensing, and VMP signing expectations, see
+[Testing Widevine CDM](../tutorial/testing-widevine-cdm.md).
+
+### --widevine-cdm-version=`version` _Experimental_
+
+Specifies the Widevine CDM version when it cannot be read from `manifest.json`.
+You can omit this switch when the manifest already contains the version.
+
+This switch is only effective in builds where Widevine support is enabled
+(`enable_widevine = true`).
+
 ### --force_high_performance_gpu
 
 Force using discrete GPU when there are multiple GPUs available.
@@ -235,25 +328,39 @@ Force using discrete GPU when there are multiple GPUs available.
 
 Force using integrated GPU when there are multiple GPUs available.
 
+### --xdg-portal-required-version=`version`
+
+Sets the minimum required version of XDG portal implementation to `version`
+in order to use the portal backend for file dialogs on linux. File dialogs
+will fallback to using gtk or kde depending on the desktop environment when
+the required version is unavailable. Current default is set to `3`.
+
 ## Node.js Flags
 
 Electron supports some of the [CLI flags][node-cli] supported by Node.js.
 
-**Note:** Passing unsupported command line switches to Electron when it is not running in `ELECTRON_RUN_AS_NODE` will have no effect.
+> [!NOTE]
+> Passing unsupported command line switches to Electron when it is not running in `ELECTRON_RUN_AS_NODE` will have no effect.
 
-### --inspect-brk\[=\[host:]port]
+### `--inspect-brk[=[host:]port]`
 
 Activate inspector on host:port and break at start of user script. Default host:port is 127.0.0.1:9229.
 
 Aliased to `--debug-brk=[host:]port`.
 
-### --inspect-port=\[host:]port
+#### `--inspect-brk-node[=[host:]port]`
+
+Activate inspector on `host:port` and break at start of the first internal
+JavaScript script executed when the inspector is available.
+Default `host:port` is `127.0.0.1:9229`.
+
+### `--inspect-port=[host:]port`
 
 Set the `host:port` to be used when the inspector is activated. Useful when activating the inspector by sending the SIGUSR1 signal. Default host is `127.0.0.1`.
 
 Aliased to `--debug-port=[host:]port`.
 
-### --inspect\[=\[host:]port]
+### `--inspect[=[host:]port]`
 
 Activate inspector on `host:port`. Default is `127.0.0.1:9229`.
 
@@ -263,11 +370,96 @@ See the [Debugging the Main Process][debugging-main-process] guide for more deta
 
 Aliased to `--debug[=[host:]port`.
 
-### --inspect-publish-uid=stderr,http
+### `--inspect-publish-uid=stderr,http`
 
 Specify ways of the inspector web socket url exposure.
 
-By default inspector websocket url is available in stderr and under /json/list endpoint on http://host:port/json/list.
+By default inspector websocket url is available in stderr and under /json/list endpoint on `http://host:port/json/list`.
+
+### `--experimental-network-inspection`
+
+Enable support for DevTools network inspector events, for visibility into requests made by the nodejs `http` and `https` modules.
+
+### `--experimental-inspector-network-resource`
+
+Enable support for resolving source maps over the network when using the Node.js inspector.
+
+When enabled, DevTools can retrieve remote source maps for main and utility
+process scripts via the Node.js inspector.
+
+**Note:** When enabled, the Node.js inspector will make network requests to
+URLs specified in source maps. Be mindful of this in environments where the
+process has access to internal networks.
+
+### `--no-deprecation`
+
+Silence deprecation warnings.
+
+### `--throw-deprecation`
+
+Throw errors for deprecations.
+
+### `--trace-deprecation`
+
+Print stack traces for deprecations.
+
+### `--trace-warnings`
+
+Print stack traces for process warnings (including deprecations).
+
+### `--dns-result-order=order`
+
+Set the default value of the `verbatim` parameter in the Node.js [`dns.lookup()`](https://nodejs.org/api/dns.html#dnslookuphostname-options-callback) and [`dnsPromises.lookup()`](https://nodejs.org/api/dns.html#dnspromiseslookuphostname-options) functions. The value could be:
+
+* `ipv4first`: sets default `verbatim` `false`.
+* `verbatim`: sets default `verbatim` `true`.
+
+The default is `verbatim` and `dns.setDefaultResultOrder()` have higher priority than `--dns-result-order`.
+
+### `--diagnostic-dir=directory`
+
+Set the directory to which all Node.js diagnostic output files are written. Defaults to current working directory.
+
+Affects the default output directory of [v8.setHeapSnapshotNearHeapLimit](https://nodejs.org/docs/latest/api/v8.html#v8setheapsnapshotnearheaplimitlimit).
+
+### `--no-experimental-global-navigator`
+
+Disable exposition of [Navigator API][] on the global scope from Node.js.
+
+### `--experimental-transform-types`
+
+Enables the [transformation](https://nodejs.org/api/typescript.html#type-stripping)
+of TypeScript-only syntax into JavaScript code.
+
+## Chromium Flags
+
+There isn't a documented list of all Chromium switches, but there are a few ways to find them.
+
+The easiest way is through Chromium's flags page, which you can access at `about://flags`. These flags don't directly match switch names, but they show up in the process's command-line arguments.
+
+To see these arguments, enable a flag in `about://flags`, then go to `about://version` in Chromium. You'll find a list of command-line arguments, including `--flag-switches-begin --your --list --flag-switches-end`, which contains the list of your flag enabled switches.
+
+Most flags are included as part of `--enable-features=`, but some are standalone switches, like `--enable-experimental-web-platform-features`.
+
+A complete list of flags exists in [Chromium's flag metadata page](https://source.chromium.org/chromium/chromium/src/+/main:chrome/browser/flag-metadata.json), but this list includes platform, environment and GPU specific, expired and potentially non-functional flags, so many of them might not always work in every situation.
+
+Keep in mind that standalone switches can sometimes be split into individual features, so there's no fully complete list of switches.
+
+Finally, you'll need to ensure that the version of Chromium in Electron matches the version of the browser you're using to cross-reference the switches.
+
+### Chromium features relevant to Electron apps
+
+* `AlwaysLogLOAFURL`: enables script attribution for
+  [`long-animation-frame`](https://developer.mozilla.org/en-US/docs/Web/API/Performance_API/Long_animation_frame_timing)
+  `PerformanceObserver` events for non-http(s), non-data, non-blob URLs (such as `file:` or custom
+  protocol URLs).
+* `SpareRendererForSitePerProcess`: keeps a spare renderer process running at all times so
+  that a new window, or a navigation that needs a new process, does not wait for a process to
+  launch. Electron starts one such process when the default session is created, for the first
+  sandboxed window that uses it; enable this if the app opens windows regularly and the memory of an
+  idle renderer is acceptable. Only windows whose `webPreferences` are sandboxed and set none of `additionalArguments`,
+  `enableBlinkFeatures`, `disableBlinkFeatures`, `experimentalFeatures`, `offscreen` or (macOS)
+  `scrollBounce` can use it.
 
 [app]: app.md
 [append-switch]: command-line.md#commandlineappendswitchswitch-value
@@ -277,3 +469,4 @@ By default inspector websocket url is available in stderr and under /json/list e
 [play-silent-audio]: https://github.com/atom/atom/pull/9485/files
 [ready]: app.md#event-ready
 [severities]: https://source.chromium.org/chromium/chromium/src/+/main:base/logging.h?q=logging::LogSeverity&ss=chromium
+[Navigator API]: https://github.com/nodejs/node/blob/main/doc/api/globals.md#navigator

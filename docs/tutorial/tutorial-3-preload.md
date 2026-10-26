@@ -1,6 +1,6 @@
 ---
 title: 'Using Preload Scripts'
-description: 'This guide will step you through the process of creating a barebones Hello World app in Electron, similar to electron/electron-quick-start.'
+description: 'This guide will step you through the process of creating a barebones Hello World app in Electron.'
 slug: tutorial-preload
 hide_title: false
 ---
@@ -43,14 +43,10 @@ and a limited subset of Node.js and Electron APIs.
 :::info Preload script sandboxing
 
 From Electron 20 onwards, preload scripts are **sandboxed** by default and no longer have access
-to a full Node.js environment. Practically, this means that you have a polyfilled `require`
-function that only has access to a limited set of APIs.
-
-| Available API      | Details                                                                                                                                                                                                                                                        |
-| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Electron modules   | Renderer process modules                                                                                                                                                                                                                                       |
-| Node.js modules    | [`events`](https://nodejs.org/api/events.html), [`timers`](https://nodejs.org/api/timers.html), [`url`](https://nodejs.org/api/url.html)                                                                                                                       |
-| Polyfilled globals | [`Buffer`](https://nodejs.org/api/buffer.html), [`process`](../api/process.md), [`clearImmediate`](https://nodejs.org/api/timers.html#timers_clearimmediate_immediate), [`setImmediate`](https://nodejs.org/api/timers.html#timers_setimmediate_callback_args) |
+to a full Node.js environment. Practically, this means that you have a `require` function
+that can only load the `electron` module (the renderer process modules), plus a reduced
+[`process`](../api/process.md) object and a `global` alias for `globalThis`. No Node.js
+built-in modules or Node.js globals are available.
 
 For more information, check out the [Process Sandboxing](./sandbox.md) guide.
 
@@ -73,7 +69,7 @@ const { contextBridge } = require('electron')
 contextBridge.exposeInMainWorld('versions', {
   node: () => process.versions.node,
   chrome: () => process.versions.chrome,
-  electron: () => process.versions.electron,
+  electron: () => process.versions.electron
   // we can also expose variables, not just functions
 })
 ```
@@ -81,17 +77,18 @@ contextBridge.exposeInMainWorld('versions', {
 To attach this script to your renderer process, pass its path to the
 `webPreferences.preload` option in the BrowserWindow constructor:
 
-```js {2,8-10} title="main.js"
+```js {3,9-11} title="main.js"
 const { app, BrowserWindow } = require('electron')
-const path = require('path')
+
+const path = require('node:path')
 
 const createWindow = () => {
   const win = new BrowserWindow({
     width: 800,
     height: 600,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-    },
+      preload: path.join(__dirname, 'preload.js')
+    }
   })
 
   win.loadFile('index.html')
@@ -118,7 +115,7 @@ information in the window. This variable can be accessed via `window.versions` o
 `versions`. Create a `renderer.js` script that uses the [`document.getElementById`][]
 DOM API to replace the displayed text for the HTML element with `info` as its `id` property.
 
-```js title="renderer.js"
+```js title="renderer.js" @ts-nocheck
 const information = document.getElementById('info')
 information.innerText = `This app is using Chrome (v${versions.chrome()}), Node.js (v${versions.node()}), and Electron (v${versions.electron()})`
 ```
@@ -130,15 +127,15 @@ and attach your `renderer.js` script:
 <!DOCTYPE html>
 <html>
   <head>
-    <meta charset="UTF-8" />
+    <meta charset="UTF-8">
     <meta
       http-equiv="Content-Security-Policy"
       content="default-src 'self'; script-src 'self'"
-    />
+    >
     <meta
       http-equiv="X-Content-Security-Policy"
       content="default-src 'self'; script-src 'self'"
-    />
+    >
     <title>Hello from Electron renderer!</title>
   </head>
   <body>
@@ -183,7 +180,7 @@ contextBridge.exposeInMainWorld('versions', {
   node: () => process.versions.node,
   chrome: () => process.versions.chrome,
   electron: () => process.versions.electron,
-  ping: () => ipcRenderer.invoke('ping'),
+  ping: () => ipcRenderer.invoke('ping')
   // we can also expose variables, not just functions
 })
 ```
@@ -202,28 +199,31 @@ Then, set up your `handle` listener in the main process. We do this _before_
 loading the HTML file so that the handler is guaranteed to be ready before
 you send out the `invoke` call from the renderer.
 
-```js {1,12} title="main.js"
-const { app, BrowserWindow, ipcMain } = require('electron')
-const path = require('path')
+```js {1,16} title="main.js"
+const { app, BrowserWindow, ipcMain } = require('electron/main')
+
+const path = require('node:path')
 
 const createWindow = () => {
   const win = new BrowserWindow({
     width: 800,
     height: 600,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-    },
+      preload: path.join(__dirname, 'preload.js')
+    }
   })
-  ipcMain.handle('ping', () => 'pong')
   win.loadFile('index.html')
 }
-app.whenReady().then(createWindow)
+app.whenReady().then(() => {
+  ipcMain.handle('ping', () => 'pong')
+  createWindow()
+})
 ```
 
 Once you have the sender and receiver set up, you can now send messages from the renderer
 to the main process through the `'ping'` channel you just defined.
 
-```js title='renderer.js'
+```js title='renderer.js' @ts-expect-error=[2]
 const func = async () => {
   const response = await window.versions.ping()
   console.log(response) // prints out 'pong'
@@ -250,7 +250,7 @@ apps often use the preload script to set up inter-process communication (IPC) in
 to pass arbitrary messages between the two kinds of processes.
 
 In the next part of the tutorial, we will be showing you resources on adding more
-functionality to your app, then teaching you distributing your app to users.
+functionality to your app, then teaching you how to distribute your app to users.
 
 <!-- Links -->
 

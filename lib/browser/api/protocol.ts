@@ -1,24 +1,34 @@
+import { toByteString } from '@electron/internal/common/api/net-client-request';
+
 import { ProtocolRequest, session } from 'electron/main';
+
 import { createReadStream } from 'fs';
 import { Readable } from 'stream';
-import { ReadableStream } from 'stream/web';
+
+import type { ReadableStream as ReadableStreamType, ReadableStreamDefaultReader } from 'stream/web';
+
+// `stream/web` evaluates all of Node's WHATWG streams; requiring it lazily
+// keeps that off the startup path of apps that never call protocol.handle().
+type ReadableStream<R = any> = ReadableStreamType<R>;
+const webStreams = () => require('stream/web') as typeof import('stream/web');
 
 // Global protocol APIs.
-const { registerSchemesAsPrivileged, getStandardSchemes, Protocol } = process._linkedBinding('electron_browser_protocol');
+const { registerSchemesAsPrivileged, getStandardSchemes, Protocol } =
+  process._linkedBinding('electron_browser_protocol');
 
 const ERR_FAILED = -2;
 const ERR_UNEXPECTED = -9;
 
-const isBuiltInScheme = (scheme: string) => scheme === 'http' || scheme === 'https';
+const isBuiltInScheme = (scheme: string) => ['http', 'https', 'file'].includes(scheme);
 
-function makeStreamFromPipe (pipe: any): ReadableStream {
+function makeStreamFromPipe(pipe: any): ReadableStream<Uint8Array> {
   const buf = new Uint8Array(1024 * 1024 /* 1 MB */);
-  return new ReadableStream({
-    async pull (controller) {
+  return new (webStreams().ReadableStream)({
+    async pull(controller) {
       try {
         const rv = await pipe.read(buf);
         if (rv > 0) {
-          controller.enqueue(buf.subarray(0, rv));
+          controller.enqueue(buf.slice(0, rv));
         } else {
           controller.close();
         }
@@ -29,61 +39,181 @@ function makeStreamFromPipe (pipe: any): ReadableStream {
   });
 }
 
-function convertToRequestBody (uploadData: ProtocolRequest['uploadData']): RequestInit['body'] {
+function makeStreamFromFileInfo({
+  filePath,
+  offset = 0,
+  length = -1
+}: {
+  filePath: string;
+  offset?: number;
+  length?: number;
+}): ReadableStream<Uint8Array> {
+  // Node's Readable.toWeb produces a WHATWG ReadableStream whose chunks are Uint8Array.
+  return Readable.toWeb(
+    createReadStream(filePath, {
+      start: offset,
+      end: length >= 0 ? offset + length : undefined
+    })
+  ) as ReadableStream<Uint8Array>;
+}
+
+function convertToRequestBody(uploadData: ProtocolRequest['uploadData']): RequestInit['body'] {
   if (!uploadData) return null;
   // Optimization: skip creating a stream if the request is just a single buffer.
-  if (uploadData.length === 1 && (uploadData[0] as any).type === 'rawData') return uploadData[0].bytes;
+  if (uploadData.length === 1 && (uploadData[0] as any).type === 'rawData') {
+    return uploadData[0].bytes as any;
+  }
 
-  const chunks = [...uploadData] as any[]; // TODO: types are wrong
-  let current: ReadableStreamDefaultReader | null = null;
-  return new ReadableStream({
-    pull (controller) {
+  const chunks = [...uploadData] as any[]; // TODO: refine ProtocolRequest types
+  // Use Node's web stream types explicitly to avoid DOM lib vs Node lib structural mismatches.
+  // Generic <Uint8Array> ensures reader.read() returns value?: Uint8Array consistent with enqueue.
+  let current: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  return new (webStreams().ReadableStream)<Uint8Array>({
+    async pull(controller) {
       if (current) {
-        current.read().then(({ done, value }) => {
+        const { done, value } = await current.read();
+        // (done => value === undefined) as per WHATWG spec
+        if (done) {
+          current = null;
+          return this.pull!(controller);
+        } else {
           controller.enqueue(value);
-          if (done) current = null;
-        }, (err) => {
-          controller.error(err);
-        });
+        }
       } else {
-        if (!chunks.length) { return controller.close(); }
+        if (!chunks.length) {
+          return controller.close();
+        }
         const chunk = chunks.shift()!;
-        if (chunk.type === 'rawData') { controller.enqueue(chunk.bytes); } else if (chunk.type === 'file') {
-          current = Readable.toWeb(createReadStream(chunk.filePath, { start: chunk.offset ?? 0, end: chunk.length >= 0 ? chunk.offset + chunk.length : undefined })).getReader();
-          this.pull!(controller);
+        if (chunk.type === 'rawData') {
+          controller.enqueue(chunk.bytes as Uint8Array);
+        } else if (chunk.type === 'file') {
+          current = makeStreamFromFileInfo(chunk).getReader();
+          return this.pull!(controller);
         } else if (chunk.type === 'stream') {
           current = makeStreamFromPipe(chunk.body).getReader();
-          this.pull!(controller);
+          return this.pull!(controller);
+        } else if (chunk.type === 'blob') {
+          // Note that even though `getBlobData()` is a `Session` API, it doesn't
+          // actually use the `Session` context. Its implementation solely relies
+          // on global variables which allows us to implement this feature without
+          // knowledge of the `Session` associated with the current request by
+          // always pulling `Blob` data out of the default `Session`.
+          controller.enqueue(await session.defaultSession.getBlobData(chunk.blobUUID));
+        } else {
+          throw new Error(`Unknown upload data chunk type: ${chunk.type}`);
         }
       }
     }
   }) as RequestInit['body'];
 }
 
-Protocol.prototype.handle = function (this: Electron.Protocol, scheme: string, handler: (req: Request) => Response | Promise<Response>) {
+function validateResponse(res: Response) {
+  if (!res || typeof res !== 'object') return false;
+
+  if (res.type === 'error') return true;
+
+  const exists = (key: string) => Object.hasOwn(res, key);
+
+  if (exists('status') && typeof res.status !== 'number') return false;
+  if (exists('statusText') && typeof res.statusText !== 'string') return false;
+  if (exists('headers') && typeof res.headers !== 'object') return false;
+
+  if (exists('body')) {
+    if (typeof res.body !== 'object') return false;
+    if (res.body !== null && !(res.body instanceof webStreams().ReadableStream)) return false;
+  }
+
+  return true;
+}
+
+const notYet = Symbol('notYet');
+const later = () => new Promise<typeof notYet>((resolve) => setImmediate(resolve, notYet));
+
+// A Response that is still exactly what net.fetch produced (its body stream not
+// read, locked, cloned or replaced) is relayed natively: the fetch stops
+// handing chunks to JS, whatever JS had already pulled is collected as a
+// prefix, and the loader writes prefix + remainder straight to the client.
+async function relayUntouchedFetch(res: Response): Promise<{ loader?: unknown; data: Buffer } | null> {
+  const fetched = (res as any).__fetch;
+  if (!fetched || res.body !== fetched.body || res.bodyUsed || res.body!.locked) return null;
+  const urlLoader = fetched.request._urlLoader;
+  if (!urlLoader) return null;
+  urlLoader.hold();
+  const reader = (res.body as ReadableStream<Uint8Array>).getReader();
+  const prefix: Uint8Array[] = [];
+  for (;;) {
+    const next = await Promise.race([reader.read(), later()]);
+    if (next === notYet) break;
+    // The fetch finished before hold(); JS already has the whole body.
+    if (next.done) return { data: Buffer.concat(prefix) };
+    prefix.push(next.value);
+  }
+  return { loader: urlLoader, data: Buffer.concat(prefix) };
+}
+
+Protocol.prototype.handle = function (
+  this: Electron.Protocol,
+  scheme: string,
+  handler: (req: Request) => Response | Promise<Response>
+) {
   const register = isBuiltInScheme(scheme) ? this.interceptProtocol : this.registerProtocol;
   const success = register.call(this, scheme, async (preq: ProtocolRequest, cb: any) => {
     try {
       const body = convertToRequestBody(preq.uploadData);
+      const headers = new Headers();
+      if (preq.headers) {
+        for (const [k, v] of Object.entries(preq.headers)) {
+          if (Array.isArray(v)) {
+            for (const item of v) {
+              headers.append(k, toByteString(item));
+            }
+          } else if (typeof v === 'string') {
+            headers.set(k, toByteString(v));
+          }
+        }
+      }
+      if (headers.get('origin') === 'null') {
+        headers.delete('origin');
+      }
       const req = new Request(preq.url, {
-        headers: preq.headers,
+        headers,
         method: preq.method,
         referrer: preq.referrer,
         body,
-        duplex: body instanceof ReadableStream ? 'half' : undefined
+        duplex: body instanceof webStreams().ReadableStream ? 'half' : undefined
       } as any);
+      // The origin that issued the request, if web content did; not something
+      // a standard Request can carry, so it is attached as an own property.
+      if (preq.initiatorOrigin !== undefined) (req as any).initiatorOrigin = preq.initiatorOrigin;
       const res = await handler(req);
-      if (!res || typeof res !== 'object') {
+      if (!validateResponse(res)) {
         return cb({ error: ERR_UNEXPECTED });
-      }
-      if (res.type === 'error') { cb({ error: ERR_FAILED }); } else {
-        cb({
-          data: res.body ? Readable.fromWeb(res.body as ReadableStream<ArrayBufferView>) : null,
-          headers: Object.fromEntries(res.headers),
+      } else if (res.type === 'error') {
+        cb({ error: ERR_FAILED });
+      } else {
+        const headersObj: Record<string, string | string[]> = {};
+        if (res.headers) {
+          for (const [k, v] of res.headers) {
+            if (k === 'set-cookie') {
+              if (!headersObj[k]) headersObj[k] = [];
+              (headersObj[k] as string[]).push(v);
+            } else {
+              headersObj[k] = v;
+            }
+          }
+        }
+        const head = {
+          headers: headersObj,
           statusCode: res.status,
           statusText: res.statusText,
           mimeType: (res as any).__original_resp?._responseHead?.mimeType
-        });
+        };
+        const relay = await relayUntouchedFetch(res);
+        if (relay) {
+          cb({ ...relay, ...head });
+        } else {
+          cb({ data: res.body ? Readable.fromWeb(res.body as ReadableStream<ArrayBufferView>) : null, ...head });
+        }
       }
     } catch (e) {
       console.error(e);
@@ -95,12 +225,35 @@ Protocol.prototype.handle = function (this: Electron.Protocol, scheme: string, h
 
 Protocol.prototype.unhandle = function (this: Electron.Protocol, scheme: string) {
   const unregister = isBuiltInScheme(scheme) ? this.uninterceptProtocol : this.unregisterProtocol;
-  if (!unregister.call(this, scheme)) { throw new Error(`Failed to unhandle protocol: ${scheme}`); }
+  if (!unregister.call(this, scheme) && !(this as any).unregisterSource(scheme)) {
+    throw new Error(`Failed to unhandle protocol: ${scheme}`);
+  }
+};
+
+// The native converter drops what it cannot represent (functions, the state of
+// class instances), which would then read as an omitted, wider setting.
+function assertPlainData(value: unknown, name: string) {
+  if (typeof value === 'string' || value === undefined) return;
+  const proto = typeof value === 'object' && value !== null ? Object.getPrototypeOf(value) : undefined;
+  if (proto !== Object.prototype && proto !== Array.prototype && proto !== null) {
+    throw new TypeError(`${name} must be a string, an array or a plain object`);
+  }
+  for (const [key, child] of Object.entries(value as object)) assertPlainData(child, `${name}.${key}`);
+}
+
+const { registerSource } = Protocol.prototype;
+Protocol.prototype.registerSource = function (
+  this: Electron.Protocol,
+  scheme: string,
+  source: Electron.ProtocolSource
+) {
+  assertPlainData(source, 'source');
+  return registerSource.call(this, scheme, source);
 };
 
 Protocol.prototype.isProtocolHandled = function (this: Electron.Protocol, scheme: string) {
   const isRegistered = isBuiltInScheme(scheme) ? this.isProtocolIntercepted : this.isProtocolRegistered;
-  return isRegistered.call(this, scheme);
+  return isRegistered.call(this, scheme) || this.getSource(scheme) !== null;
 };
 
 const protocol = {
@@ -124,7 +277,9 @@ const protocol = {
   isProtocolIntercepted: (...args) => session.defaultSession.protocol.isProtocolIntercepted(...args),
   handle: (...args) => session.defaultSession.protocol.handle(...args),
   unhandle: (...args) => session.defaultSession.protocol.unhandle(...args),
-  isProtocolHandled: (...args) => session.defaultSession.protocol.isProtocolHandled(...args)
+  isProtocolHandled: (...args) => session.defaultSession.protocol.isProtocolHandled(...args),
+  registerSource: (...args) => session.defaultSession.protocol.registerSource(...args),
+  getSource: (...args) => session.defaultSession.protocol.getSource(...args)
 } as typeof Electron.protocol;
 
 export default protocol;

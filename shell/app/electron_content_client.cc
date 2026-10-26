@@ -4,49 +4,56 @@
 
 #include "shell/app/electron_content_client.h"
 
+#include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include "base/command_line.h"
+#include "base/containers/extend.h"
+#include "base/files/file_path.h"
 #include "base/files/file_util.h"
+#include "base/memory/ref_counted_memory.h"
+#include "base/no_destructor.h"
 #include "base/path_service.h"
 #include "base/strings/string_split.h"
-#include "base/strings/string_util.h"
-#include "base/strings/utf_string_conversions.h"
-#include "content/public/common/content_constants.h"
-#include "content/public/common/content_switches.h"
+#include "build/build_config.h"
+#include "content/public/common/buildflags.h"
 #include "electron/buildflags/buildflags.h"
+#include "electron/fuses.h"
 #include "extensions/common/constants.h"
 #include "pdf/buildflags.h"
-#include "ppapi/buildflags/buildflags.h"
-#include "shell/common/electron_paths.h"
 #include "shell/common/options_switches.h"
+#include "shell/common/process_util.h"
 #include "third_party/widevine/cdm/buildflags.h"
+#include "third_party/widevine/cdm/widevine_cdm_common.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/base/resource/resource_bundle.h"
 #include "url/url_constants.h"
-// In SHARED_INTERMEDIATE_DIR.
-#include "widevine_cdm_version.h"  // NOLINT(build/include_directory)
 
 #if BUILDFLAG(ENABLE_WIDEVINE)
+#include "base/json/json_file_value_serializer.h"
 #include "base/native_library.h"
+#include "base/version.h"
+#include "components/cdm/common/cdm_manifest.h"
 #include "content/public/common/cdm_info.h"
+#include "media/base/audio_codecs.h"
+#include "media/base/cdm_capability.h"
 #include "media/base/video_codecs.h"
+#include "media/cdm/cdm_paths.h"
+#include "shell/browser/api/electron_api_app.h"
 #endif  // BUILDFLAG(ENABLE_WIDEVINE)
 
 #if BUILDFLAG(ENABLE_PDF_VIEWER)
-#include "chrome/common/pdf_util.h"
-#include "components/pdf/common/internal_plugin_helpers.h"
-#include "pdf/pdf.h"  // nogncheck
+#include "components/pdf/common/constants.h"  // nogncheck
+#include "components/pdf/common/pdf_util.h"   // nogncheck
 #include "shell/common/electron_constants.h"
 #endif  // BUILDFLAG(ENABLE_PDF_VIEWER)
 
 #if BUILDFLAG(ENABLE_PLUGINS)
-#include "content/public/common/content_plugin_info.h"
-#include "ppapi/shared_impl/ppapi_permissions.h"
-#include "ppapi/shared_impl/ppapi_switches.h"  // nogncheck crbug.com/1125897
-#endif                                         // BUILDFLAG(ENABLE_PLUGINS)
+#include "content/public/common/webplugininfo.h"
+#endif  // BUILDFLAG(ENABLE_PLUGINS)
 
 namespace electron {
 
@@ -59,43 +66,210 @@ enum class WidevineCdmFileCheck {
 };
 
 #if BUILDFLAG(ENABLE_WIDEVINE)
+std::optional<base::FilePath> GetWidevineSubPackagePath(
+    const base::DictValue& manifest) {
+  const base::ListValue* platforms = manifest.FindList("platforms");
+  if (!platforms)
+    return std::nullopt;
+
+  base::FilePath platform_specific_dir =
+      media::GetPlatformSpecificDirectory(base::FilePath());
+  if (platform_specific_dir.empty())
+    return std::nullopt;
+  platform_specific_dir = platform_specific_dir.StripTrailingSeparators();
+
+  for (const auto& entry : *platforms) {
+    const base::DictValue* dict = entry.GetIfDict();
+    if (!dict)
+      continue;
+    const std::string* sub_package_path = dict->FindString("sub_package_path");
+    if (!sub_package_path)
+      continue;
+    base::FilePath candidate = base::FilePath::FromUTF8Unsafe(*sub_package_path)
+                                   .NormalizePathSeparators()
+                                   .StripTrailingSeparators();
+    if (candidate == platform_specific_dir) {
+      return base::FilePath::FromUTF8Unsafe(*sub_package_path);
+    }
+  }
+
+  return std::nullopt;
+}
+
+std::optional<base::Version> GetWidevineVersionFromSwitch() {
+  const std::string version_string =
+      base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
+          switches::kWidevineCdmVersion);
+  base::Version parsed(version_string);
+  if (parsed.IsValid()) {
+    return parsed;
+  }
+  return std::nullopt;
+}
+
+bool ParseWidevineManifestFromPath(
+    const base::FilePath& manifest_path,
+    media::CdmCapability* capability,
+    std::optional<base::FilePath>* sub_package_path_out,
+    const std::optional<base::Version>& fallback_version) {
+  if (sub_package_path_out)
+    sub_package_path_out->reset();
+
+  JSONFileValueDeserializer deserializer(manifest_path);
+  int error_code;
+  std::string error_message;
+  std::unique_ptr<base::Value> manifest =
+      deserializer.Deserialize(&error_code, &error_message);
+  if (!manifest || !manifest->is_dict())
+    return false;
+
+  base::DictValue& manifest_dict = manifest->GetDict();
+  if (sub_package_path_out) {
+    // Preserve the platform-specific library path even when capability parsing
+    // needs the version supplied on the command line.
+    *sub_package_path_out = GetWidevineSubPackagePath(manifest_dict);
+  }
+
+  if (!manifest_dict.contains("version") && fallback_version) {
+    manifest_dict.Set("version", fallback_version->GetString());
+  }
+
+  if (!IsCdmManifestCompatibleWithChrome(manifest_dict) ||
+      !ParseCdmManifest(manifest_dict, capability)) {
+    return false;
+  }
+
+  return true;
+}
+
+bool TryGetBundledWidevineCdm(
+    base::FilePath* cdm_path,
+    std::optional<media::CdmCapability>* capability_out) {
+  base::FilePath exe_dir;
+  if (!base::PathService::Get(base::DIR_EXE, &exe_dir))
+    return false;
+
+  base::FilePath install_dir = exe_dir.AppendASCII(kWidevineCdmBaseDirectory);
+  base::FilePath platform_dir =
+      media::GetPlatformSpecificDirectory(install_dir);
+  base::FilePath cdm_library_path = platform_dir.AppendASCII(
+      base::GetNativeLibraryName(kWidevineCdmLibraryName));
+  if (!base::PathExists(cdm_library_path))
+    return false;
+
+  base::FilePath manifest_path =
+      install_dir.Append(FILE_PATH_LITERAL("manifest.json"));
+  media::CdmCapability capability;
+  if (!ParseWidevineManifestFromPath(manifest_path, &capability, nullptr,
+                                     GetWidevineVersionFromSwitch())) {
+    return false;
+  }
+
+  *cdm_path = std::move(cdm_library_path);
+  *capability_out = std::move(capability);
+  return true;
+}
+
 bool IsWidevineAvailable(
     base::FilePath* cdm_path,
+    std::vector<media::AudioCodec>* audio_codecs_supported,
     std::vector<media::VideoCodec>* codecs_supported,
     base::flat_set<media::CdmSessionType>* session_types_supported,
-    base::flat_set<media::EncryptionMode>* modes_supported) {
+    base::flat_set<media::EncryptionScheme>* modes_supported,
+    std::optional<base::Version>* cdm_version_out) {
   static WidevineCdmFileCheck widevine_cdm_file_check =
       WidevineCdmFileCheck::kNotChecked;
+  static base::NoDestructor<std::optional<media::CdmCapability>>
+      cached_capability;
 
   if (widevine_cdm_file_check == WidevineCdmFileCheck::kNotChecked) {
     base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
-    *cdm_path = command_line->GetSwitchValuePath(switches::kWidevineCdmPath);
-    if (!cdm_path->empty()) {
-      *cdm_path = cdm_path->AppendASCII(
+    // Packaged apps must load a CDM bundled beside the executable rather than
+    // library code from an arbitrary command-line path.
+    if (!api::App::IsPackaged()) {
+      *cdm_path = command_line->GetSwitchValuePath(switches::kWidevineCdmPath);
+    }
+    if (cdm_path->empty()) {
+      if (TryGetBundledWidevineCdm(cdm_path, cached_capability.get())) {
+        widevine_cdm_file_check = WidevineCdmFileCheck::kFound;
+        if (cdm_version_out)
+          *cdm_version_out = (*cached_capability)->version;
+      } else {
+        widevine_cdm_file_check = WidevineCdmFileCheck::kNotFound;
+      }
+    } else {
+      base::FilePath cdm_dir = *cdm_path;
+      base::FilePath manifest_path =
+          cdm_dir.Append(FILE_PATH_LITERAL("manifest.json"));
+      media::CdmCapability capability;
+      std::optional<base::FilePath> sub_package_path;
+      const std::optional<base::Version> fallback_version =
+          GetWidevineVersionFromSwitch();
+      if (ParseWidevineManifestFromPath(manifest_path, &capability,
+                                        &sub_package_path, fallback_version)) {
+        *cached_capability = std::move(capability);
+        if (cdm_version_out)
+          *cdm_version_out = (*cached_capability)->version;
+      } else if (cdm_version_out) {
+        *cdm_version_out = fallback_version;
+      }
+
+      base::FilePath cdm_library_dir = cdm_dir;
+      if (sub_package_path && !sub_package_path->empty()) {
+        if (sub_package_path->IsAbsolute()) {
+          cdm_library_dir = *sub_package_path;
+        } else {
+          cdm_library_dir = cdm_dir.Append(*sub_package_path);
+        }
+      }
+
+      *cdm_path = cdm_library_dir.AppendASCII(
           base::GetNativeLibraryName(kWidevineCdmLibraryName));
       widevine_cdm_file_check = base::PathExists(*cdm_path)
                                     ? WidevineCdmFileCheck::kFound
                                     : WidevineCdmFileCheck::kNotFound;
+      if (!cached_capability->has_value())
+        cached_capability->reset();
     }
   }
 
   if (widevine_cdm_file_check == WidevineCdmFileCheck::kFound) {
-    // Add the supported codecs as if they came from the component manifest.
-    // This list must match the CDM that is being bundled with Chrome.
-    codecs_supported->push_back(media::VideoCodec::kCodecVP8);
-    codecs_supported->push_back(media::VideoCodec::kCodecVP9);
+    if (cached_capability->has_value()) {
+      for (auto codec : (*cached_capability)->audio_codecs) {
+        audio_codecs_supported->push_back(codec);
+      }
+      for (const auto& entry : (*cached_capability)->video_codecs) {
+        codecs_supported->push_back(entry.first);
+      }
+      session_types_supported->insert(
+          (*cached_capability)->session_types.begin(),
+          (*cached_capability)->session_types.end());
+      modes_supported->insert((*cached_capability)->encryption_schemes.begin(),
+                              (*cached_capability)->encryption_schemes.end());
+    } else {
+      // Add the supported codecs as if they came from the component manifest.
+      // This list must match the CDM that is being bundled with Chrome.
+      audio_codecs_supported->push_back(media::AudioCodec::kOpus);
+      audio_codecs_supported->push_back(media::AudioCodec::kVorbis);
 #if BUILDFLAG(USE_PROPRIETARY_CODECS)
-    codecs_supported->push_back(media::VideoCodec::kCodecH264);
+      audio_codecs_supported->push_back(media::AudioCodec::kAAC);
+#endif  // BUILDFLAG(USE_PROPRIETARY_CODECS)
+      codecs_supported->push_back(media::VideoCodec::kVP8);
+      codecs_supported->push_back(media::VideoCodec::kVP9);
+#if BUILDFLAG(USE_PROPRIETARY_CODECS)
+      codecs_supported->push_back(media::VideoCodec::kH264);
 #endif  // BUILDFLAG(USE_PROPRIETARY_CODECS)
 
-    // TODO(crbug.com/767941): Push persistent-license support info here once
-    // we check in a new CDM that supports it on Linux.
-    session_types_supported->insert(media::CdmSessionType::kTemporary);
+      // TODO(crbug.com/767941): Push persistent-license support info here once
+      // we check in a new CDM that supports it on Linux.
+      session_types_supported->insert(media::CdmSessionType::kTemporary);
 #if BUILDFLAG(IS_CHROMEOS)
-    session_types_supported->insert(media::CdmSessionType::kPersistentLicense);
+      session_types_supported->insert(
+          media::CdmSessionType::kPersistentLicense);
 #endif  // BUILDFLAG(IS_CHROMEOS)
 
-    modes_supported->insert(media::EncryptionMode::kCenc);
+      modes_supported->insert(media::EncryptionScheme::kCenc);
+    }
 
     return true;
   }
@@ -103,21 +277,6 @@ bool IsWidevineAvailable(
   return false;
 }
 #endif  // BUILDFLAG(ENABLE_WIDEVINE)
-
-void AppendDelimitedSwitchToVector(const base::StringPiece cmd_switch,
-                                   std::vector<std::string>* append_me) {
-  auto* command_line = base::CommandLine::ForCurrentProcess();
-  auto switch_value = command_line->GetSwitchValueASCII(cmd_switch);
-  if (!switch_value.empty()) {
-    constexpr base::StringPiece delimiter(",", 1);
-    auto tokens =
-        base::SplitString(switch_value, delimiter, base::TRIM_WHITESPACE,
-                          base::SPLIT_WANT_NONEMPTY);
-    append_me->reserve(append_me->size() + tokens.size());
-    std::move(std::begin(tokens), std::end(tokens),
-              std::back_inserter(*append_me));
-  }
-}
 
 }  // namespace
 
@@ -129,7 +288,7 @@ std::u16string ElectronContentClient::GetLocalizedString(int message_id) {
   return l10n_util::GetStringUTF16(message_id);
 }
 
-base::StringPiece ElectronContentClient::GetDataResource(
+std::string_view ElectronContentClient::GetDataResource(
     int resource_id,
     ui::ResourceScaleFactor scale_factor) {
   return ui::ResourceBundle::GetSharedInstance().GetRawDataResourceForScale(
@@ -141,36 +300,38 @@ gfx::Image& ElectronContentClient::GetNativeImageNamed(int resource_id) {
       resource_id);
 }
 
-base::RefCountedMemory* ElectronContentClient::GetDataResourceBytes(
-    int resource_id) {
+scoped_refptr<base::RefCountedMemory>
+ElectronContentClient::GetDataResourceBytes(int resource_id) {
   return ui::ResourceBundle::GetSharedInstance().LoadDataResourceBytes(
       resource_id);
 }
 
 void ElectronContentClient::AddAdditionalSchemes(Schemes* schemes) {
-  auto* command_line = base::CommandLine::ForCurrentProcess();
-  std::string process_type =
-      command_line->GetSwitchValueASCII(::switches::kProcessType);
   // Browser Process registration happens in
   // `api::Protocol::RegisterSchemesAsPrivileged`
   //
   // Renderer Process registration happens in `RendererClientBase`
   //
   // We use this for registration to network utility process
-  if (process_type == ::switches::kUtilityProcess) {
-    AppendDelimitedSwitchToVector(switches::kServiceWorkerSchemes,
-                                  &schemes->service_worker_schemes);
-    AppendDelimitedSwitchToVector(switches::kStandardSchemes,
-                                  &schemes->standard_schemes);
-    AppendDelimitedSwitchToVector(switches::kSecureSchemes,
-                                  &schemes->secure_schemes);
-    AppendDelimitedSwitchToVector(switches::kBypassCSPSchemes,
-                                  &schemes->csp_bypassing_schemes);
-    AppendDelimitedSwitchToVector(switches::kCORSSchemes,
-                                  &schemes->cors_enabled_schemes);
+  if (IsUtilityProcess()) {
+    const auto& cmd = *base::CommandLine::ForCurrentProcess();
+    auto append_cli_schemes = [&cmd](auto& appendme, const auto key) {
+      base::Extend(appendme, base::SplitString(cmd.GetSwitchValueASCII(key),
+                                               ",", base::TRIM_WHITESPACE,
+                                               base::SPLIT_WANT_NONEMPTY));
+    };
+
+    using namespace switches;
+    append_cli_schemes(schemes->cors_enabled_schemes, kCORSSchemes);
+    append_cli_schemes(schemes->csp_bypassing_schemes, kBypassCSPSchemes);
+    append_cli_schemes(schemes->secure_schemes, kSecureSchemes);
+    append_cli_schemes(schemes->service_worker_schemes, kServiceWorkerSchemes);
+    append_cli_schemes(schemes->standard_schemes, kStandardSchemes);
   }
 
-  schemes->service_worker_schemes.emplace_back(url::kFileScheme);
+  if (electron::fuses::IsGrantFileProtocolExtraPrivilegesEnabled()) {
+    schemes->service_worker_schemes.emplace_back(url::kFileScheme);
+  }
 
 #if BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS)
   schemes->standard_schemes.push_back(extensions::kExtensionScheme);
@@ -179,27 +340,33 @@ void ElectronContentClient::AddAdditionalSchemes(Schemes* schemes) {
   schemes->service_worker_schemes.push_back(extensions::kExtensionScheme);
   schemes->cors_enabled_schemes.push_back(extensions::kExtensionScheme);
   schemes->csp_bypassing_schemes.push_back(extensions::kExtensionScheme);
+  schemes->code_cache_schemes.push_back(extensions::kExtensionScheme);
+  schemes->extension_schemes.push_back(extensions::kExtensionScheme);
 #endif
 }
 
 void ElectronContentClient::AddPlugins(
-    std::vector<content::ContentPluginInfo>* plugins) {
-#if BUILDFLAG(ENABLE_PLUGINS) && BUILDFLAG(ENABLE_PDF_VIEWER)
+    std::vector<content::WebPluginInfo>* plugins) {
+#if BUILDFLAG(ENABLE_PDF_VIEWER)
+  static constexpr char16_t kPDFPluginName[] = u"Chromium PDF Plugin";
+  static constexpr char16_t kPDFPluginDescription[] = u"Built-in PDF viewer";
   static constexpr char kPDFPluginExtension[] = "pdf";
-  static constexpr char kPDFPluginDescription[] = "Portable Document Format";
+  static constexpr char kPDFPluginExtensionDescription[] =
+      "Portable Document Format";
 
-  content::ContentPluginInfo pdf_info;
-  pdf_info.is_internal = true;
-  pdf_info.is_out_of_process = true;
-  pdf_info.name = kPDFInternalPluginName;
-  pdf_info.description = kPDFPluginDescription;
+  content::WebPluginInfo pdf_info;
+  pdf_info.name = kPDFPluginName;
   // This isn't a real file path; it's just used as a unique identifier.
-  pdf_info.path = base::FilePath(kPdfPluginPath);
-  content::WebPluginMimeType pdf_mime_type(
-      pdf::kInternalPluginMimeType, kPDFPluginExtension, kPDFPluginDescription);
+  static constexpr std::string_view kPdfPluginPath = "internal-pdf-viewer";
+  pdf_info.path = base::FilePath::FromASCII(kPdfPluginPath);
+  pdf_info.desc = kPDFPluginDescription;
+  content::WebPluginMimeType pdf_mime_type(pdf::kInternalPluginMimeType,
+                                           kPDFPluginExtension,
+                                           kPDFPluginExtensionDescription);
   pdf_info.mime_types.push_back(pdf_mime_type);
+  pdf_info.type = content::WebPluginInfo::PLUGIN_TYPE_BROWSER_INTERNAL_PLUGIN;
   plugins->push_back(pdf_info);
-#endif  // BUILDFLAG(ENABLE_PLUGINS) && BUILDFLAG(ENABLE_PDF_VIEWER)
+#endif  // BUILDFLAG(ENABLE_PDF_VIEWER)
 }
 
 void ElectronContentClient::AddContentDecryptionModules(
@@ -208,31 +375,56 @@ void ElectronContentClient::AddContentDecryptionModules(
   if (cdms) {
 #if BUILDFLAG(ENABLE_WIDEVINE)
     base::FilePath cdm_path;
+    std::vector<media::AudioCodec> audio_codecs_supported;
     std::vector<media::VideoCodec> video_codecs_supported;
     base::flat_set<media::CdmSessionType> session_types_supported;
-    base::flat_set<media::EncryptionMode> encryption_modes_supported;
-    if (IsWidevineAvailable(&cdm_path, &video_codecs_supported,
-                            &session_types_supported,
-                            &encryption_modes_supported)) {
+    base::flat_set<media::EncryptionScheme> encryption_modes_supported;
+    std::optional<base::Version> cdm_version;
+    if (IsWidevineAvailable(&cdm_path, &audio_codecs_supported,
+                            &video_codecs_supported, &session_types_supported,
+                            &encryption_modes_supported, &cdm_version)) {
       base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
-      auto cdm_version_string =
-          command_line->GetSwitchValueASCII(switches::kWidevineCdmVersion);
       // CdmInfo needs |path| to be the actual Widevine library,
       // not the adapter, so adjust as necessary. It will be in the
       // same directory as the installed adapter.
-      const base::Version version(cdm_version_string);
-      DCHECK(version.IsValid());
+      base::Version version;
+      if (cdm_version.has_value() && cdm_version->IsValid()) {
+        version = *cdm_version;
+      } else {
+        const std::string version_string =
+            command_line->GetSwitchValueASCII(switches::kWidevineCdmVersion);
+        base::Version parsed(version_string);
+        if (parsed.IsValid()) {
+          version = parsed;
+        }
+      }
 
-      content::CdmCapability capability(
-          video_codecs_supported, encryption_modes_supported,
-          session_types_supported, base::flat_set<media::CdmProxy::Protocol>());
+      media::CdmCapability::VideoCodecMap video_codec_map;
+      for (media::VideoCodec codec : video_codecs_supported) {
+        video_codec_map.emplace(codec, media::VideoCodecInfo());
+      }
 
-      cdms->push_back(content::CdmInfo(
-          kWidevineCdmDisplayName, kWidevineCdmGuid, version, cdm_path,
-          kWidevineCdmFileSystemId, capability, kWidevineKeySystem, false));
+      media::CdmCapability capability(
+          audio_codecs_supported, std::move(video_codec_map),
+          encryption_modes_supported, session_types_supported, version);
+
+      cdms->emplace_back(kWidevineKeySystem,
+                         content::CdmInfo::Robustness::kSoftwareSecure,
+                         capability,
+                         /*supports_sub_key_systems=*/true,
+                         kWidevineCdmDisplayName, kWidevineCdmType, cdm_path);
     }
 #endif  // BUILDFLAG(ENABLE_WIDEVINE)
   }
+}
+
+bool ElectronContentClient::IsFilePickerAllowedForCrossOriginSubframe(
+    const url::Origin& origin) {
+#if BUILDFLAG(ENABLE_PDF_VIEWER)
+  return IsPdfExtensionOrigin(origin);
+#else
+  return false;
+#endif
 }
 
 }  // namespace electron

@@ -14,7 +14,7 @@ Follow the guidelines below for building **Electron itself** on Windows, for the
   set a few environment variables to point the toolchains to your installation path.
     * `vs2022_install = DRIVE:\path\to\Microsoft Visual Studio\2022\Community`, replacing `2022` and `Community` with your installed versions and replacing `DRIVE:` with the drive that Visual Studio is on. Often, this will be `C:`.
     * `WINDOWSSDKDIR = DRIVE:\path\to\Windows Kits\10`, replacing `DRIVE:` with the drive that Windows Kits is on. Often, this will be `C:`.
-* [Node.js](https://nodejs.org/download/)
+* [Node.js](https://nodejs.org/download/) >= 22.18.0
 * [Git](https://git-scm.com)
 * Debugging Tools for Windows of Windows SDK 10.0.15063.468 if you plan on
 creating a full distribution since `symstore.exe` is used for creating a symbol
@@ -23,7 +23,7 @@ store from `.pdb` files.
   SDK, open Visual Studio Installer, select
   `Modify` → `Individual Components`, scroll down and select the appropriate
   Windows SDK to install. Another option would be to look at the
-  [Windows SDK and emulator archive](https://developer.microsoft.com/en-us/windows/downloads/sdk-archive)
+  [Windows SDK and emulator archive](https://developer.microsoft.com/en-us/windows/downloads/sdk-archive/)
   and download the standalone version of the SDK respectively.
   * The SDK Debugging Tools must also be installed. If the Windows 10 SDK was installed
   via the Visual Studio installer, then they can be installed by going to:
@@ -32,15 +32,16 @@ store from `.pdb` files.
   Or, you can download the standalone SDK installer and use it to install the Debugging Tools.
 
 If you don't currently have a Windows installation,
-[dev.microsoftedge.com](https://developer.microsoft.com/en-us/microsoft-edge/tools/vms/)
+[developer.microsoft.com](https://developer.microsoft.com/en-us/windows/downloads/virtual-machines/)
 has timebombed versions of Windows that you can use to build Electron.
 
 Building Electron is done entirely with command-line scripts and cannot be done
 with Visual Studio. You can develop Electron with any editor but support for
 building with Visual Studio will come in the future.
 
-**Note:** Even though Visual Studio is not used for building, it's still
-**required** because we need the build toolchains it provides.
+> [!NOTE]
+> Even though Visual Studio is not used for building, it's still
+> **required** because we need the build toolchains it provides.
 
 ## Exclude source tree from Windows Security
 

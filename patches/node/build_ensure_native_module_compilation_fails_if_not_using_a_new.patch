@@ -7,27 +7,29 @@ Subject: build: ensure native module compilation fails if not using a new
 This should not be upstreamed, it is a quality-of-life patch for downstream module builders.
 
 diff --git a/common.gypi b/common.gypi
-index 528ae2c370bc41fd245daea33ff8114cee68fce9..d56ed716c3245c9f89c750df232639318927749b 100644
+index b4161293343cc05a868d2734419367fc7146a664..c11b4a8df43cd2d07c55ca3dbbb67d5b555c77cc 100644
 --- a/common.gypi
 +++ b/common.gypi
-@@ -79,6 +79,8 @@
-     # TODO(refack): make v8-perfetto happen
+@@ -96,6 +96,8 @@
      'v8_use_perfetto': 0,
+     'tsan%': 0,
  
 +    'using_electron_config_gypi%': 0,
 +
      ##### end V8 defaults #####
  
-     # When building native modules using 'npm install' with the system npm,
-@@ -282,6 +284,7 @@
-       'V8_DEPRECATION_WARNINGS',
-       'V8_IMMINENT_DEPRECATION_WARNINGS',
+     'conditions': [
+@@ -347,7 +349,8 @@
        '_GLIBCXX_USE_CXX11_ABI=1',
+       # This help forks when building Node.js on a 32-bit arch as
+       # libuv is always compiled with _FILE_OFFSET_BITS=64
+-      '_FILE_OFFSET_BITS=64'
++      '_FILE_OFFSET_BITS=64',
 +      'ELECTRON_ENSURE_CONFIG_GYPI',
      ],
  
      # Forcibly disable -Werror.  We support a wide range of compilers, it's
-@@ -388,6 +391,11 @@
+@@ -504,6 +507,11 @@
            }],
          ],
        }],
@@ -36,23 +38,23 @@ index 528ae2c370bc41fd245daea33ff8114cee68fce9..d56ed716c3245c9f89c750df23263931
 +          'USING_ELECTRON_CONFIG_GYPI',
 +        ],
 +      }],
-       ['v8_enable_pointer_compression == 1', {
-         'defines': [
-           'V8_COMPRESS_POINTERS',
+       # The defines bellow must include all things from the external_v8_defines
+       # list in v8/BUILD.gn.
+       ['node_enable_experimentals == "true"', {
 diff --git a/configure.py b/configure.py
-index bfa20f5fc7a64b30b464327f4086a027e9a23359..f9d849260c3d7b1368d375125ae587eaa396c49e 100755
+index 1b35f195f7ee7547544cc954baf95c725afa8d0b..172aef2c5194574eb298462588ecf76ae2a2e366 100755
 --- a/configure.py
 +++ b/configure.py
-@@ -1517,6 +1517,7 @@ def configure_library(lib, output, pkgname=None):
+@@ -1930,6 +1930,7 @@ def configure_library(lib, output, pkgname=None):
+ def configure_v8(o, configs):
+   set_configuration_variable(configs, 'v8_enable_v8_checks', release=0, debug=1)
  
- 
- def configure_v8(o):
 +  o['variables']['using_electron_config_gypi'] = 1
-   o['variables']['v8_enable_webassembly'] = 1
+   o['variables']['v8_enable_webassembly'] = 0 if options.v8_lite_mode else 1
    o['variables']['v8_enable_javascript_promise_hooks'] = 1
    o['variables']['v8_enable_lite_mode'] = 1 if options.v8_lite_mode else 0
 diff --git a/src/node.h b/src/node.h
-index 173e0bc669a2fd90e764da72e09003f4c7311fd7..03f55b0a1853c055eb6c709a8e7916c2a95672d3 100644
+index 9f9ba48eb8e2ffcac85dd2147fe631204f2a604e..cba83119bfaf88b360b2f1220611a0c642ec7364 100644
 --- a/src/node.h
 +++ b/src/node.h
 @@ -22,6 +22,12 @@

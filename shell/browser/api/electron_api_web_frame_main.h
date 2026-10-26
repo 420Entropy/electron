@@ -5,66 +5,118 @@
 #ifndef ELECTRON_SHELL_BROWSER_API_ELECTRON_API_WEB_FRAME_MAIN_H_
 #define ELECTRON_SHELL_BROWSER_API_ELECTRON_API_WEB_FRAME_MAIN_H_
 
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
-#include "base/memory/weak_ptr.h"
-#include "base/process/process.h"
-#include "gin/handle.h"
+#include "base/process/process_handle.h"
+#include "base/values.h"
+#include "content/public/browser/frame_tree_node_id.h"
+#include "content/public/browser/global_routing_id.h"
+#include "gin/weak_cell.h"
 #include "gin/wrappable.h"
+#include "mojo/public/cpp/bindings/associated_remote.h"
+#include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "mojo/public/cpp/bindings/remote.h"
+#include "printing/buildflags/buildflags.h"
 #include "shell/browser/event_emitter_mixin.h"
+#include "shell/common/api/api.mojom.h"
+#include "shell/common/gc_plugin.h"
 #include "shell/common/gin_helper/constructible.h"
-#include "shell/common/gin_helper/pinnable.h"
+#include "shell/common/gin_helper/promise.h"
+#include "shell/common/gin_helper/self_keep_alive.h"
+#include "shell/common/serialized_value.h"
 #include "third_party/blink/public/mojom/page/page_visibility_state.mojom-forward.h"
 
 class GURL;
 
 namespace content {
 class RenderFrameHost;
-}
+class WebContents;
+}  // namespace content
 
 namespace gin {
 class Arguments;
-}
+}  // namespace gin
+
+namespace gin_helper {
+template <typename T>
+class Promise;
+}  // namespace gin_helper
 
 namespace electron::api {
+
+// Reads (channel, ...args) for a send() call. Throws a TypeError and returns
+// false when |channel| is not a string; emits a warning naming |source| and
+// returns false when the arguments cannot be serialized.
+bool ReadIPCSendArguments(gin::Arguments* args,
+                          std::string_view source,
+                          std::string* channel,
+                          electron::SerializedValue* message);
+
+// Reports a send() that could not be delivered from |source|.
+void WarnIPCSendFailed(v8::Isolate* isolate,
+                       std::string_view source,
+                       std::string_view reason);
 
 class WebContents;
 
 // Bindings for accessing frames from the main process.
-class WebFrameMain : public gin::Wrappable<WebFrameMain>,
-                     public gin_helper::EventEmitterMixin<WebFrameMain>,
-                     public gin_helper::Pinnable<WebFrameMain>,
-                     public gin_helper::Constructible<WebFrameMain> {
+class WebFrameMain final : public gin::Wrappable<WebFrameMain>,
+                           public gin_helper::EventEmitterMixin<WebFrameMain>,
+                           public gin_helper::Constructible<WebFrameMain> {
  public:
   // Create a new WebFrameMain and return the V8 wrapper of it.
-  static gin::Handle<WebFrameMain> New(v8::Isolate* isolate);
+  static WebFrameMain* New(v8::Isolate* isolate);
 
-  static gin::Handle<WebFrameMain> From(
-      v8::Isolate* isolate,
-      content::RenderFrameHost* render_frame_host);
-  static gin::Handle<WebFrameMain> FromOrNull(
-      v8::Isolate* isolate,
-      content::RenderFrameHost* render_frame_host);
-  static WebFrameMain* FromFrameTreeNodeId(int frame_tree_node_id);
+  static constexpr char kFrameDisposedError[] =
+      "Render frame was disposed before the request completed";
+
+  // A mojom::ElectronFrame reply callback of the (success, value, error)
+  // shape: resolves |promise| with the deserialized value, rejects it with the
+  // value or with an Error carrying |error|, or rejects it if the renderer
+  // goes away before replying.
+  static base::OnceCallback<
+      void(bool, electron::SerializedValue, const std::string&)>
+  BindPromiseToReply(gin_helper::Promise<v8::Local<v8::Value>> promise);
+
+  static WebFrameMain* From(v8::Isolate* isolate,
+                            content::RenderFrameHost* render_frame_host);
+  static WebFrameMain* FromFrameTreeNodeId(
+      content::FrameTreeNodeId frame_tree_node_id);
+  static WebFrameMain* FromFrameToken(
+      content::GlobalRenderFrameHostToken frame_token);
   static WebFrameMain* FromRenderFrameHost(
       content::RenderFrameHost* render_frame_host);
 
+  // gin_helper::Constructible
+  static void FillObjectTemplate(v8::Isolate*, v8::Local<v8::ObjectTemplate>);
+  static const char* GetClassName() { return "WebFrameMain"; }
+
   // gin::Wrappable
   static gin::WrapperInfo kWrapperInfo;
-  static void FillObjectTemplate(v8::Isolate*, v8::Local<v8::ObjectTemplate>);
-  const char* GetTypeName() override;
+  const gin::WrapperInfo* wrapper_info() const override;
+  const char* GetHumanReadableName() const override;
+  void Trace(cppgc::Visitor* visitor) const override;
 
-  content::RenderFrameHost* render_frame_host() const { return render_frame_; }
+  content::RenderFrameHost* render_frame_host() const;
+
+  // Make public for cppgc::MakeGarbageCollected.
+  explicit WebFrameMain(content::RenderFrameHost* render_frame);
+  ~WebFrameMain() override;
 
   // disable copy
   WebFrameMain(const WebFrameMain&) = delete;
   WebFrameMain& operator=(const WebFrameMain&) = delete;
 
- protected:
-  explicit WebFrameMain(content::RenderFrameHost* render_frame);
-  ~WebFrameMain() override;
+  // Delivers an IPC message to this frame, warning rather than throwing when
+  // the render frame is gone.
+  void DeliverMessage(v8::Isolate* isolate,
+                      bool internal,
+                      std::string_view source,
+                      const std::string& channel,
+                      electron::SerializedValue message);
 
  private:
   friend class WebContents;
@@ -72,39 +124,59 @@ class WebFrameMain : public gin::Wrappable<WebFrameMain>,
   // Called when FrameTreeNode is deleted.
   void Destroyed();
 
+  // Calls Destroyed() on every instance belonging to |web_contents|; used when
+  // api::WebContents stops observing a WebContents it does not own.
+  static void DestroyAllForWebContents(content::WebContents* web_contents);
+
   // Mark RenderFrameHost as disposed and to no longer access it. This can
-  // happen when the WebFrameMain v8 handle is GC'd or when a FrameTreeNode
-  // is removed.
+  // happen when the WebFrameMain v8-forward.handle is GC'd or when a
+  // FrameTreeNode is removed.
   void MarkRenderFrameDisposed();
 
   // Swap out the internal RFH when cross-origin navigation occurs.
   void UpdateRenderFrameHost(content::RenderFrameHost* rfh);
 
   const mojo::Remote<mojom::ElectronRenderer>& GetRendererApi();
+  // Null when there is no live render frame. Ordered with navigation.
+  mojom::ElectronFrame* GetFrameApi();
   void MaybeSetupMojoConnection();
   void TeardownMojoConnection();
   void OnRendererConnectionError();
 
-  // WebFrameMain can outlive its RenderFrameHost pointer so we need to check
-  // whether its been disposed of prior to accessing it.
+  [[nodiscard]] bool HasRenderFrame() const;
+
+  // Throws a JS error if HasRenderFrame() is false.
+  // WebFrameMain can outlive its RenderFrameHost pointer,
+  // so we need to check whether its been disposed of
+  // prior to accessing it.
   bool CheckRenderFrame() const;
 
+  v8::Local<v8::Promise> TransferSharedTexture(v8::Isolate* isolate,
+                                               v8::Local<v8::Value> transfer,
+                                               const std::string& texture_id,
+                                               v8::Local<v8::Value> args);
   v8::Local<v8::Promise> ExecuteJavaScript(gin::Arguments* args,
                                            const std::u16string& code);
+  v8::Local<v8::Promise> PrintToPDF(gin::Arguments* args);
+  void CopyVideoFrameAt(int x, int y);
+  void SaveVideoFrameAs(int x, int y);
   bool Reload();
-  void Send(v8::Isolate* isolate,
-            bool internal,
-            const std::string& channel,
-            v8::Local<v8::Value> args);
+  bool IsDestroyed() const;
+  // send(channel, ...args). A missing channel throws; a message that cannot
+  // be serialized or delivered is reported as a warning.
+  void Send(gin::Arguments* args);
+
   void PostMessage(v8::Isolate* isolate,
                    const std::string& channel,
                    v8::Local<v8::Value> message_value,
-                   absl::optional<v8::Local<v8::Value>> transfer);
+                   std::optional<v8::Local<v8::Value>> transfer);
 
-  int FrameTreeNodeID() const;
+  bool Detached() const;
+  content::FrameTreeNodeId FrameTreeNodeID() const;
   std::string Name() const;
+  std::string FrameToken() const;
   base::ProcessId OSProcessID() const;
-  int ProcessID() const;
+  int32_t ProcessID() const;
   int RoutingID() const;
   GURL URL() const;
   std::string Origin() const;
@@ -115,20 +187,43 @@ class WebFrameMain : public gin::Wrappable<WebFrameMain>,
   std::vector<content::RenderFrameHost*> Frames() const;
   std::vector<content::RenderFrameHost*> FramesInSubtree() const;
 
+  std::string_view LifecycleStateForTesting() const;
+
+  v8::Local<v8::Promise> CollectDocumentJSCallStack(gin::Arguments* args);
+  void CollectedJavaScriptCallStack(
+      gin_helper::Promise<base::Value> promise,
+      const std::string& untrusted_javascript_call_stack,
+      const std::optional<blink::LocalFrameToken>& remote_frame_token);
+
   void DOMContentLoaded();
 
+  GC_PLUGIN_IGNORE(
+      "Context tracking of the renderer remote is not needed in the browser "
+      "process.")
   mojo::Remote<mojom::ElectronRenderer> renderer_api_;
   mojo::PendingReceiver<mojom::ElectronRenderer> pending_receiver_;
+  GC_PLUGIN_IGNORE(
+      "Context tracking of the renderer remote is not needed in the browser "
+      "process.")
+  mojo::AssociatedRemote<mojom::ElectronFrame> frame_api_;
 
-  int frame_tree_node_id_;
-
-  content::RenderFrameHost* render_frame_ = nullptr;
+  content::FrameTreeNodeId frame_tree_node_id_;
+  content::GlobalRenderFrameHostToken frame_token_;
 
   // Whether the RenderFrameHost has been removed and that it should no longer
   // be accessed.
   bool render_frame_disposed_ = false;
 
-  base::WeakPtrFactory<WebFrameMain> weak_factory_{this};
+  // Whether the content::RenderFrameHost is detached from the frame
+  // tree. This can occur while it's running unload handlers.
+  bool render_frame_detached_;
+
+  // Roots this object in the cppgc heap for the lifetime of the underlying
+  // frame so that registered IPC handlers keep dispatching even when no JS
+  // reference remains.
+  gin_helper::SelfKeepAlive<WebFrameMain> keep_alive_{this};
+
+  gin::WeakCellFactory<WebFrameMain> weak_factory_{this};
 };
 
 }  // namespace electron::api

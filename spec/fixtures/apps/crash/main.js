@@ -1,11 +1,13 @@
 const { app, BrowserWindow, crashReporter } = require('electron');
-const path = require('path');
-const childProcess = require('child_process');
+
+const childProcess = require('node:child_process');
+const path = require('node:path');
 
 app.setVersion('0.1.0');
 
 const url = app.commandLine.getSwitchValue('crash-reporter-url');
 const uploadToServer = !app.commandLine.hasSwitch('no-upload');
+const setUploadToServer = app.commandLine.getSwitchValue('set-upload-to-server');
 const setExtraParameters = app.commandLine.hasSwitch('set-extra-parameters-in-renderer');
 const addGlobalParam = app.commandLine.getSwitchValue('add-global-param')?.split(':');
 
@@ -21,6 +23,10 @@ crashReporter.start({
   },
   globalExtra: addGlobalParam[0] ? { [addGlobalParam[0]]: addGlobalParam[1] } : {}
 });
+
+if (setUploadToServer) {
+  crashReporter.setUploadToServer(setUploadToServer === 'true');
+}
 
 app.whenReady().then(() => {
   const crashType = app.commandLine.getSwitchValue('crash-type');
@@ -50,6 +56,84 @@ app.whenReady().then(() => {
     });
     w.loadURL(`about:blank?set_extra=${setExtraParameters ? 1 : 0}`);
     w.webContents.on('render-process-gone', () => process.exit(0));
+  } else if (crashType === 'renderer-dynamic-keys') {
+    const w = new BrowserWindow({ show: false, webPreferences: { nodeIntegration: true, contextIsolation: false } });
+    w.webContents.on('render-process-gone', () => process.exit(0));
+    w.webContents.on('did-finish-load', () => {
+      w.webContents.executeJavaScript(`
+        const { crashReporter } = require('electron');
+        for (let i = 0; i < 50; i++) {
+          crashReporter.addExtraParameter('dyn-key-' + i, 'val-' + i);
+        }
+        process.crash();
+      `);
+    });
+    w.loadURL('about:blank');
+  } else if (crashType === 'renderer-oom') {
+    const w = new BrowserWindow({ show: false, webPreferences: { nodeIntegration: true, contextIsolation: false } });
+    w.webContents.on('render-process-gone', () => process.exit(0));
+    w.webContents.on('did-finish-load', () => {
+      // Fill the heap with arrays of doubles, which hold no pointers. V8 runs
+      // about twenty full GCs near the heap limit before it gives up; arrays of
+      // pointers make each of them trace the whole heap, which on slow machines
+      // took long enough for the exit timer below to end the app first.
+      w.webContents.executeJavaScript(`
+        function oomTrigger() {
+          const arr = [];
+          while (true) arr.push(new Array(10000).fill(0.5));
+        }
+        oomTrigger();
+      `);
+    });
+    w.loadURL('about:blank');
+  } else if (crashType === 'renderer-oom-json') {
+    const w = new BrowserWindow({ show: false, webPreferences: { nodeIntegration: true, contextIsolation: false } });
+    w.webContents.on('render-process-gone', () => process.exit(0));
+    w.webContents.on('did-finish-load', () => {
+      w.webContents.executeJavaScript(`
+        function serializeData() {
+          const results = [];
+          while (true) {
+            const chunk = {};
+            for (let i = 0; i < 1000; i++) chunk['k' + i] = 'x'.repeat(500);
+            results.push(JSON.stringify(chunk));
+          }
+        }
+        serializeData();
+      `);
+    });
+    w.loadURL('about:blank');
+  } else if (crashType === 'renderer-oom-worker') {
+    const w = new BrowserWindow({ show: false, webPreferences: { nodeIntegration: true, contextIsolation: false } });
+    w.webContents.on('render-process-gone', () => process.exit(0));
+    w.webContents.on('did-finish-load', () => {
+      // Arrays of doubles, as in 'renderer-oom', so the GCs near the limit are quick.
+      w.webContents.executeJavaScript(`
+        const blob = new Blob([\`
+          function workerLeakMemory() {
+            const arr = [];
+            while (true) { arr.push(new Array(1000).fill(0.5)); }
+          }
+          function triggerWorkerOom() { workerLeakMemory(); }
+          triggerWorkerOom();
+        \`], { type: 'application/javascript' });
+        const worker = new Worker(URL.createObjectURL(blob));
+      `);
+    });
+    w.loadURL('about:blank');
+  } else if (crashType === 'renderer-fastfail' || crashType === 'node-renderer-fastfail') {
+    // Windows: chrome://crash/cfg makes the renderer terminate via a Control
+    // Flow Guard violation (__fastfail / STATUS_STACK_BUFFER_OVERRUN), which
+    // bypasses crashpad's in-process handler and is only captured through the
+    // electron_wer.dll WER runtime exception helper. The node variant also
+    // initialises libuv in the renderer, which changes the process error mode.
+    const webPreferences =
+      crashType === 'node-renderer-fastfail' ? { sandbox: false, nodeIntegration: true, contextIsolation: false } : {};
+    const w = new BrowserWindow({ show: false, webPreferences });
+    w.webContents.on('render-process-gone', () => process.exit(0));
+    w.loadURL('about:blank').then(() => {
+      w.loadURL('chrome://crash/cfg').catch(() => {});
+    });
   } else if (crashType === 'node') {
     const crashPath = path.join(__dirname, 'node-crash.js');
     const child = childProcess.fork(crashPath, { silent: true });
@@ -64,7 +148,11 @@ app.whenReady().then(() => {
     const child = childProcess.fork(crashPath, ['--enable-logging'], { silent: true });
     child.send('message');
     child.on('message', (forkedArgs) => {
-      if (JSON.stringify(forkedArgs) !== JSON.stringify(child.spawnargs)) { exitcode = 1; } else { exitcode = 0; }
+      if (JSON.stringify(forkedArgs) !== JSON.stringify(child.spawnargs)) {
+        exitcode = 1;
+      } else {
+        exitcode = 0;
+      }
       process.exit(exitcode);
     });
   } else {

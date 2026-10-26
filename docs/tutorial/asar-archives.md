@@ -6,10 +6,9 @@ hide_title: false
 ---
 
 After creating an [application distribution](application-distribution.md), the
-app's source code are usually bundled into an [ASAR
-archive](https://github.com/electron/asar), which is a simple extensive archive
-format designed for Electron apps. By bundling the app we can mitigate issues
-around long path names on Windows, speed up `require` and conceal your source
+app's source code is usually bundled into an [ASAR archive](https://github.com/electron/asar),
+which is a simple extensive archive format designed for Electron apps. By bundling the app
+we can mitigate issues around long path names on Windows, speed up `require` and conceal your source
 code from cursory inspection.
 
 The bundled app runs in a virtual file system and most APIs would just work
@@ -41,28 +40,35 @@ $ asar list /path/to/example.asar
 
 Read a file in the ASAR archive:
 
-```javascript
-const fs = require('fs')
+```js
+const fs = require('node:fs')
+
 fs.readFileSync('/path/to/example.asar/file.txt')
 ```
 
 List all files under the root of the archive:
 
-```javascript
-const fs = require('fs')
+```js
+const fs = require('node:fs')
+
 fs.readdirSync('/path/to/example.asar')
 ```
 
 Use a module from the archive:
 
-```javascript
+```js @ts-nocheck
 require('./path/to/example.asar/dir/module.js')
 ```
 
+Directories in an archive can also be iterated with `fs.opendir`, and
+symbolic links stored in an archive can be inspected with `fs.readlink`, which
+returns the link's target relative to the link, like a real filesystem would.
+
 You can also display a web page in an ASAR archive with `BrowserWindow`:
 
-```javascript
+```js
 const { BrowserWindow } = require('electron')
+
 const win = new BrowserWindow()
 
 win.loadURL('file:///path/to/example.asar/static/index.html')
@@ -90,16 +96,18 @@ For some cases like verifying the ASAR archive's checksum, we need to read the
 content of an ASAR archive as a file. For this purpose you can use the built-in
 `original-fs` module which provides original `fs` APIs without `asar` support:
 
-```javascript
+```js
 const originalFs = require('original-fs')
+
 originalFs.readFileSync('/path/to/example.asar')
 ```
 
 You can also set `process.noAsar` to `true` to disable the support for `asar` in
 the `fs` module:
 
-```javascript
-const fs = require('fs')
+```js
+const fs = require('node:fs')
+
 process.noAsar = true
 fs.readFileSync('/path/to/example.asar')
 ```
@@ -122,20 +130,36 @@ directories in the filesystem, so you can never set the working directory to
 directories in ASAR archives. Passing them as the `cwd` option of some APIs
 will also cause errors.
 
+### File Descriptors for Files in Archives
+
+`fs.open`, `fs.openSync` and `fs.promises.open` return real file descriptors
+(and `FileHandle`s) for files in ASAR archives, backed by the archive itself,
+so APIs built on top of them - `fs.read`, `fs.readv`, `fs.fstat`,
+`fs.readFile(fd)`, `fs.createReadStream`, `FileHandle#readFile`,
+`FileHandle#createReadStream`, and so on - read directly out of the archive
+without any temporary copy. Likewise `fs.copyFile`, `fs.cp` and their sync
+and promise variants copy straight from the archive to the destination.
+
+Because archives are read-only, opening a file inside an archive with any
+flag that allows writing (`w`, `a`, `r+`, ...) fails with `EACCES`, and
+`fs.fchmod`, `fs.fchown` and `fs.futimes` on such a descriptor fail with
+`EACCES` too. The descriptor only identifies the entry to Node's `fs` module;
+it is not backed by the file's contents, so passing it to code outside of
+`fs` (for example a native addon that reads from the raw descriptor,
+`child_process` `stdio`, `net.Socket({ fd })` or
+`http2stream.respondWithFile()`) fails with `EBADF` and is not supported.
+
 ### Extra Unpacking on Some APIs
 
-Most `fs` APIs can read a file or get a file's information from ASAR archives
-without unpacking, but for some APIs that rely on passing the real file path to
-underlying system calls, Electron will extract the needed file into a
-temporary file and pass the path of the temporary file to the APIs to make them
-work. This adds a little overhead for those APIs.
+For APIs that rely on passing the real file path to underlying system calls,
+Electron will extract the needed file into a temporary file and pass the path
+of the temporary file to the APIs to make them work. This adds a little
+overhead for those APIs.
 
-APIs that requires extra unpacking are:
+APIs that require extra unpacking are:
 
 * `child_process.execFile`
 * `child_process.execFileSync`
-* `fs.open`
-* `fs.openSync`
 * `process.dlopen` - Used by `require` on native modules
 
 ### Fake Stat Information of `fs.stat`

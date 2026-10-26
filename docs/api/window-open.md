@@ -6,13 +6,24 @@ untrusted content within a renderer. Windows can be created from the renderer in
 * clicking on links or submitting forms adorned with `target=_blank`
 * JavaScript calling `window.open()`
 
-For same-origin content, the new window is created within the same process,
+For same-site content, the new window is created within the same process,
 enabling the parent to access the child window directly. This can be very
 useful for app sub-windows that act as preference panels, or similar, as the
 parent can render to the sub-window directly, as if it were a `div` in the
 parent. This is the same behavior as in the browser.
 
-Electron pairs this native Chrome `Window` with a BrowserWindow under the hood.
+Process-level `webPreferences` such as `sandbox` and `nodeIntegration` are
+baked into a renderer process when it launches, so a child window whose sandbox
+state differs from the opener's process cannot share it. In that case the child
+is created in a process of its own with no opener relationship: `window.open()`
+returns `null` in the opener and `window.opener` is `null` in the child. Child
+windows default to sandboxed, so a `window.open()` from an unsandboxed opener
+(for example one with `nodeIntegration: true`) is isolated like this by
+default. To keep such a child in the opener's process, explicitly set
+`sandbox: false` in the `webPreferences` returned from
+[`webContents.setWindowOpenHandler`](web-contents.md#contentssetwindowopenhandlerhandler).
+
+Electron pairs this native DOM `Window` with a BrowserWindow under the hood.
 You can take advantage of all the customization available when creating a
 BrowserWindow in the main process by using `webContents.setWindowOpenHandler()`
 for renderer-created windows.
@@ -33,14 +44,18 @@ because it is invoked in the main process.
 Returns [`Window`](https://developer.mozilla.org/en-US/docs/Web/API/Window) | null
 
 `features` is a comma-separated key-value list, following the standard format of
-the browser. Electron will parse `BrowserWindowConstructorOptions` out of this
-list where possible, for convenience. For full control and better ergonomics,
-consider using `webContents.setWindowOpenHandler` to customize the
-BrowserWindow creation.
+the browser. For convenience, Electron will parse a subset of presentational
+[`BrowserWindowConstructorOptions`](structures/browser-window-options.md) out of
+this list (such as `width`, `height`, `x`, `y`, `show`, `frame`, `title`,
+`backgroundColor`). Because the renderer is untrusted, options that cause the
+main process to access the filesystem or that are otherwise privileged (such as
+`icon`) are ignored. For full control and better ergonomics, use
+`webContents.setWindowOpenHandler` to customize the BrowserWindow creation from
+the main process.
 
-A subset of `WebPreferences` can be set directly,
-unnested, from the features string: `zoomFactor`, `nodeIntegration`, `preload`,
-`javascript`, `contextIsolation`, and `webviewTag`.
+A subset of [`WebPreferences`](structures/web-preferences.md) can be set directly,
+unnested, from the features string: `zoomFactor`, `nodeIntegration`, `javascript`,
+`contextIsolation`, and `webviewTag`.
 
 For example:
 
@@ -56,11 +71,12 @@ window.open('https://github.com', '_blank', 'top=500,left=200,frame=false,nodeIn
   enabled on the parent window.
 * JavaScript will always be disabled in the opened `window` if it is disabled on
   the parent window.
-* Non-standard features (that are not handled by Chromium or Electron) given in
-  `features` will be passed to any registered `webContents`'s
-  `did-create-window` event handler in the `options` argument.
-* `frameName` follows the specification of `windowName` located in the [native documentation](https://developer.mozilla.org/en-US/docs/Web/API/Window/open#parameters).
-* When opening `about:blank`, the child window's `WebPreferences` will be copied
+* Features that are not handled by Chromium and not in Electron's allowlist of
+  presentational `BrowserWindowConstructorOptions` are ignored. The raw
+  `features` string is still available to the main process via
+  `setWindowOpenHandler`.
+* `frameName` follows the specification of `target` located in the [native documentation](https://developer.mozilla.org/en-US/docs/Web/API/Window/open#parameters).
+* When opening `about:blank`, the child window's [`WebPreferences`](structures/web-preferences.md) will be copied
   from the parent window, and there is no way to override it because Chromium
   skips browser side navigation in this case.
 
@@ -68,7 +84,7 @@ To customize or cancel the creation of the window, you can optionally set an
 override handler with `webContents.setWindowOpenHandler()` from the main
 process. Returning `{ action: 'deny' }` cancels the window. Returning `{
 action: 'allow', overrideBrowserWindowOptions: { ... } }` will allow opening
-the window and setting the `BrowserWindowConstructorOptions` to be used when
+the window and setting the [`BrowserWindowConstructorOptions`](structures/browser-window-options.md) to be used when
 creating the window. Note that this is more powerful than passing options
 through the feature string, as the renderer has more limited privileges in
 deciding security preferences than the main process.
@@ -80,7 +96,7 @@ window will not close when the opener window closes. The default value is `false
 
 ### Native `Window` example
 
-```javascript
+```js
 // main.js
 const mainWindow = new BrowserWindow()
 
@@ -104,7 +120,7 @@ mainWindow.webContents.setWindowOpenHandler(({ url }) => {
 })
 ```
 
-```javascript
+```js
 // renderer process (mainWindow)
 const childWindow = window.open('', 'modal')
 childWindow.document.write('<h1>Hello</h1>')

@@ -11,13 +11,13 @@ We attempt to migrate the safe storage key from the old account, if that migrati
 
 Existing apps that aren't built for the app store should be unimpacted, there is one edge case where a user uses BOTH an AppStore and a darwin build of the same app only one will keep it's access to the safestorage key as during the migration we delete the old account.  This is an acceptable edge case as no one should be actively using two versions of the same app.
 
-diff --git a/components/os_crypt/sync/keychain_password_mac.mm b/components/os_crypt/sync/keychain_password_mac.mm
-index 1895fc822281ccc9e36500e755f028fb2f877060..8d02e232dcb53e3d753b64c8548a5b98d2bb571f 100644
---- a/components/os_crypt/sync/keychain_password_mac.mm
-+++ b/components/os_crypt/sync/keychain_password_mac.mm
-@@ -22,6 +22,12 @@
- using KeychainNameContainerType = const base::NoDestructor<std::string>;
- #endif
+diff --git a/components/os_crypt/common/keychain_password_mac.mm b/components/os_crypt/common/keychain_password_mac.mm
+index 80b417c1a022c287acae948b51d6f7c863f93721..a8ef8d4b14f74d5f57bee80cad377eae8d69bd58 100644
+--- a/components/os_crypt/common/keychain_password_mac.mm
++++ b/components/os_crypt/common/keychain_password_mac.mm
+@@ -29,6 +29,12 @@
+ 
+ namespace {
  
 +#if IS_MAS_BUILD()
 +const char kAccountNameSuffix[] = " App Store Key";
@@ -25,81 +25,65 @@ index 1895fc822281ccc9e36500e755f028fb2f877060..8d02e232dcb53e3d753b64c8548a5b98
 +const char kAccountNameSuffix[] = " Key";
 +#endif
 +
- namespace {
- 
  // These two strings ARE indeed user facing.  But they are used to access
-@@ -82,11 +88,18 @@
- std::string KeychainPassword::GetPassword() const {
-   UInt32 password_length = 0;
-   void* password_data = nullptr;
-+  KeychainPassword::KeychainNameType service_name = GetServiceName();
-+  KeychainPassword::KeychainNameType account_name = GetAccountName();
-+  const std::string account_name_suffix = kAccountNameSuffix;
-+  const std::string suffixed_account_name = account_name + account_name_suffix;
-+
-+  // We should check if the suffixed account exists first
-   OSStatus error = keychain_.FindGenericPassword(
--      GetServiceName().size(), GetServiceName().c_str(),
--      GetAccountName().size(), GetAccountName().c_str(), &password_length,
-+      service_name.size(), service_name.c_str(),
-+      suffixed_account_name.size(), suffixed_account_name.c_str(), &password_length,
-       &password_data, nullptr);
+ // the encryption keyword.  So as to not lose encrypted data when system
+ // locale changes we DO NOT LOCALIZE.
+@@ -96,18 +102,56 @@
+                                   uma_result);
+   };
  
-+  // If it exists we can return it immediately
-   if (error == noErr) {
-     std::string password =
-         std::string(static_cast<char*>(password_data), password_length);
-@@ -94,9 +107,52 @@
-     return password;
++  const std::string suffixed_account_name =
++      GetAccountName() + kAccountNameSuffix;
+   auto password =
+-      keychain_->FindGenericPassword(GetServiceName(), GetAccountName());
++      keychain_->FindGenericPassword(GetServiceName(), suffixed_account_name);
+ 
+   if (password.has_value()) {
+     uma_result = FindGenericPasswordResult::kPasswordFound;
+     return std::string(base::as_string_view(*password));
    }
  
-+  // If the error was anything other than "it does not exist" we should error out here
-+  // This normally means the account exists but we were deniged access to it
-+  if (error != errSecItemNotFound) {
-+    OSSTATUS_LOG(ERROR, error) << "Keychain lookup for suffixed key failed";
-+    return std::string();
-+  }
++  // If the suffixed account didn't exist, we should check if the legacy
++  // non-suffixed account exists. If it does we can use that key and migrate it
++  // to the new account.
++  if (password.error() == errSecItemNotFound) {
++    password =
++        keychain_->FindGenericPassword(GetServiceName(), GetAccountName());
 +
-+  // If the suffixed account didn't exist, we should check if the legacy non-suffixed account
-+  // exists. If it does we can use that key and migrate it to the new account
-+  base::ScopedCFTypeRef<SecKeychainItemRef> item_ref;
-+  error = keychain_.FindGenericPassword(
-+      service_name.size(), service_name.c_str(),
-+      account_name.size(), account_name.c_str(), &password_length,
-+      &password_data, item_ref.InitializeInto());
++    if (password.has_value()) {
++      // If we found the legacy account name we should copy it over to
++      // the new suffixed account
++      OSStatus error = keychain_->AddGenericPassword(
++          GetServiceName(), suffixed_account_name, *password);
 +
-+  if (error == noErr) {
-+    std::string password =
-+        std::string(static_cast<char*>(password_data), password_length);
-+
-+    // If we found the legacy account name we should copy it over to
-+    // the new suffixed account
-+    error = keychain_.AddGenericPassword(
-+        service_name.size(), service_name.data(), suffixed_account_name.size(),
-+        suffixed_account_name.data(), password.size(), password_data, NULL);
-+
-+    if (error == noErr) {
-+      // If we successfully made the suffixed account we can delete the old
-+      // account to ensure new apps don't try to use it and run into IAM
-+      // issues
-+      error = keychain_.ItemDelete(item_ref.get());
-+      if (error != noErr) {
-+        OSSTATUS_DLOG(ERROR, error) << "Keychain delete for legacy key failed";
++      if (error == noErr) {
++        // If we successfully made the suffixed account we can delete the old
++        // account to ensure new apps don't try to use it and run into IAM
++        // issues
++        NSDictionary* delete_query = @{
++          (__bridge id)kSecClass : (__bridge id)kSecClassGenericPassword,
++          (__bridge id)kSecAttrService : @(GetServiceName().c_str()),
++          (__bridge id)kSecAttrAccount : @(GetAccountName().c_str()),
++        };
++        error = keychain_->ItemDelete((__bridge CFDictionaryRef)delete_query);
++        if (error != noErr) {
++          OSSTATUS_DLOG(ERROR, error)
++              << "Keychain delete for legacy key failed";
++        }
++      } else {
++        OSSTATUS_DLOG(ERROR, error) << "Keychain add for suffixed key failed";
 +      }
-+    } else {
-+      OSSTATUS_DLOG(ERROR, error) << "Keychain add for suffixed key failed";
-+    }
 +
-+    keychain_.ItemFreeContent(password_data);
-+    return password;
++      uma_result = FindGenericPasswordResult::kPasswordFound;
++      return std::string(base::as_string_view(*password));
++    }
 +  }
 +
-+  // If the legacy account name was not found, make a new account in the
-+  // with the suffixed name
-   if (error == errSecItemNotFound) {
-     std::string password = AddRandomPasswordToKeychain(
--        keychain_, GetServiceName(), GetAccountName());
-+        keychain_, service_name, suffixed_account_name);
-     return password;
+   if (password.error() == errSecItemNotFound) {
+     uma_result = FindGenericPasswordResult::kPasswordNotFound;
+     return AddRandomPasswordToKeychain(*keychain_, GetServiceName(),
+-                                       GetAccountName());
++                                       suffixed_account_name);
    }
  
+   OSSTATUS_LOG(ERROR, password.error()) << "Keychain lookup failed";

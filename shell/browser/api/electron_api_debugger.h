@@ -5,71 +5,61 @@
 #ifndef ELECTRON_SHELL_BROWSER_API_ELECTRON_API_DEBUGGER_H_
 #define ELECTRON_SHELL_BROWSER_API_ELECTRON_API_DEBUGGER_H_
 
-#include <map>
+#include <memory>
+#include <string>
 
-#include "base/functional/callback.h"
 #include "base/values.h"
-#include "content/public/browser/devtools_agent_host_client.h"
-#include "content/public/browser/web_contents_observer.h"
-#include "gin/arguments.h"
-#include "gin/handle.h"
 #include "gin/wrappable.h"
 #include "shell/browser/event_emitter_mixin.h"
-#include "shell/common/gin_helper/promise.h"
+#include "shell/browser/native_peer.h"
 
 namespace content {
 class DevToolsAgentHost;
 class WebContents;
 }  // namespace content
 
+namespace gin {
+class Arguments;
+}  // namespace gin
+
 namespace electron::api {
-
-class Debugger : public gin::Wrappable<Debugger>,
-                 public gin_helper::EventEmitterMixin<Debugger>,
-                 public content::DevToolsAgentHostClient,
-                 public content::WebContentsObserver {
+class Debugger final : public gin::Wrappable<Debugger>,
+                       public gin_helper::EventEmitterMixin<Debugger> {
  public:
-  static gin::Handle<Debugger> Create(v8::Isolate* isolate,
-                                      content::WebContents* web_contents);
+  static Debugger* Create(v8::Isolate* isolate,
+                          content::WebContents* web_contents);
 
-  // gin::Wrappable
+  // Make public for cppgc::MakeGarbageCollected.
+  explicit Debugger(content::WebContents* web_contents);
+  ~Debugger() override;
+
+  // gin_helper::Wrappable
   static gin::WrapperInfo kWrapperInfo;
   gin::ObjectTemplateBuilder GetObjectTemplateBuilder(
       v8::Isolate* isolate) override;
-  const char* GetTypeName() override;
+  const gin::WrapperInfo* wrapper_info() const override;
+  const char* GetHumanReadableName() const override;
+
+  const char* GetClassName() const { return "Debugger"; }
 
   // disable copy
   Debugger(const Debugger&) = delete;
   Debugger& operator=(const Debugger&) = delete;
 
- protected:
-  Debugger(v8::Isolate* isolate, content::WebContents* web_contents);
-  ~Debugger() override;
-
-  // content::DevToolsAgentHostClient:
-  void AgentHostClosed(content::DevToolsAgentHost* agent_host) override;
-  void DispatchProtocolMessage(content::DevToolsAgentHost* agent_host,
-                               base::span<const uint8_t> message) override;
-
-  // content::WebContentsObserver:
-  void RenderFrameHostChanged(content::RenderFrameHost* old_rfh,
-                              content::RenderFrameHost* new_rfh) override;
-
  private:
-  using PendingRequestMap =
-      std::map<int, gin_helper::Promise<base::Value::Dict>>;
+  class AgentHostLifecycle;
 
+  void AgentHostClosed();
+  void EmitProtocolMessage(const std::string& method,
+                           base::DictValue params,
+                           const std::string& session_id);
   void Attach(gin::Arguments* args);
   bool IsAttached();
   void Detach();
   v8::Local<v8::Promise> SendCommand(gin::Arguments* args);
-  void ClearPendingRequests();
 
-  content::WebContents* web_contents_;  // Weak Reference.
-  scoped_refptr<content::DevToolsAgentHost> agent_host_;
-
-  PendingRequestMap pending_requests_;
-  int previous_request_id_ = 0;
+  std::unique_ptr<AgentHostLifecycle, NativePeerBase::Deleter>
+      agent_host_lifecycle_;
 };
 
 }  // namespace electron::api

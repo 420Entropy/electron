@@ -12,12 +12,16 @@
 #import <QuickLook/QuickLook.h>
 #import <QuickLookThumbnailing/QuickLookThumbnailing.h>
 
-#include "base/mac/foundation_util.h"
-#include "base/mac/scoped_nsobject.h"
+#include "base/apple/foundation_util.h"
 #include "base/strings/sys_string_conversions.h"
+#include "base/task/bind_post_task.h"
+#include "base/values.h"
 #include "gin/arguments.h"
 #include "shell/common/gin_converters/image_converter.h"
+#include "shell/common/gin_helper/dictionary.h"
+#include "shell/common/gin_helper/handle.h"
 #include "shell/common/gin_helper/promise.h"
+#include "shell/common/node_util.h"
 #include "ui/gfx/color_utils.h"
 #include "ui/gfx/geometry/size.h"
 #include "ui/gfx/image/image_skia.h"
@@ -27,16 +31,35 @@ namespace electron::api {
 
 NSData* bufferFromNSImage(NSImage* image) {
   CGImageRef ref = [image CGImageForProposedRect:nil context:nil hints:nil];
+  if (!ref)
+    return nil;
   NSBitmapImageRep* rep = [[NSBitmapImageRep alloc] initWithCGImage:ref];
   [rep setSize:[image size]];
-  return [rep representationUsingType:NSPNGFileType
+  return [rep representationUsingType:NSBitmapImageFileTypePNG
                            properties:[[NSDictionary alloc] init]];
 }
 
 double safeShift(double in, double def) {
-  if (in >= 0 || in <= 1 || in == def)
+  if ((in >= 0 && in <= 1) || in == def)
     return in;
   return def;
+}
+
+void ReceivedThumbnailResult(CGSize size,
+                             gin_helper::Promise<gfx::Image> p,
+                             QLThumbnailRepresentation* thumbnail,
+                             NSError* error) {
+  if (error || !thumbnail) {
+    std::string err_msg = base::SysNSStringToUTF8(error.localizedDescription);
+    p.RejectWithErrorMessage("unable to retrieve thumbnail preview "
+                             "image for the given path: " +
+                             err_msg);
+  } else {
+    NSImage* result = [[NSImage alloc] initWithCGImage:[thumbnail CGImage]
+                                                  size:size];
+    gfx::Image image(result);
+    p.Resolve(image);
+  }
 }
 
 // static
@@ -54,87 +77,156 @@ v8::Local<v8::Promise> NativeImage::CreateThumbnailFromPath(
 
   CGSize cg_size = size.ToCGSize();
 
-  if (@available(macOS 10.15, *)) {
-    NSURL* nsurl = base::mac::FilePathToNSURL(path);
+  NSURL* nsurl = base::apple::FilePathToNSURL(path);
+  NSString* ns_path = [nsurl path];
 
-    // We need to explicitly check if the user has passed an invalid path
-    // because QLThumbnailGenerationRequest will generate a stock file icon
-    // and pass silently if we do not.
-    if (![[NSFileManager defaultManager] fileExistsAtPath:[nsurl path]]) {
-      promise.RejectWithErrorMessage(
-          "unable to retrieve thumbnail preview image for the given path");
-      return handle;
-    }
-
-    NSScreen* screen = [[NSScreen screens] firstObject];
-    base::scoped_nsobject<QLThumbnailGenerationRequest> request(
-        [[QLThumbnailGenerationRequest alloc]
-              initWithFileAtURL:nsurl
-                           size:cg_size
-                          scale:[screen backingScaleFactor]
-            representationTypes:
-                QLThumbnailGenerationRequestRepresentationTypeAll]);
-    __block gin_helper::Promise<gfx::Image> p = std::move(promise);
-    [[QLThumbnailGenerator sharedGenerator]
-        generateBestRepresentationForRequest:request
-                           completionHandler:^(
-                               QLThumbnailRepresentation* thumbnail,
-                               NSError* error) {
-                             if (error || !thumbnail) {
-                               std::string err_msg(
-                                   [error.localizedDescription UTF8String]);
-                               dispatch_async(dispatch_get_main_queue(), ^{
-                                 p.RejectWithErrorMessage(
-                                     "unable to retrieve thumbnail preview "
-                                     "image for the given path: " +
-                                     err_msg);
-                               });
-                             } else {
-                               NSImage* result = [[[NSImage alloc]
-                                   initWithCGImage:[thumbnail CGImage]
-                                              size:cg_size] autorelease];
-                               gfx::Image image(result);
-                               dispatch_async(dispatch_get_main_queue(), ^{
-                                 p.Resolve(image);
-                               });
-                             }
-                           }];
-  } else {
-    base::ScopedCFTypeRef<CFURLRef> cfurl = base::mac::FilePathToCFURL(path);
-    base::ScopedCFTypeRef<QLThumbnailRef> ql_thumbnail(
-        QLThumbnailCreate(kCFAllocatorDefault, cfurl, cg_size, NULL));
-    __block gin_helper::Promise<gfx::Image> p = std::move(promise);
-    // Do not block the main thread waiting for quicklook to generate the
-    // thumbnail.
-    QLThumbnailDispatchAsync(
-        ql_thumbnail,
-        dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, /*flags*/ 0), ^{
-          base::ScopedCFTypeRef<CGImageRef> cg_thumbnail(
-              QLThumbnailCopyImage(ql_thumbnail));
-          if (cg_thumbnail) {
-            NSImage* result =
-                [[[NSImage alloc] initWithCGImage:cg_thumbnail
-                                             size:cg_size] autorelease];
-            gfx::Image thumbnail(result);
-            dispatch_async(dispatch_get_main_queue(), ^{
-              p.Resolve(thumbnail);
-            });
-          } else {
-            dispatch_async(dispatch_get_main_queue(), ^{
-              p.RejectWithErrorMessage("unable to retrieve thumbnail preview "
-                                       "image for the given path");
-            });
-          }
-        });
+  // We need to explicitly check if the user has passed an invalid path
+  // because QLThumbnailGenerationRequest will generate a stock file icon
+  // and pass silently if we do not.
+  if (!ns_path || ![[NSFileManager defaultManager] fileExistsAtPath:ns_path]) {
+    promise.RejectWithErrorMessage(
+        "unable to retrieve thumbnail preview image for the given path");
+    return handle;
   }
+
+  NSScreen* screen = [[NSScreen screens] firstObject];
+  QLThumbnailGenerationRequest* request([[QLThumbnailGenerationRequest alloc]
+        initWithFileAtURL:nsurl
+                     size:cg_size
+                    scale:[screen backingScaleFactor]
+      representationTypes:QLThumbnailGenerationRequestRepresentationTypeAll]);
+  __block auto block_callback = base::BindPostTaskToCurrentDefault(
+      base::BindOnce(&ReceivedThumbnailResult, cg_size, std::move(promise)));
+  auto completionHandler =
+      ^(QLThumbnailRepresentation* thumbnail, NSError* error) {
+        std::move(block_callback).Run(thumbnail, error);
+      };
+  [[QLThumbnailGenerator sharedGenerator]
+      generateBestRepresentationForRequest:request
+                         completionHandler:completionHandler];
 
   return handle;
 }
 
-gin::Handle<NativeImage> NativeImage::CreateFromNamedImage(gin::Arguments* args,
-                                                           std::string name) {
+NativeImage* NativeImage::CreateMenuSymbol(gin::Arguments* args,
+                                           std::string name) {
   @autoreleasepool {
+    NSImage* image =
+        [NSImage imageWithSystemSymbolName:base::SysUTF8ToNSString(name)
+                  accessibilityDescription:nil];
+
+    if (!image || !image.valid) {
+      return CreateEmpty(args->isolate());
+    }
+
+    NSImageSymbolConfiguration* symbol_config = [NSImageSymbolConfiguration
+        configurationWithPointSize:13.0
+                            weight:NSFontWeightSemibold
+                             scale:NSImageSymbolScaleSmall];
+
+    image = [image imageWithSymbolConfiguration:symbol_config];
+
+    NSData* png_data = bufferFromNSImage(image);
+
+    if (!png_data) {
+      return CreateEmpty(args->isolate());
+    }
+
+    NativeImage* handle =
+        CreateFromPNG(args->isolate(), base::apple::NSDataToSpan(png_data));
+
+    gfx::Size size = handle->GetSize(1.0);
+
+    float aspect_ratio =
+        static_cast<float>(size.width()) / static_cast<float>(size.height());
+
+    int new_width = 15;
+    int new_height = static_cast<int>(15 / aspect_ratio);
+
+    // prevent tall symbols from exceeding menu item height (e.g. chevron.right)
+    if (new_height >= 16) {
+      new_height = 15;
+      new_width = static_cast<int>(15 * aspect_ratio);
+    }
+
+    NativeImage* sized = handle->Resize(
+        args,
+        base::DictValue().Set("width", new_width).Set("height", new_height));
+
+    sized->SetTemplateImage(true);
+
+    return sized;
+  }
+}
+
+NativeImage* NativeImage::CreateFromNamedImage(gin::Arguments* args,
+                                               std::string name) {
+  @autoreleasepool {
+    static bool deprecated_warning_issued = false;
+
     std::vector<double> hsl_shift;
+
+    float pointSize = 30.0;
+    NSFontWeight weight = NSFontWeightRegular;
+    NSImageSymbolScale scale = NSImageSymbolScaleMedium;
+
+    v8::Local<v8::Value> opts;
+    if (args->GetNext(&opts)) {
+      if (opts->IsArray()) {
+        // Treat an array as a HSL shift.
+        gin::ConvertFromV8(args->isolate(), opts, &hsl_shift);
+
+        if (!deprecated_warning_issued) {
+          deprecated_warning_issued = true;
+          util::EmitDeprecationWarning(
+              args->isolate(),
+              "createFromNamedImage(name, hslShift) is deprecated, use "
+              "createFromNamedImage(name, { hslShift }) instead.");
+        }
+      } else {
+        gin_helper::Dictionary options(args->isolate(), opts.As<v8::Object>());
+        options.Get("hslShift", &hsl_shift);
+
+        options.Get("pointSize", &pointSize);
+
+        std::string weight_str;
+        options.Get("weight", &weight_str);
+
+        // We unfortunately have to map from string to NSFontWeight manually, as
+        // NSFontWeight maps to a double under the hood.
+        if (weight_str == "ultralight") {
+          weight = NSFontWeightUltraLight;
+        } else if (weight_str == "thin") {
+          weight = NSFontWeightThin;
+        } else if (weight_str == "light") {
+          weight = NSFontWeightLight;
+        } else if (weight_str == "regular") {
+          weight = NSFontWeightRegular;
+        } else if (weight_str == "medium") {
+          weight = NSFontWeightMedium;
+        } else if (weight_str == "semibold") {
+          weight = NSFontWeightSemibold;
+        } else if (weight_str == "bold") {
+          weight = NSFontWeightBold;
+        } else if (weight_str == "heavy") {
+          weight = NSFontWeightHeavy;
+        } else if (weight_str == "black") {
+          weight = NSFontWeightBlack;
+        }
+
+        std::string scale_str;
+        options.Get("scale", &scale_str);
+
+        // Similarly, map from string to NSImageSymbolScale.
+        if (scale_str == "small") {
+          scale = NSImageSymbolScaleSmall;
+        } else if (scale_str == "medium") {
+          scale = NSImageSymbolScaleMedium;
+        } else if (scale_str == "large") {
+          scale = NSImageSymbolScaleLarge;
+        }
+      }
+    }
 
     // The string representations of NSImageNames don't match the strings
     // themselves; they instead follow the following pattern:
@@ -147,18 +239,33 @@ gin::Handle<NativeImage> NativeImage::CreateFromNamedImage(gin::Arguments* args,
       name.erase(pos, to_remove.length());
     }
 
-    NSImage* image = [NSImage imageNamed:base::SysUTF8ToNSString(name)];
+    NSImage* image = nil;
+    NSString* ns_name = base::SysUTF8ToNSString(name);
 
-    if (!image.valid) {
+    // Treat non-Cocoa-prefixed names as SF Symbols first.
+    if (!base::StartsWith(name, "NS") && !base::StartsWith(name, "NX")) {
+      image = [NSImage imageWithSystemSymbolName:ns_name
+                        accessibilityDescription:nil];
+
+      NSImageSymbolConfiguration* symbol_config =
+          [NSImageSymbolConfiguration configurationWithPointSize:pointSize
+                                                          weight:weight
+                                                           scale:scale];
+
+      image = [image imageWithSymbolConfiguration:symbol_config];
+    } else {
+      image = [NSImage imageNamed:ns_name];
+    }
+
+    if (!image || !image.valid) {
       return CreateEmpty(args->isolate());
     }
 
     NSData* png_data = bufferFromNSImage(image);
 
-    if (args->GetNext(&hsl_shift) && hsl_shift.size() == 3) {
-      gfx::Image gfx_image = gfx::Image::CreateFrom1xPNGBytes(
-          reinterpret_cast<const unsigned char*>((char*)[png_data bytes]),
-          [png_data length]);
+    if (hsl_shift.size() == 3) {
+      auto gfx_image =
+          gfx::Image::CreateFrom1xPNGBytes(base::apple::NSDataToSpan(png_data));
       color_utils::HSL shift = {safeShift(hsl_shift[0], -1),
                                 safeShift(hsl_shift[1], 0.5),
                                 safeShift(hsl_shift[2], 0.5)};
@@ -168,8 +275,7 @@ gin::Handle<NativeImage> NativeImage::CreateFromNamedImage(gin::Arguments* args,
               .AsNSImage());
     }
 
-    return CreateFromPNG(args->isolate(), (char*)[png_data bytes],
-                         [png_data length]);
+    return CreateFromPNG(args->isolate(), base::apple::NSDataToSpan(png_data));
   }
 }
 

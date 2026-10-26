@@ -7,6 +7,7 @@
 
 #include <string>
 
+#include "base/memory/raw_ptr.h"
 #include "extensions/browser/api/execute_code_function.h"
 #include "extensions/browser/extension_function.h"
 #include "extensions/common/extension_resource.h"
@@ -28,11 +29,12 @@ class ExecuteCodeInTabFunction : public ExecuteCodeFunction {
   bool CanExecuteScriptOnPage(std::string* error) override;
   ScriptExecutor* GetScriptExecutor(std::string* error) override;
   bool IsWebView() const override;
+  int GetRootFrameId() const override;
   const GURL& GetWebViewSrc() const override;
 
  private:
   // Id of tab which executes code.
-  int execute_tab_id_;
+  int execute_tab_id_ = -1;
 };
 
 class TabsExecuteScriptFunction : public ExecuteCodeInTabFunction {
@@ -41,21 +43,29 @@ class TabsExecuteScriptFunction : public ExecuteCodeInTabFunction {
   bool ShouldRemoveCSS() const override;
 
  private:
-  ~TabsExecuteScriptFunction() override {}
+  ~TabsExecuteScriptFunction() override = default;
 
   DECLARE_EXTENSION_FUNCTION("tabs.executeScript", TABS_EXECUTESCRIPT)
 };
 
 class TabsReloadFunction : public ExtensionFunction {
-  ~TabsReloadFunction() override {}
+  ~TabsReloadFunction() override = default;
 
   ResponseAction Run() override;
 
   DECLARE_EXTENSION_FUNCTION("tabs.reload", TABS_RELOAD)
 };
 
+class TabsQueryFunction : public ExtensionFunction {
+  ~TabsQueryFunction() override = default;
+
+  ResponseAction Run() override;
+
+  DECLARE_EXTENSION_FUNCTION("tabs.query", TABS_QUERY)
+};
+
 class TabsGetFunction : public ExtensionFunction {
-  ~TabsGetFunction() override {}
+  ~TabsGetFunction() override = default;
 
   ResponseAction Run() override;
 
@@ -64,7 +74,7 @@ class TabsGetFunction : public ExtensionFunction {
 
 class TabsSetZoomFunction : public ExtensionFunction {
  private:
-  ~TabsSetZoomFunction() override {}
+  ~TabsSetZoomFunction() override = default;
 
   ResponseAction Run() override;
 
@@ -73,7 +83,7 @@ class TabsSetZoomFunction : public ExtensionFunction {
 
 class TabsGetZoomFunction : public ExtensionFunction {
  private:
-  ~TabsGetZoomFunction() override {}
+  ~TabsGetZoomFunction() override = default;
 
   ResponseAction Run() override;
 
@@ -82,7 +92,7 @@ class TabsGetZoomFunction : public ExtensionFunction {
 
 class TabsSetZoomSettingsFunction : public ExtensionFunction {
  private:
-  ~TabsSetZoomSettingsFunction() override {}
+  ~TabsSetZoomSettingsFunction() override = default;
 
   ResponseAction Run() override;
 
@@ -91,7 +101,7 @@ class TabsSetZoomSettingsFunction : public ExtensionFunction {
 
 class TabsGetZoomSettingsFunction : public ExtensionFunction {
  private:
-  ~TabsGetZoomSettingsFunction() override {}
+  ~TabsGetZoomSettingsFunction() override = default;
 
   ResponseAction Run() override;
 
@@ -103,11 +113,11 @@ class TabsUpdateFunction : public ExtensionFunction {
   TabsUpdateFunction();
 
  protected:
-  ~TabsUpdateFunction() override {}
+  ~TabsUpdateFunction() override = default;
   bool UpdateURL(const std::string& url, int tab_id, std::string* error);
   ResponseValue GetResult();
 
-  content::WebContents* web_contents_;
+  raw_ptr<content::WebContents> web_contents_;
 
  private:
   ResponseAction Run() override;

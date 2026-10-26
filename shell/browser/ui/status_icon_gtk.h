@@ -8,8 +8,8 @@
 #include <memory>
 
 #include "ui/base/glib/glib_integers.h"
-#include "ui/base/glib/glib_signal.h"
 #include "ui/base/glib/scoped_gobject.h"
+#include "ui/base/glib/scoped_gsignal.h"
 #include "ui/linux/status_icon_linux.h"
 
 typedef struct _GtkStatusIcon GtkStatusIcon;
@@ -28,23 +28,22 @@ class StatusIconGtk : public ui::StatusIconLinux {
   ~StatusIconGtk() override;
 
   // ui::StatusIconLinux:
-  void SetIcon(const gfx::ImageSkia& image) override;
+  void SetImage(const gfx::ImageSkia& image) override;
+  void SetIcon(const gfx::VectorIcon& icon) override;
   void SetToolTip(const std::u16string& tool_tip) override;
   void UpdatePlatformContextMenu(ui::MenuModel* model) override;
   void RefreshPlatformContextMenu() override;
   void OnSetDelegate() override;
 
  private:
-  CHROMEG_CALLBACK_0(StatusIconGtk, void, OnClick, GtkStatusIcon*);
-  CHROMEG_CALLBACK_2(StatusIconGtk,
-                     void,
-                     OnContextMenuRequested,
-                     GtkStatusIcon*,
-                     guint,
-                     guint);
+  void OnClick(GtkStatusIcon* status_icon);
+  void OnContextMenuRequested(GtkStatusIcon* status_icon,
+                              guint button,
+                              guint32 activate_time);
 
   std::unique_ptr<gtkui::MenuGtk> menu_;
   ScopedGObject<GtkStatusIcon> icon_;
+  std::vector<ScopedGSignal> signals_;
 };
 
 }  // namespace electron

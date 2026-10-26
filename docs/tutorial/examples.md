@@ -16,16 +16,7 @@ Once Fiddle is installed, you can press on the "Open in Fiddle" button that you
 will find below code samples like the following one:
 
 ```fiddle docs/fiddles/quick-start
-window.addEventListener('DOMContentLoaded', () => {
-  const replaceText = (selector, text) => {
-    const element = document.getElementById(selector)
-    if (element) element.innerText = text
-  }
 
-  for (const type of ['chrome', 'node', 'electron']) {
-    replaceText(`${type}-version`, process.versions[type])
-  }
-})
 ```
 
 If there is still something that you do not know how to do, please take a look at the [API][app]
@@ -48,12 +39,9 @@ guide!).
 
 ## How to...?
 
-You can find the full list of "How to?" in the sidebar. If there is
-something that you would like to do that is not documented, please join
-our [Discord server][discord] and let us know!
+You can find the full list of "How to?" in the sidebar.
 
 [app]: ../api/app.md
-[discord]: https://discord.gg/electronjs
 [fiddle]: https://www.electronjs.org/fiddle
 [Message ports]: ./message-ports.md
 [Device access]: ./devices.md

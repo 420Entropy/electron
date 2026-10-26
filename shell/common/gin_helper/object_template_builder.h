@@ -5,6 +5,9 @@
 #ifndef ELECTRON_SHELL_COMMON_GIN_HELPER_OBJECT_TEMPLATE_BUILDER_H_
 #define ELECTRON_SHELL_COMMON_GIN_HELPER_OBJECT_TEMPLATE_BUILDER_H_
 
+#include <string_view>
+
+#include "base/memory/raw_ptr.h"
 #include "shell/common/gin_helper/function_template.h"
 
 namespace gin_helper {
@@ -27,7 +30,7 @@ class ObjectTemplateBuilder {
   // poetic license here in order that all calls to Set() can be via the '.'
   // operator and line up nicely.
   template <typename T>
-  ObjectTemplateBuilder& SetValue(const base::StringPiece& name, T val) {
+  ObjectTemplateBuilder& SetValue(const std::string_view name, T val) {
     return SetImpl(name, ConvertToV8(isolate_, val));
   }
 
@@ -36,19 +39,43 @@ class ObjectTemplateBuilder {
   // will want to use one of the first two options. Also see
   // gin::CreateFunctionTemplate() for creating raw function templates.
   template <typename T>
-  ObjectTemplateBuilder& SetMethod(const base::StringPiece& name,
+  ObjectTemplateBuilder& SetMethod(const std::string_view name,
                                    const T& callback) {
     return SetImpl(name, CallbackTraits<T>::CreateTemplate(isolate_, callback));
   }
+  // Naming the target as a template argument instead of passing it as a value
+  // lets the call go straight from V8 to it, with no callback object to store,
+  // unwrap and run through. Prefer it wherever the target is a plain function
+  // or member function; the overload above is still what a bound callback
+  // needs.
+  template <auto kTarget>
+  ObjectTemplateBuilder& SetMethod(const std::string_view name) {
+    return SetImpl(name, CreateFunctionTemplate<kTarget>(isolate_));
+  }
+
+  // The compile-time forms of SetProperty below: an accessor is a call into
+  // C++ like any other, and this takes the callback object out of it.
+  template <auto kGetter>
+  ObjectTemplateBuilder& SetProperty(const std::string_view name) {
+    return SetPropertyImpl(name, CreateFunctionTemplate<kGetter>(isolate_),
+                           v8::Local<v8::FunctionTemplate>());
+  }
+
+  template <auto kGetter, auto kSetter>
+  ObjectTemplateBuilder& SetProperty(const std::string_view name) {
+    return SetPropertyImpl(name, CreateFunctionTemplate<kGetter>(isolate_),
+                           CreateFunctionTemplate<kSetter>(isolate_));
+  }
+
   template <typename T>
-  ObjectTemplateBuilder& SetProperty(const base::StringPiece& name,
+  ObjectTemplateBuilder& SetProperty(const std::string_view name,
                                      const T& getter) {
     return SetPropertyImpl(name,
                            CallbackTraits<T>::CreateTemplate(isolate_, getter),
                            v8::Local<v8::FunctionTemplate>());
   }
   template <typename T, typename U>
-  ObjectTemplateBuilder& SetProperty(const base::StringPiece& name,
+  ObjectTemplateBuilder& SetProperty(const std::string_view name,
                                      const T& getter,
                                      const U& setter) {
     return SetPropertyImpl(name,
@@ -59,14 +86,14 @@ class ObjectTemplateBuilder {
   v8::Local<v8::ObjectTemplate> Build();
 
  private:
-  ObjectTemplateBuilder& SetImpl(const base::StringPiece& name,
+  ObjectTemplateBuilder& SetImpl(const std::string_view name,
                                  v8::Local<v8::Data> val);
   ObjectTemplateBuilder& SetPropertyImpl(
-      const base::StringPiece& name,
+      const std::string_view name,
       v8::Local<v8::FunctionTemplate> getter,
       v8::Local<v8::FunctionTemplate> setter);
 
-  v8::Isolate* isolate_;
+  raw_ptr<v8::Isolate> isolate_;
 
   // ObjectTemplateBuilder should only be used on the stack.
   v8::Local<v8::ObjectTemplate> template_;

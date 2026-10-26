@@ -6,15 +6,18 @@
 #define ELECTRON_SHELL_BROWSER_NOTIFICATIONS_MAC_NOTIFICATION_CENTER_DELEGATE_H_
 
 #import <Foundation/Foundation.h>
+#import <UserNotifications/UserNotifications.h>
+
+#include "base/memory/raw_ptr.h"
 
 namespace electron {
 class NotificationPresenterMac;
 }
 
 @interface NotificationCenterDelegate
-    : NSObject <NSUserNotificationCenterDelegate> {
+    : NSObject <UNUserNotificationCenterDelegate> {
  @private
-  electron::NotificationPresenterMac* presenter_;
+  raw_ptr<electron::NotificationPresenterMac> presenter_;
 }
 - (instancetype)initWithPresenter:
     (electron::NotificationPresenterMac*)presenter;

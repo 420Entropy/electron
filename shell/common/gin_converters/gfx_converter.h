@@ -6,6 +6,7 @@
 #define ELECTRON_SHELL_COMMON_GIN_CONVERTERS_GFX_CONVERTER_H_
 
 #include "gin/converter.h"
+#include "shell/common/color_util.h"
 
 namespace display {
 class Display;
@@ -16,6 +17,8 @@ class Point;
 class PointF;
 class Size;
 class Rect;
+class Insets;
+class ColorSpace;
 enum class ResizeEdge;
 }  // namespace gfx
 
@@ -55,6 +58,15 @@ struct Converter<gfx::Rect> {
 };
 
 template <>
+struct Converter<gfx::Insets> {
+  static v8::Local<v8::Value> ToV8(v8::Isolate* isolate,
+                                   const gfx::Insets& val);
+  static bool FromV8(v8::Isolate* isolate,
+                     v8::Local<v8::Value> val,
+                     gfx::Insets* out);
+};
+
+template <>
 struct Converter<display::Display> {
   static v8::Local<v8::Value> ToV8(v8::Isolate* isolate,
                                    const display::Display& val);
@@ -66,7 +78,23 @@ struct Converter<display::Display> {
 template <>
 struct Converter<gfx::ResizeEdge> {
   static v8::Local<v8::Value> ToV8(v8::Isolate* isolate,
-                                   const gfx::ResizeEdge& val);
+                                   const gfx::ResizeEdge val);
+};
+
+template <>
+struct Converter<WrappedSkColor> {
+  static bool FromV8(v8::Isolate* isolate,
+                     v8::Local<v8::Value> val,
+                     WrappedSkColor* out);
+};
+
+template <>
+struct Converter<gfx::ColorSpace> {
+  static v8::Local<v8::Value> ToV8(v8::Isolate* isolate,
+                                   const gfx::ColorSpace& val);
+  static bool FromV8(v8::Isolate* isolate,
+                     v8::Local<v8::Value> val,
+                     gfx::ColorSpace* out);
 };
 
 }  // namespace gin

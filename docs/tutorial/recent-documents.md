@@ -24,12 +24,12 @@ the application via JumpList or dock menu, respectively.
 
 ### Managing recent documents
 
-```javascript fiddle='docs/fiddles/features/recent-documents'
-const { app, BrowserWindow } = require('electron')
-const fs = require('fs')
-const path = require('path')
+```fiddle docs/fiddles/features/recent-documents
+const { app, BrowserWindow } = require('electron/main')
+const fs = require('node:fs')
+const path = require('node:path')
 
-const createWindow = () => {
+function createWindow () {
   const win = new BrowserWindow({
     width: 800,
     height: 600
@@ -77,6 +77,11 @@ To clear the list of recent documents, use the
 In this guide, the list of documents is cleared once all windows have been
 closed.
 
+#### Accessing the list of recent documents
+
+To access the list of recent documents, use the
+[app.getRecentDocuments][getrecentdocuments] API.
+
 ## Additional information
 
 ### Windows Notes
@@ -116,7 +121,7 @@ following code snippet to your menu template:
 Make sure the application menu is added after the [`'ready'`](../api/app.md#event-ready)
 event and not before, or the menu item will be disabled:
 
-```javascript
+```js
 const { app, Menu } = require('electron')
 
 const template = [
@@ -138,5 +143,6 @@ of `app` module will be emitted for it.
 [dock-menu-image]: https://cloud.githubusercontent.com/assets/639601/5069610/2aa80758-6e97-11e4-8cfb-c1a414a10774.png
 [addrecentdocument]: ../api/app.md#appaddrecentdocumentpath-macos-windows
 [clearrecentdocuments]: ../api/app.md#appclearrecentdocuments-macos-windows
+[getrecentdocuments]: ../api/app.md#appgetrecentdocuments-macos-windows
 [app-registration]: https://learn.microsoft.com/en-us/windows/win32/shell/app-registration
 [menu-item-image]: https://user-images.githubusercontent.com/3168941/33003655-ea601c3a-cd70-11e7-97fa-7c062149cfb1.png

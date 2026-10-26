@@ -8,8 +8,8 @@
 namespace gin_helper {
 
 // Objects of this type will be destroyed immediately prior to disposing the V8
-// Isolate. This should only be used for gin::Wrappable objects, whose lifetime
-// is otherwise managed by V8.
+// Isolate. This should only be used for gin_helper::Wrappable objects, whose
+// lifetime is otherwise managed by V8.
 //
 // NB. This is only needed because v8::Global objects that have SetWeak
 // finalization callbacks do not have their finalization callbacks invoked at
@@ -19,7 +19,13 @@ class CleanedUpAtExit {
   CleanedUpAtExit();
   virtual ~CleanedUpAtExit();
 
+  virtual void WillBeDestroyed();
+
   static void DoCleanup();
+
+  // True once DoCleanup() has started, i.e. weak second-pass callbacks that
+  // fire from here on may refer to objects it already destroyed.
+  static bool DidStartCleanup();
 };
 
 }  // namespace gin_helper

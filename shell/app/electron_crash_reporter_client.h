@@ -8,7 +8,6 @@
 #include <map>
 #include <string>
 
-#include "base/compiler_specific.h"
 #include "base/no_destructor.h"
 #include "build/build_config.h"
 #include "components/crash/core/app/crash_reporter_client.h"
@@ -34,11 +33,6 @@ class ElectronCrashReporterClient : public crash_reporter::CrashReporterClient {
 #if BUILDFLAG(IS_LINUX)
   void SetCrashReporterClientIdFromGUID(
       const std::string& client_guid) override;
-  void GetProductNameAndVersion(const char** product_name,
-                                const char** version) override;
-  void GetProductNameAndVersion(std::string* product_name,
-                                std::string* version,
-                                std::string* channel) override;
   base::FilePath GetReporterLogFilename() override;
 #endif
 
@@ -48,6 +42,14 @@ class ElectronCrashReporterClient : public crash_reporter::CrashReporterClient {
                                 std::wstring* version,
                                 std::wstring* special_build,
                                 std::wstring* channel_name) override;
+  std::wstring GetWerRuntimeExceptionModule() override;
+
+  // Lists electron_wer.dll under the current user's WER
+  // RuntimeExceptionHelperModules key so Windows will load it for crashes in
+  // this app. Windows only honours WerRegisterRuntimeExceptionModule() for
+  // DLLs listed there (HKCU or HKLM). Call once from the browser process
+  // before crashpad is initialized; may block.
+  static void RegisterWerHelperModuleForCurrentUser();
 #endif
 
 #if BUILDFLAG(IS_WIN)
@@ -60,11 +62,10 @@ class ElectronCrashReporterClient : public crash_reporter::CrashReporterClient {
 
   bool GetCollectStatsConsent() override;
 
-  bool GetShouldRateLimit() override;
-  bool GetShouldCompressUploads() override;
+  bool ShouldRateLimitUploads() override;
+  bool ShouldCompressUploads() override;
 
-  void GetProcessSimpleAnnotations(
-      std::map<std::string, std::string>* annotations) override;
+  std::map<std::string, std::string> GetExtraProcessAnnotations() override;
 
 #if BUILDFLAG(IS_MAC)
   bool ReportingIsEnforcedByPolicy(bool* breakpad_enabled) override;
@@ -74,6 +75,7 @@ class ElectronCrashReporterClient : public crash_reporter::CrashReporterClient {
   bool ShouldMonitorCrashHandlerExpensively() override;
 #endif
 
+  void GetProductInfo(ProductInfo* product_info) override;
   bool EnableBreakpadForProcess(const std::string& process_type) override;
 
   std::string GetUploadUrl() override;

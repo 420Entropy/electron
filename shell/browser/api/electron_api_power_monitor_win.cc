@@ -5,104 +5,39 @@
 #include "shell/browser/api/electron_api_power_monitor.h"
 
 #include <windows.h>
+
 #include <wtsapi32.h>
 
-#include "base/win/windows_types.h"
-#include "base/win/wrapped_window_proc.h"
-#include "content/public/browser/browser_task_traits.h"
-#include "ui/base/win/shell.h"
-#include "ui/gfx/win/hwnd_util.h"
+#include "base/functional/bind.h"
+#include "ui/base/win/session_change_observer.h"
 
-namespace electron {
-
-namespace {
-
-const wchar_t kPowerMonitorWindowClass[] = L"Electron_PowerMonitorHostWindow";
-
-}  // namespace
-
-namespace api {
+namespace electron::api {
 
 void PowerMonitor::InitPlatformSpecificMonitors() {
-  WNDCLASSEX window_class;
-  base::win::InitializeWindowClass(
-      kPowerMonitorWindowClass,
-      &base::win::WrappedWindowProc<PowerMonitor::WndProcStatic>, 0, 0, 0, NULL,
-      NULL, NULL, NULL, NULL, &window_class);
-  instance_ = window_class.hInstance;
-  atom_ = RegisterClassEx(&window_class);
-
-  // Create an offscreen window for receiving broadcast messages for the
-  // session lock and unlock events.
-  window_ = CreateWindow(MAKEINTATOM(atom_), 0, 0, 0, 0, 0, 0, HWND_MESSAGE, 0,
-                         instance_, 0);
-  gfx::CheckWindowCreated(window_, ::GetLastError());
-  gfx::SetWindowUserData(window_, this);
-
-  // Tel windows we want to be notified with session events
-  WTSRegisterSessionNotification(window_, NOTIFY_FOR_THIS_SESSION);
-
-  // For Windows 8 and later, a new "connected standby" mode has been added and
-  // we must explicitly register for its notifications.
-  RegisterSuspendResumeNotification(static_cast<HANDLE>(window_),
-                                    DEVICE_NOTIFY_WINDOW_HANDLE);
+  // Suspend and resume come from base::PowerMonitor; session lock and unlock
+  // come from WTS session change notifications delivered on the UI thread.
+  // Destroying the observer cancels the callback, so Unretained is safe.
+  session_change_observer_ =
+      std::make_unique<ui::SessionChangeObserver>(base::BindRepeating(
+          &PowerMonitor::OnSessionChange, base::Unretained(this)));
 }
 
-LRESULT CALLBACK PowerMonitor::WndProcStatic(HWND hwnd,
-                                             UINT message,
-                                             WPARAM wparam,
-                                             LPARAM lparam) {
-  auto* msg_wnd =
-      reinterpret_cast<PowerMonitor*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
-  if (msg_wnd)
-    return msg_wnd->WndProc(hwnd, message, wparam, lparam);
-  else
-    return ::DefWindowProc(hwnd, message, wparam, lparam);
+void PowerMonitor::DestroyPlatformSpecificMonitors() {
+  session_change_observer_.reset();
 }
 
-LRESULT CALLBACK PowerMonitor::WndProc(HWND hwnd,
-                                       UINT message,
-                                       WPARAM wparam,
-                                       LPARAM lparam) {
-  if (message == WM_WTSSESSION_CHANGE) {
-    bool should_treat_as_current_session = true;
-    DWORD current_session_id = 0;
-    if (!::ProcessIdToSessionId(::GetCurrentProcessId(), &current_session_id)) {
-      LOG(ERROR) << "ProcessIdToSessionId failed, assuming current session";
-    } else {
-      should_treat_as_current_session =
-          (static_cast<DWORD>(lparam) == current_session_id);
-    }
-    if (should_treat_as_current_session) {
-      if (wparam == WTS_SESSION_LOCK) {
-        // Unretained is OK because this object is eternally pinned.
-        content::GetUIThreadTaskRunner({})->PostTask(
-            FROM_HERE,
-            base::BindOnce([](PowerMonitor* pm) { pm->Emit("lock-screen"); },
-                           base::Unretained(this)));
-      } else if (wparam == WTS_SESSION_UNLOCK) {
-        content::GetUIThreadTaskRunner({})->PostTask(
-            FROM_HERE,
-            base::BindOnce([](PowerMonitor* pm) { pm->Emit("unlock-screen"); },
-                           base::Unretained(this)));
-      }
-    }
-  } else if (message == WM_POWERBROADCAST) {
-    if (wparam == PBT_APMRESUMEAUTOMATIC) {
-      content::GetUIThreadTaskRunner({})->PostTask(
-          FROM_HERE,
-          base::BindOnce([](PowerMonitor* pm) { pm->Emit("resume"); },
-                         base::Unretained(this)));
-    } else if (wparam == PBT_APMSUSPEND) {
-      content::GetUIThreadTaskRunner({})->PostTask(
-          FROM_HERE,
-          base::BindOnce([](PowerMonitor* pm) { pm->Emit("suspend"); },
-                         base::Unretained(this)));
-    }
-  }
-  return ::DefWindowProc(hwnd, message, wparam, lparam);
+void PowerMonitor::OnSessionChange(WPARAM wparam,
+                                   const bool* is_current_session) {
+  if (is_current_session && !*is_current_session)
+    return;
+
+  const char* event_name = nullptr;
+  if (wparam == WTS_SESSION_LOCK)
+    event_name = "lock-screen";
+  else if (wparam == WTS_SESSION_UNLOCK)
+    event_name = "unlock-screen";
+  if (event_name)
+    Emit(event_name);
 }
 
-}  // namespace api
-
-}  // namespace electron
+}  // namespace electron::api

@@ -5,102 +5,134 @@
 #include "shell/common/node_bindings.h"
 
 #include <algorithm>
-#include <memory>
-#include <set>
+#include <iostream>
 #include <string>
-#include <unordered_set>
+#include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
+#include "base/allocator/partition_allocator/src/partition_alloc/oom.h"
 #include "base/base_paths.h"
 #include "base/command_line.h"
+#include "base/containers/fixed_flat_set.h"
 #include "base/environment.h"
 #include "base/path_service.h"
 #include "base/run_loop.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/strings/string_split.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/trace_event/trace_event.h"
-#include "content/public/browser/browser_thread.h"
+#include "chrome/common/chrome_version.h"
 #include "content/public/common/content_paths.h"
-#include "content/public/common/content_switches.h"
+#include "content/public/renderer/render_frame.h"
 #include "electron/buildflags/buildflags.h"
+#include "electron/electron_version.h"
 #include "electron/fuses.h"
+#include "electron/mas.h"
+#include "gin/per_context_data.h"
 #include "shell/browser/api/electron_api_app.h"
 #include "shell/common/api/electron_bindings.h"
 #include "shell/common/electron_command_line.h"
+#include "shell/common/gin_converters/callback_converter.h"
 #include "shell/common/gin_converters/file_path_converter.h"
 #include "shell/common/gin_helper/dictionary.h"
 #include "shell/common/gin_helper/event.h"
 #include "shell/common/gin_helper/event_emitter_caller.h"
-#include "shell/common/gin_helper/locker.h"
-#include "shell/common/gin_helper/microtasks_scope.h"
+#include "shell/common/gin_helper/function_template.h"
+#include "shell/common/js2c_bundle_ids.h"
 #include "shell/common/mac/main_application_bundle.h"
 #include "shell/common/node_includes.h"
+#include "shell/common/node_util.h"
+#include "shell/common/platform_util.h"
+#include "shell/common/process_util.h"
+#include "shell/common/world_ids.h"
+#include "third_party/blink/public/common/web_preferences/web_preferences.h"
+#include "third_party/blink/public/web/web_local_frame.h"
+#include "third_party/blink/renderer/bindings/core/v8/referrer_script_info.h"  // nogncheck
 #include "third_party/blink/renderer/bindings/core/v8/v8_initializer.h"  // nogncheck
 #include "third_party/electron_node/src/debug_utils.h"
+#include "third_party/electron_node/src/module_wrap.h"
+#include "third_party/electron_node/src/node_realm-inl.h"
+#include "third_party/electron_node/src/node_snapshot_builder.h"
+#include "v8/include/v8-statistics.h"
 
 #if !IS_MAS_BUILD()
 #include "shell/common/crash_keys.h"
+#include "shell/common/v8_oom_diagnostics.h"
 #endif
 
-#define ELECTRON_BROWSER_BINDINGS(V)     \
-  V(electron_browser_app)                \
-  V(electron_browser_auto_updater)       \
-  V(electron_browser_browser_view)       \
-  V(electron_browser_content_tracing)    \
-  V(electron_browser_crash_reporter)     \
-  V(electron_browser_dialog)             \
-  V(electron_browser_event_emitter)      \
-  V(electron_browser_global_shortcut)    \
-  V(electron_browser_in_app_purchase)    \
-  V(electron_browser_menu)               \
-  V(electron_browser_message_port)       \
-  V(electron_browser_native_theme)       \
-  V(electron_browser_net)                \
-  V(electron_browser_notification)       \
-  V(electron_browser_power_monitor)      \
-  V(electron_browser_power_save_blocker) \
-  V(electron_browser_protocol)           \
-  V(electron_browser_printing)           \
-  V(electron_browser_push_notifications) \
-  V(electron_browser_safe_storage)       \
-  V(electron_browser_session)            \
-  V(electron_browser_screen)             \
-  V(electron_browser_system_preferences) \
-  V(electron_browser_base_window)        \
-  V(electron_browser_tray)               \
-  V(electron_browser_utility_process)    \
-  V(electron_browser_view)               \
-  V(electron_browser_web_contents)       \
-  V(electron_browser_web_contents_view)  \
-  V(electron_browser_web_frame_main)     \
-  V(electron_browser_web_view_manager)   \
-  V(electron_browser_window)
+#define ELECTRON_BROWSER_BINDINGS(V)      \
+  V(electron_browser_app)                 \
+  V(electron_browser_auto_updater)        \
+  V(electron_browser_content_tracing)     \
+  V(electron_browser_crash_reporter)      \
+  V(electron_browser_desktop_capturer)    \
+  V(electron_browser_dialog)              \
+  V(electron_browser_event_emitter)       \
+  V(electron_browser_ipc_dispatch)        \
+  V(electron_browser_global_shortcut)     \
+  V(electron_browser_image_view)          \
+  V(electron_browser_in_app_purchase)     \
+  V(electron_browser_menu)                \
+  V(electron_browser_message_port)        \
+  V(electron_browser_msix_updater)        \
+  V(electron_browser_native_theme)        \
+  V(electron_browser_notification)        \
+  V(electron_browser_power_monitor)       \
+  V(electron_browser_power_save_blocker)  \
+  V(electron_browser_protocol)            \
+  V(electron_browser_push_notifications)  \
+  V(electron_browser_safe_storage)        \
+  V(electron_browser_service_worker_main) \
+  V(electron_browser_session)             \
+  V(electron_browser_screen)              \
+  V(electron_browser_system_preferences)  \
+  V(electron_browser_base_window)         \
+  V(electron_browser_clipboard)           \
+  V(electron_browser_clipboard_item)      \
+  V(electron_browser_tray)                \
+  V(electron_browser_utility_process)     \
+  V(electron_browser_view)                \
+  V(electron_browser_web_contents)        \
+  V(electron_browser_web_contents_view)   \
+  V(electron_browser_web_frame_main)      \
+  V(electron_browser_web_view_manager)    \
+  V(electron_browser_window)              \
+  V(electron_common_net)
 
 #define ELECTRON_COMMON_BINDINGS(V)   \
   V(electron_common_asar)             \
-  V(electron_common_clipboard)        \
   V(electron_common_command_line)     \
   V(electron_common_crashpad_support) \
-  V(electron_common_environment)      \
+  V(electron_common_events)           \
   V(electron_common_features)         \
   V(electron_common_native_image)     \
+  V(electron_common_shared_texture)   \
   V(electron_common_shell)            \
   V(electron_common_v8_util)
 
 #define ELECTRON_RENDERER_BINDINGS(V) \
+  V(electron_renderer_web_utils)      \
   V(electron_renderer_context_bridge) \
   V(electron_renderer_crash_reporter) \
   V(electron_renderer_ipc)            \
   V(electron_renderer_web_frame)
 
-#define ELECTRON_UTILITY_BINDINGS(V) V(electron_utility_parent_port)
+#if BUILDFLAG(ENABLE_PROMPT_API)
+#define ELECTRON_UTILITY_PROMPT_API_BINDINGS(V) \
+  V(electron_utility_local_ai_handler)
+#else
+#define ELECTRON_UTILITY_PROMPT_API_BINDINGS(V)
+#endif  // BUILDFLAG(ENABLE_PROMPT_API)
 
-#define ELECTRON_VIEWS_BINDINGS(V) V(electron_browser_image_view)
-
-#define ELECTRON_DESKTOP_CAPTURER_BINDINGS(V) \
-  V(electron_browser_desktop_capturer)
+#define ELECTRON_UTILITY_BINDINGS(V)      \
+  V(electron_browser_event_emitter)       \
+  V(electron_browser_system_preferences)  \
+  V(electron_common_net)                  \
+  ELECTRON_UTILITY_PROMPT_API_BINDINGS(V) \
+  V(electron_utility_parent_port)
 
 #define ELECTRON_TESTING_BINDINGS(V) V(electron_common_testing)
 
@@ -109,21 +141,19 @@
 // function for each built-in bindings explicitly. This is only
 // forward declaration. The definitions are in each binding's
 // implementation when calling the NODE_LINKED_BINDING_CONTEXT_AWARE.
-#define V(modname) void _register_##modname();
+#define V(modname)            \
+  void _register_##modname(); \
+  node::node_module* get_linked_module_##modname();
 ELECTRON_BROWSER_BINDINGS(V)
 ELECTRON_COMMON_BINDINGS(V)
 ELECTRON_RENDERER_BINDINGS(V)
 ELECTRON_UTILITY_BINDINGS(V)
-#if BUILDFLAG(ENABLE_VIEWS_API)
-ELECTRON_VIEWS_BINDINGS(V)
-#endif
-#if BUILDFLAG(ENABLE_DESKTOP_CAPTURER)
-ELECTRON_DESKTOP_CAPTURER_BINDINGS(V)
-#endif
 #if DCHECK_IS_ON()
 ELECTRON_TESTING_BINDINGS(V)
 #endif
 #undef V
+
+using node::loader::ModuleWrap;
 
 namespace {
 
@@ -163,7 +193,30 @@ void V8FatalErrorCallback(const char* location, const char* message) {
 #endif
 
   volatile int* zero = nullptr;
-  *zero = 0;
+  *zero = 0;  // NOLINT(clang-analyzer-core.NullDereference)
+}
+
+void V8OOMErrorCallback(const char* location, const v8::OOMDetails& details) {
+  const char* message =
+      details.is_heap_oom ? "Allocation failed - JavaScript heap out of memory"
+                          : "Allocation failed - process out of memory";
+  if (location) {
+    LOG(ERROR) << "OOM error in V8: " << location << " " << message;
+  } else {
+    LOG(ERROR) << "OOM error in V8: " << message;
+  }
+  if (details.detail) {
+    LOG(ERROR) << "OOM detail: " << details.detail;
+  }
+
+#if !IS_MAS_BUILD()
+  // TryGetCurrent() instead of GetCurrent() to avoid FATAL if no isolate.
+  v8::Isolate* isolate = v8::Isolate::TryGetCurrent();
+  electron::v8_oom::RecordErrorDetails(isolate, location, details);
+  electron::v8_oom::RecordHeapDiagnostics(isolate);
+#endif
+
+  OOM_CRASH(0);
 }
 
 bool AllowWasmCodeGenerationCallback(v8::Local<v8::Context> context,
@@ -171,13 +224,136 @@ bool AllowWasmCodeGenerationCallback(v8::Local<v8::Context> context,
   // If we're running with contextIsolation enabled in the renderer process,
   // fall back to Blink's logic.
   if (node::Environment::GetCurrent(context) == nullptr) {
-    if (gin_helper::Locker::IsBrowserProcess())
+    if (!electron::IsRendererProcess())
       return false;
-    return blink::V8Initializer::WasmCodeGenerationCheckCallbackInMainThread(
-        context, source);
+    return blink::V8Initializer::WasmCodeGenerationCheckCallback(context,
+                                                                 source);
   }
 
   return node::AllowWasmCodeGenerationCallback(context, source);
+}
+
+enum ESMHandlerPlatform {
+  kNone,
+  kNodeJS,
+  kBlink,
+};
+
+static ESMHandlerPlatform SelectESMHandlerPlatform(
+    v8::Local<v8::Context> context,
+    v8::Local<v8::Data> raw_host_defined_options) {
+  if (node::Environment::GetCurrent(context) == nullptr) {
+    if (electron::IsBrowserProcess() || electron::IsUtilityProcess())
+      return ESMHandlerPlatform::kNone;
+
+    return ESMHandlerPlatform::kBlink;
+  }
+
+  if (!electron::IsRendererProcess())
+    return ESMHandlerPlatform::kNodeJS;
+
+  blink::WebLocalFrame* frame = blink::WebLocalFrame::FrameForContext(context);
+
+  if (frame == nullptr)
+    return ESMHandlerPlatform::kBlink;
+
+  auto prefs = content::RenderFrame::FromWebFrame(frame)->GetBlinkPreferences();
+
+  // If we're running with contextIsolation enabled in the renderer process,
+  // fall back to Blink's logic when the frame is not in the isolated world.
+  if (prefs.context_isolation) {
+    return frame->GetScriptContextWorldId(context) ==
+                   electron::WorldIDs::ISOLATED_WORLD_ID
+               ? ESMHandlerPlatform::kNodeJS
+               : ESMHandlerPlatform::kBlink;
+  }
+
+  if (raw_host_defined_options.IsEmpty() ||
+      !raw_host_defined_options->IsFixedArray()) {
+    return ESMHandlerPlatform::kBlink;
+  }
+
+  // Since the routing is based on the `host_defined_options` length -
+  // make sure that Node's host defined options are different from Blink's.
+  static_assert(
+      static_cast<size_t>(node::loader::HostDefinedOptions::kLength) !=
+      blink::ReferrerScriptInfo::HostDefinedOptionsIndex::kLength);
+
+  // Use Node.js resolver only if host options were created by it.
+  auto options = v8::Local<v8::FixedArray>::Cast(raw_host_defined_options);
+  if (options->Length() == node::loader::HostDefinedOptions::kLength) {
+    return ESMHandlerPlatform::kNodeJS;
+  }
+
+  return ESMHandlerPlatform::kBlink;
+}
+
+v8::MaybeLocal<v8::Promise> HostImportModuleWithPhaseDynamically(
+    v8::Local<v8::Context> context,
+    v8::Local<v8::Data> v8_host_defined_options,
+    v8::Local<v8::Value> v8_referrer_resource_url,
+    v8::Local<v8::String> v8_specifier,
+    v8::ModuleImportPhase import_phase,
+    v8::Local<v8::FixedArray> v8_import_attributes) {
+  switch (SelectESMHandlerPlatform(context, v8_host_defined_options)) {
+    case ESMHandlerPlatform::kBlink:
+      return blink::V8Initializer::HostImportModuleWithPhaseDynamically(
+          context, v8_host_defined_options, v8_referrer_resource_url,
+          v8_specifier, import_phase, v8_import_attributes);
+    case ESMHandlerPlatform::kNodeJS:
+      CHECK(import_phase == v8::ModuleImportPhase::kEvaluation);
+      return node::loader::ImportModuleDynamicallyWithPhase(
+          context, v8_host_defined_options, v8_referrer_resource_url,
+          v8_specifier, import_phase, v8_import_attributes);
+    case ESMHandlerPlatform::kNone:
+    default:
+      return {};
+  }
+}
+
+v8::MaybeLocal<v8::Promise> HostImportModuleDynamically(
+    v8::Local<v8::Context> context,
+    v8::Local<v8::Data> v8_host_defined_options,
+    v8::Local<v8::Value> v8_referrer_resource_url,
+    v8::Local<v8::String> v8_specifier,
+    v8::Local<v8::FixedArray> v8_import_attributes) {
+  return HostImportModuleWithPhaseDynamically(
+      context, v8_host_defined_options, v8_referrer_resource_url, v8_specifier,
+      v8::ModuleImportPhase::kEvaluation, v8_import_attributes);
+}
+
+void HostInitializeImportMetaObject(v8::Local<v8::Context> context,
+                                    v8::Local<v8::Module> module,
+                                    v8::Local<v8::Object> meta) {
+  node::Environment* env = node::Environment::GetCurrent(context);
+  if (env == nullptr) {
+    if (electron::IsBrowserProcess() || electron::IsUtilityProcess())
+      return;
+    return blink::V8Initializer::HostGetImportMetaProperties(context, module,
+                                                             meta);
+  }
+
+  if (electron::IsRendererProcess()) {
+    // If the module is created by Node.js, use Node.js' handling.
+    if (env != nullptr) {
+      ModuleWrap* wrap = ModuleWrap::GetFromModule(env, module);
+      if (wrap)
+        return ModuleWrap::HostInitializeImportMetaObjectCallback(context,
+                                                                  module, meta);
+    }
+
+    // If contextIsolation is enabled, fall back to Blink's handling.
+    blink::WebLocalFrame* frame =
+        blink::WebLocalFrame::FrameForContext(context);
+    if (!frame || frame->GetScriptContextWorldId(context) !=
+                      electron::WorldIDs::ISOLATED_WORLD_ID) {
+      return blink::V8Initializer::HostGetImportMetaProperties(context, module,
+                                                               meta);
+    }
+  }
+
+  return ModuleWrap::HostInitializeImportMetaObjectCallback(context, module,
+                                                            meta);
 }
 
 v8::ModifyCodeGenerationFromStringsResult ModifyCodeGenerationFromStrings(
@@ -188,30 +364,28 @@ v8::ModifyCodeGenerationFromStringsResult ModifyCodeGenerationFromStrings(
     // No node environment means we're in the renderer process, either in a
     // sandboxed renderer or in an unsandboxed renderer with context isolation
     // enabled.
-    if (gin_helper::Locker::IsBrowserProcess()) {
+    if (!electron::IsRendererProcess()) {
       NOTREACHED();
-      return {false, {}};
     }
     return blink::V8Initializer::CodeGenerationCheckCallbackInMainThread(
         context, source, is_code_like);
   }
 
   // If we get here then we have a node environment, so either a) we're in the
-  // main process, or b) we're in the renderer process in a context that has
-  // both node and blink, i.e. contextIsolation disabled.
-
-  // If we're in the main process, delegate to node.
-  if (gin_helper::Locker::IsBrowserProcess()) {
-    return node::ModifyCodeGenerationFromStrings(context, source, is_code_like);
-  }
+  // non-renderer process, or b) we're in the renderer process in a context that
+  // has both node and blink, i.e. contextIsolation disabled.
 
   // If we're in the renderer with contextIsolation disabled, ask blink first
   // (for CSP), and iff that allows codegen, delegate to node.
-  v8::ModifyCodeGenerationFromStringsResult result =
-      blink::V8Initializer::CodeGenerationCheckCallbackInMainThread(
-          context, source, is_code_like);
-  if (!result.codegen_allowed)
-    return result;
+  if (electron::IsRendererProcess()) {
+    v8::ModifyCodeGenerationFromStringsResult result =
+        blink::V8Initializer::CodeGenerationCheckCallbackInMainThread(
+            context, source, is_code_like);
+    if (!result.codegen_allowed)
+      return result;
+  }
+
+  // If we're in the main process or utility process, delegate to node.
   return node::ModifyCodeGenerationFromStrings(context, source, is_code_like);
 }
 
@@ -220,15 +394,17 @@ void ErrorMessageListener(v8::Local<v8::Message> message,
   v8::Isolate* isolate = v8::Isolate::GetCurrent();
   node::Environment* env = node::Environment::GetCurrent(isolate);
   if (env) {
-    gin_helper::MicrotasksScope microtasks_scope(
-        isolate, env->context()->GetMicrotaskQueue(),
-        v8::MicrotasksScope::kDoNotRunMicrotasks);
+    v8::MicrotasksScope microtasks_scope(
+        env->context(), v8::MicrotasksScope::kDoNotRunMicrotasks);
     // Emit the after() hooks now that the exception has been handled.
     // Analogous to node/lib/internal/process/execution.js#L176-L180
     if (env->async_hooks()->fields()[node::AsyncHooks::kAfter]) {
       while (env->async_hooks()->fields()[node::AsyncHooks::kStackLength]) {
-        node::AsyncWrap::EmitAfter(env, env->execution_async_id());
-        env->async_hooks()->pop_async_context(env->execution_async_id());
+        double id = env->execution_async_id();
+        // Do not call EmitAfter for asyncId 0.
+        if (id != 0)
+          node::AsyncWrap::EmitAfter(env, id);
+        env->async_hooks()->pop_async_context(id);
       }
     }
 
@@ -238,66 +414,109 @@ void ErrorMessageListener(v8::Local<v8::Message> message,
   }
 }
 
-const std::unordered_set<base::StringPiece, base::StringPieceHash>
-GetAllowedDebugOptions() {
-  if (electron::fuses::IsNodeCliInspectEnabled()) {
-    // Only allow DebugOptions in non-ELECTRON_RUN_AS_NODE mode
-    return {
-        "--inspect",          "--inspect-brk",
-        "--inspect-port",     "--debug",
-        "--debug-brk",        "--debug-port",
-        "--inspect-brk-node", "--inspect-publish-uid",
-    };
-  }
-  // If node CLI inspect support is disabled, allow no debug options.
-  return {};
+// Only allow a specific subset of options in non-ELECTRON_RUN_AS_NODE mode.
+// If node CLI inspect support is disabled, allow no debug options.
+bool IsAllowedOption(const std::string_view option) {
+  static constexpr auto debug_options =
+      base::MakeFixedFlatSet<std::string_view>({
+          "--debug",
+          "--debug-brk",
+          "--debug-port",
+          "--inspect",
+          "--inspect-brk",
+          "--inspect-brk-node",
+          "--inspect-port",
+          "--inspect-publish-uid",
+          "--experimental-network-inspection",
+          "--experimental-inspector-network-resource",
+          "--experimental-transform-types",
+      });
+
+  // This should be aligned with what's possible to set via the process object.
+  static constexpr auto options = base::MakeFixedFlatSet<std::string_view>({
+      "--diagnostic-dir",
+      "--dns-result-order",
+      "--no-deprecation",
+      "--throw-deprecation",
+      "--trace-deprecation",
+      "--trace-warnings",
+      "--no-experimental-global-navigator",
+  });
+
+  // This should be aligned with what's possible to set via the process object.
+  static constexpr auto unpacked_options =
+      base::MakeFixedFlatSet<std::string_view>({
+          "--expose-internals",
+      });
+
+  if (debug_options.contains(option))
+    return electron::fuses::IsNodeCliInspectEnabled();
+
+  if (unpacked_options.contains(option))
+    return !electron::api::App::IsPackaged();
+
+  return options.contains(option);
 }
 
 // Initialize NODE_OPTIONS to pass to Node.js
 // See https://nodejs.org/api/cli.html#cli_node_options_options
 void SetNodeOptions(base::Environment* env) {
-  // Options that are unilaterally disallowed
-  const std::set<std::string> disallowed = {
-      "--openssl-config", "--use-bundled-ca", "--use-openssl-ca",
-      "--force-fips", "--enable-fips"};
+  // Options that are expressly disallowed
+  static constexpr auto disallowed = base::MakeFixedFlatSet<std::string_view>({
+      "--enable-fips",
+      "--experimental-policy",
+      "--force-fips",
+      "--openssl-config",
+      "--use-bundled-ca",
+      "--use-openssl-ca",
+  });
 
-  // Subset of options allowed in packaged apps
-  const std::set<std::string> allowed_in_packaged = {"--max-http-header-size",
-                                                     "--http-parser"};
+  static constexpr auto pkg_opts = base::MakeFixedFlatSet<std::string_view>({
+      "--http-parser",
+      "--max-http-header-size",
+  });
+
+  if (env->HasVar("NODE_EXTRA_CA_CERTS")) {
+    if (!electron::fuses::IsNodeOptionsEnabled()) {
+      LOG(WARNING) << "NODE_OPTIONS ignored due to disabled nodeOptions fuse.";
+      env->UnSetVar("NODE_EXTRA_CA_CERTS");
+    }
+  }
 
   if (env->HasVar("NODE_OPTIONS")) {
     if (electron::fuses::IsNodeOptionsEnabled()) {
-      std::string options;
-      env->GetVar("NODE_OPTIONS", &options);
-      std::vector<std::string> parts = base::SplitString(
+      std::string result_options;
+      std::string options = env->GetVar("NODE_OPTIONS").value();
+      const std::vector<std::string_view> parts = base::SplitStringPiece(
           options, " ", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
 
       bool is_packaged_app = electron::api::App::IsPackaged();
 
-      for (const auto& part : parts) {
+      for (const std::string_view part : parts) {
         // Strip off values passed to individual NODE_OPTIONs
-        std::string option = part.substr(0, part.find('='));
+        const std::string_view option = part.substr(0, part.find('='));
 
-        if (is_packaged_app &&
-            allowed_in_packaged.find(option) == allowed_in_packaged.end()) {
+        if (is_packaged_app && !pkg_opts.contains(option)) {
           // Explicitly disallow majority of NODE_OPTIONS in packaged apps
           LOG(ERROR) << "Most NODE_OPTIONs are not supported in packaged apps."
                      << " See documentation for more details.";
-          options.erase(options.find(option), part.length());
-        } else if (disallowed.find(option) != disallowed.end()) {
+          continue;
+        } else if (disallowed.contains(option)) {
           // Remove NODE_OPTIONS specifically disallowed for use in Node.js
           // through Electron owing to constraints like BoringSSL.
           LOG(ERROR) << "The NODE_OPTION " << option
                      << " is not supported in Electron";
-          options.erase(options.find(option), part.length());
+          continue;
         }
+        result_options.append(part);
+        result_options.append(" ");
       }
 
       // overwrite new NODE_OPTIONS without unsupported variables
-      env->SetVar("NODE_OPTIONS", options);
+      env->SetVar("NODE_OPTIONS", result_options);
     } else {
-      LOG(ERROR) << "NODE_OPTIONS have been disabled in this app";
-      env->SetVar("NODE_OPTIONS", "");
+      LOG(WARNING) << "NODE_OPTIONS ignored due to disabled nodeOptions fuse.";
+      env->UnSetVar("NODE_OPTIONS");
     }
   }
 }
@@ -306,73 +525,90 @@ void SetNodeOptions(base::Environment* env) {
 
 namespace electron {
 
-namespace {
-
 base::FilePath GetResourcesPath() {
 #if BUILDFLAG(IS_MAC)
   return MainApplicationBundlePath().Append("Contents").Append("Resources");
 #else
-  auto* command_line = base::CommandLine::ForCurrentProcess();
-  base::FilePath exec_path(command_line->GetProgram());
-  base::PathService::Get(base::FILE_EXE, &exec_path);
+  base::FilePath assets_path;
+  base::PathService::Get(base::DIR_ASSETS, &assets_path);
 
-  return exec_path.DirName().Append(FILE_PATH_LITERAL("resources"));
+  return assets_path.Append(FILE_PATH_LITERAL("resources"));
 #endif
 }
 
-}  // namespace
-
-NodeBindings::NodeBindings(BrowserEnvironment browser_env)
-    : browser_env_(browser_env) {
-  if (browser_env == BrowserEnvironment::kWorker) {
-    uv_loop_init(&worker_loop_);
-    uv_loop_ = &worker_loop_;
-  } else {
-    uv_loop_ = uv_default_loop();
-  }
+NodeBindings::NodeBindings(BrowserEnvironment browser_env, uv_loop_t* loop)
+    : browser_env_{browser_env},
+      uv_loop_{loop ? loop : &owned_loop_.emplace()} {
+  if (owned_loop_)
+    CHECK_EQ(0, uv_loop_init(uv_loop_));
 
   // Interrupt embed polling when a handle is started.
   uv_loop_configure(uv_loop_, UV_LOOP_INTERRUPT_ON_IO_CHANGE);
 }
 
 NodeBindings::~NodeBindings() {
-  // Quit the embed thread.
-  embed_closed_ = true;
-  uv_sem_post(&embed_sem_);
+  StopPolling();
 
+  if (embed_thread_prepared_) {
+    uv_sem_destroy(&embed_sem_);
+    dummy_uv_handle_.reset();
+  }
+
+  if (owned_loop_)
+    stop_and_close_uv_loop(uv_loop_);
+
+  if (initialized_node_per_process_)
+    TearDownOncePerProcess();
+}
+
+// static
+void NodeBindings::TearDownOncePerProcess() {
+  if (!g_is_initialized)
+    return;
+  g_is_initialized = false;
+  node::TearDownOncePerProcess();
+}
+
+void NodeBindings::StopPolling() {
+  if (!initialized_)
+    return;
+
+  // Tell the embed thread to quit.
+  embed_closed_ = true;
+
+  // The embed thread alternates between uv_sem_wait (waiting for UvRunOnce
+  // to finish) and PollEvents (waiting for I/O). Wake it from both.
+  uv_sem_post(&embed_sem_);
   WakeupEmbedThread();
 
-  // Wait for everything to be done.
+  // Wait for it to exit.
   uv_thread_join(&embed_thread_);
 
-  // Clear uv.
-  uv_sem_destroy(&embed_sem_);
-  dummy_uv_handle_.reset();
+  // Drain any leftover semaphore posts so the next embed thread starts
+  // in a clean lock-step state. A stale count can occur if UvRunOnce
+  // posted sem_post concurrently with our StopPolling sem_post — the
+  // embed thread consumed one to see embed_closed_ and exited, leaving
+  // the other unconsumed. Without draining, the next EmbedThreadRunner
+  // would fall through uv_sem_wait immediately, breaking the intended
+  // one-post-per-UvRunOnce protocol.
+  while (uv_sem_trywait(&embed_sem_) == 0) {
+  }
 
-  // Clean up worker loop
-  if (in_worker_loop())
-    stop_and_close_uv_loop(uv_loop_);
+  // Allow PrepareEmbedThread + StartPolling to restart.
+  embed_closed_ = false;
+  initialized_ = false;
 }
 
 void NodeBindings::RegisterBuiltinBindings() {
 #define V(modname) _register_##modname();
-  auto* command_line = base::CommandLine::ForCurrentProcess();
-  std::string process_type =
-      command_line->GetSwitchValueASCII(::switches::kProcessType);
-  if (process_type.empty()) {
+  if (IsBrowserProcess()) {
     ELECTRON_BROWSER_BINDINGS(V)
-#if BUILDFLAG(ENABLE_VIEWS_API)
-    ELECTRON_VIEWS_BINDINGS(V)
-#endif
-#if BUILDFLAG(ENABLE_DESKTOP_CAPTURER)
-    ELECTRON_DESKTOP_CAPTURER_BINDINGS(V)
-#endif
   }
   ELECTRON_COMMON_BINDINGS(V)
-  if (process_type == ::switches::kRendererProcess) {
+  if (IsRendererProcess()) {
     ELECTRON_RENDERER_BINDINGS(V)
   }
-  if (process_type == ::switches::kUtilityProcess) {
+  if (IsUtilityProcess()) {
     ELECTRON_UTILITY_BINDINGS(V)
   }
 #if DCHECK_IS_ON()
@@ -381,24 +617,46 @@ void NodeBindings::RegisterBuiltinBindings() {
 #undef V
 }
 
+// static
+node::node_module* NodeBindings::GetLinkedBinding(std::string_view name) {
+#define V(modname)      \
+  if (name == #modname) \
+    return get_linked_module_##modname();
+  if (IsBrowserProcess()) {
+    ELECTRON_BROWSER_BINDINGS(V)
+  }
+  ELECTRON_COMMON_BINDINGS(V)
+  if (IsRendererProcess()) {
+    ELECTRON_RENDERER_BINDINGS(V)
+  }
+  if (IsUtilityProcess()) {
+    ELECTRON_UTILITY_BINDINGS(V)
+  }
+#if DCHECK_IS_ON()
+  ELECTRON_TESTING_BINDINGS(V)
+#endif
+#undef V
+  return nullptr;
+}
+
 bool NodeBindings::IsInitialized() {
   return g_is_initialized;
 }
 
 // Initialize Node.js cli options to pass to Node.js
 // See https://nodejs.org/api/cli.html#cli_options
-void NodeBindings::SetNodeCliFlags() {
-  const std::unordered_set<base::StringPiece, base::StringPieceHash> allowed =
-      GetAllowedDebugOptions();
-
+std::vector<std::string> NodeBindings::ParseNodeCliFlags() {
   const auto argv = base::CommandLine::ForCurrentProcess()->argv();
   std::vector<std::string> args;
 
   // TODO(codebytere): We need to set the first entry in args to the
   // process name owing to src/node_options-inl.h#L286-L290 but this is
   // redundant and so should be refactored upstream.
-  args.reserve(argv.size() + 1);
+  args.reserve(argv.size() + 2);
   args.emplace_back("electron");
+  // Blink owns this V8 flag in renderers and flips it before Node runs; Node
+  // enabling it afterwards would write a frozen flag.
+  args.emplace_back("--no-js-source-phase-imports");
 
   for (const auto& arg : argv) {
 #if BUILDFLAG(IS_WIN)
@@ -406,33 +664,28 @@ void NodeBindings::SetNodeCliFlags() {
 #else
     const auto& option = arg;
 #endif
-    const auto stripped = base::StringPiece(option).substr(0, option.find('='));
-
-    // Only allow in no-op (--) option or DebugOptions
-    if (allowed.count(stripped) != 0 || stripped == "--")
+    const auto stripped = std::string_view{option}.substr(0, option.find('='));
+    // Only allow no-op or a small set of debug/trace related options.
+    if (IsAllowedOption(stripped) || stripped == "--")
       args.push_back(option);
   }
 
-  // We need to disable Node.js' fetch implementation to prevent
-  // conflict with Blink's in renderer and worker processes.
+  // Node's setupEventsource() in lib/internal/process/pre_execution.js
+  // deletes globalThis.EventSource when --experimental-eventsource is not
+  // set, and unlike its sibling setup functions it does not check
+  // noBrowserGlobals. Pass the flag so Blink's EventSource is left alone;
+  // Node's own undici EventSource is never installed under
+  // kNoBrowserGlobals so there is no conflict.
   if (browser_env_ == BrowserEnvironment::kRenderer ||
       browser_env_ == BrowserEnvironment::kWorker) {
-    args.push_back("--no-experimental-fetch");
+    args.push_back("--experimental-eventsource");
   }
 
-  std::vector<std::string> errors;
-  const int exit_code = ProcessGlobalArgs(&args, nullptr, &errors,
-                                          node::kDisallowedInEnvironment);
-
-  const std::string err_str = "Error parsing Node.js cli flags ";
-  if (exit_code != 0) {
-    LOG(ERROR) << err_str;
-  } else if (!errors.empty()) {
-    LOG(ERROR) << err_str << base::JoinString(errors, " ");
-  }
+  return args;
 }
 
-void NodeBindings::Initialize(v8::Local<v8::Context> context) {
+void NodeBindings::Initialize(v8::Isolate* const isolate,
+                              v8::Local<v8::Context> context) {
   TRACE_EVENT0("electron", "NodeBindings::Initialize");
   // Open node's error reporting system for browser process.
 
@@ -445,145 +698,75 @@ void NodeBindings::Initialize(v8::Local<v8::Context> context) {
   // Explicitly register electron's builtin bindings.
   RegisterBuiltinBindings();
 
-  // Parse and set Node.js cli flags.
-  SetNodeCliFlags();
+  // Seed every BuiltinLoader created from here on (the Environment's, and the
+  // one node uses for the per-context scripts) with this process's build-time
+  // code cache, so the bootstrap inside CreateEnvironment consumes it rather
+  // than compiling ~100 builtins from source. JavascriptEnvironment already
+  // did this in processes that have one; renderers get it here.
+  electron::util::InstallProcessCodeCache();
 
   auto env = base::Environment::Create();
   SetNodeOptions(env.get());
 
-  std::vector<std::string> argv = {"electron"};
-  std::vector<std::string> exec_argv;
-  std::vector<std::string> errors;
-  uint64_t process_flags = node::ProcessFlags::kNoFlags;
+  // Parse and set Node.js cli flags.
+  std::vector<std::string> args = ParseNodeCliFlags();
+
+  // V8::EnableWebAssemblyTrapHandler can be called only once or it will
+  // hard crash. We need to prevent Node.js calling it in the event it has
+  // already been called.
+  node::per_process::cli_options->disable_wasm_trap_handler = true;
+
+  uint64_t process_flags =
+      node::ProcessInitializationFlags::kNoInitializeCppgc |
+      node::ProcessInitializationFlags::kNoInitializeV8 |
+      node::ProcessInitializationFlags::kNoInitializeNodeV8Platform;
+
   // We do not want the child processes spawned from the utility process
   // to inherit the custom stdio handles created for the parent.
   if (browser_env_ != BrowserEnvironment::kUtility)
-    process_flags |= node::ProcessFlags::kEnableStdioInheritance;
+    process_flags |= node::ProcessInitializationFlags::kEnableStdioInheritance;
+
+  if (browser_env_ == BrowserEnvironment::kRenderer)
+    process_flags |= node::ProcessInitializationFlags::kNoDefaultSignalHandling;
+
   if (!fuses::IsNodeOptionsEnabled())
-    process_flags |= node::ProcessFlags::kDisableNodeOptionsEnv;
-
-  int exit_code = node::InitializeNodeWithArgs(
-      &argv, &exec_argv, &errors,
-      static_cast<node::ProcessFlags::Flags>(process_flags));
-
-  for (const std::string& error : errors)
-    fprintf(stderr, "%s: %s\n", argv[0].c_str(), error.c_str());
-
-  if (exit_code != 0)
-    exit(exit_code);
+    process_flags |= node::ProcessInitializationFlags::kDisableNodeOptionsEnv;
 
 #if BUILDFLAG(IS_WIN)
-  // uv_init overrides error mode to suppress the default crash dialog, bring
-  // it back if user wants to show it.
-  if (browser_env_ == BrowserEnvironment::kBrowser ||
-      env->HasVar("ELECTRON_DEFAULT_ERROR_MODE"))
-    SetErrorMode(GetErrorMode() & ~SEM_NOGPFAULTERRORBOX);
+  // Node.js aborts when it cannot replace missing stdio handles with NUL.
+  if (!platform_util::IsNulDeviceEnabled())
+    process_flags |= node::ProcessInitializationFlags::kNoStdioInitialization;
 #endif
 
-  gin_helper::internal::Event::GetConstructor(context);
+  std::shared_ptr<node::InitializationResult> result =
+      node::InitializeOncePerProcess(
+          args,
+          static_cast<node::ProcessInitializationFlags::Flags>(process_flags));
+
+  for (const std::string& error : result->errors())
+    std::cerr << args[0] << ": " << error << '\n';
+
+  if (result->early_return() != 0)
+    exit(result->exit_code());
+
+#if BUILDFLAG(IS_WIN)
+  // libuv sets SEM_NOGPFAULTERRORBOX, which stops Windows Error Reporting
+  // from handling crashes that bypass crashpad's in-process handler (see
+  // electron_wer.dll). Clear it in every process type, as Chromium does.
+  SetErrorMode(GetErrorMode() & ~SEM_NOGPFAULTERRORBOX);
+#endif
 
   g_is_initialized = true;
+  initialized_node_per_process_ = true;
 }
 
-node::Environment* NodeBindings::CreateEnvironment(
-    v8::Handle<v8::Context> context,
-    node::MultiIsolatePlatform* platform,
-    std::vector<std::string> args,
-    std::vector<std::string> exec_args) {
-  // Feed node the path to initialization script.
-  std::string process_type;
-  switch (browser_env_) {
-    case BrowserEnvironment::kBrowser:
-      process_type = "browser";
-      break;
-    case BrowserEnvironment::kRenderer:
-      process_type = "renderer";
-      break;
-    case BrowserEnvironment::kWorker:
-      process_type = "worker";
-      break;
-    case BrowserEnvironment::kUtility:
-      process_type = "utility";
-      break;
-  }
-
-  v8::Isolate* isolate = context->GetIsolate();
-  gin_helper::Dictionary global(isolate, context->Global());
-
-  if (browser_env_ == BrowserEnvironment::kBrowser) {
-    const std::vector<std::string> search_paths = {"app.asar", "app",
-                                                   "default_app.asar"};
-    const std::vector<std::string> app_asar_search_paths = {"app.asar"};
-    context->Global()->SetPrivate(
-        context,
-        v8::Private::ForApi(
-            isolate,
-            gin::ConvertToV8(isolate, "appSearchPaths").As<v8::String>()),
-        gin::ConvertToV8(isolate,
-                         electron::fuses::IsOnlyLoadAppFromAsarEnabled()
-                             ? app_asar_search_paths
-                             : search_paths));
-  }
-
-  base::FilePath resources_path = GetResourcesPath();
-  std::string init_script = "electron/js2c/" + process_type + "_init";
-
-  args.insert(args.begin() + 1, init_script);
-
-  if (!isolate_data_)
-    isolate_data_ = node::CreateIsolateData(isolate, uv_loop_, platform);
-
-  node::Environment* env;
-  uint64_t flags = node::EnvironmentFlags::kDefaultFlags |
-                   node::EnvironmentFlags::kHideConsoleWindows |
-                   node::EnvironmentFlags::kNoGlobalSearchPaths;
-
-  if (browser_env_ == BrowserEnvironment::kRenderer ||
-      browser_env_ == BrowserEnvironment::kWorker) {
-    // Only one ESM loader can be registered per isolate -
-    // in renderer processes this should be blink. We need to tell Node.js
-    // not to register its handler (overriding blinks) in non-browser processes.
-    // We also avoid overriding globals like setImmediate, clearImmediate
-    // queueMicrotask etc during the bootstrap phase of Node.js
-    // for processes that already have these defined by DOM.
-    // Check //third_party/electron_node/lib/internal/bootstrap/node.js
-    // for the list of overrides on globalThis.
-    flags |= node::EnvironmentFlags::kNoRegisterESMLoader |
-             node::EnvironmentFlags::kNoBrowserGlobals |
-             node::EnvironmentFlags::kNoCreateInspector;
-  }
-
-  if (!electron::fuses::IsNodeCliInspectEnabled()) {
-    // If --inspect and friends are disabled we also shouldn't listen for
-    // SIGUSR1
-    flags |= node::EnvironmentFlags::kNoStartDebugSignalHandler;
-  }
-
-  {
-    v8::TryCatch try_catch(isolate);
-    env = node::CreateEnvironment(
-        isolate_data_, context, args, exec_args,
-        static_cast<node::EnvironmentFlags::Flags>(flags));
-
-    if (try_catch.HasCaught()) {
-      std::string err_msg =
-          "Failed to initialize node environment in process: " + process_type;
-      v8::Local<v8::Message> message = try_catch.Message();
-      std::string msg;
-      if (!message.IsEmpty() &&
-          gin::ConvertFromV8(isolate, message->Get(), &msg))
-        err_msg += " , with error: " + msg;
-      LOG(ERROR) << err_msg;
-    }
-  }
-
-  DCHECK(env);
-
+void NodeBindings::SetUpIsolate(v8::Isolate* const isolate) {
   node::IsolateSettings is;
 
   // Use a custom fatal error callback to allow us to add
   // crash message and location to CrashReports.
   is.fatal_error_callback = V8FatalErrorCallback;
+  is.oom_error_callback = V8OOMErrorCallback;
 
   // We don't want to abort either in the renderer or browser processes.
   // We already listen for uncaught exceptions and handle them there.
@@ -599,6 +782,8 @@ node::Environment* NodeBindings::CreateEnvironment(
   // Use a custom callback here to allow us to leverage Blink's logic in the
   // renderer process.
   is.allow_wasm_code_generation_callback = AllowWasmCodeGenerationCallback;
+  is.flags |= node::IsolateSettingsFlags::
+      ALLOW_MODIFY_CODE_GENERATION_FROM_STRINGS_CALLBACK;
   is.modify_code_generation_from_strings_callback =
       ModifyCodeGenerationFromStrings;
 
@@ -613,17 +798,14 @@ node::Environment* NodeBindings::CreateEnvironment(
     // could be either kExplicit or kScoped depending on whether we're executing
     // from within a Node.js or a Blink entrypoint. Instead, the policy is
     // toggled to kExplicit when entering Node.js through UvRunOnce.
-    is.policy = context->GetIsolate()->GetMicrotasksPolicy();
+    is.policy = isolate->GetMicrotasksPolicy();
 
     // We do not want to use Node.js' message listener as it interferes with
-    // Blink's.
+    // Blink's. Instead we add our own to ensure that the async hook stack is
+    // properly cleared when errors are thrown.
     is.flags &= ~node::IsolateSettingsFlags::MESSAGE_LISTENER_WITH_ERROR_LEVEL;
-
-    // Isolate message listeners are additive (you can add multiple), so instead
-    // we add an extra one here to ensure that the async hook stack is properly
-    // cleared when errors are thrown.
-    context->GetIsolate()->AddMessageListenerWithErrorLevel(
-        ErrorMessageListener, v8::Isolate::kMessageError);
+    isolate->AddMessageListenerWithErrorLevel(ErrorMessageListener,
+                                              v8::Isolate::kMessageError);
 
     // We do not want to use the promise rejection callback that Node.js uses,
     // because it does not send PromiseRejectionEvents to the global script
@@ -639,36 +821,237 @@ node::Environment* NodeBindings::CreateEnvironment(
         node::IsolateSettingsFlags::SHOULD_NOT_SET_PREPARE_STACK_TRACE_CALLBACK;
   }
 
-  node::SetIsolateUpForNode(context->GetIsolate(), is);
+  node::SetIsolateUpForNode(isolate, is);
+  isolate->SetHostImportModuleDynamicallyCallback(HostImportModuleDynamically);
+  isolate->SetHostImportModuleWithPhaseDynamicallyCallback(
+      HostImportModuleWithPhaseDynamically);
+  isolate->SetHostInitializeImportMetaObjectCallback(
+      HostInitializeImportMetaObject);
+}
 
-  gin_helper::Dictionary process(context->GetIsolate(), env->process_object());
+std::shared_ptr<node::Environment> NodeBindings::CreateEnvironment(
+    v8::Isolate* isolate,
+    v8::Local<v8::Context> context,
+    node::MultiIsolatePlatform* platform,
+    size_t max_young_generation_size,
+    std::vector<std::string> args,
+    std::vector<std::string> exec_args,
+    std::optional<base::RepeatingCallback<void()>> on_app_code_ready) {
+  const std::string process_type(ProcessType());
+
+  // Electron: when consuming the embedded Node startup snapshot, the caller
+  // passed an empty context -- the main context is materialized by
+  // node::CreateEnvironment from the snapshot and read back here.
+  const bool from_snapshot = context.IsEmpty();
+
+  // Context-dependent setup that must wait until the snapshot main context
+  // exists when from_snapshot is true.
+  std::unique_ptr<gin::ContextHolder> gin_context_holder;
+  auto set_up_context = [&](v8::Local<v8::Context> ctx,
+                            node::IsolateData* iso_data) {
+    ctx->SetAlignedPointerInEmbedderData(kElectronContextEmbedderDataIndex,
+                                         static_cast<void*>(iso_data),
+                                         v8::kEmbedderDataTypeTagDefault);
+    if (!gin::PerContextData::From(ctx)) {
+      gin_context_holder = std::make_unique<gin::ContextHolder>(isolate);
+      gin_context_holder->SetContext(ctx);
+    }
+  };
+
+  // The Node startup snapshot's per-isolate data (templates, primordials)
+  // is fed to CreateIsolateData so the bootstrap is deserialized.
+  auto snapshot_wrapper =
+      from_snapshot ? node::EmbedderSnapshotData::BuiltinSnapshotData()
+                    : node::EmbedderSnapshotData::Pointer{};
+  auto* isolate_data =
+      node::CreateIsolateData(isolate, uv_loop_, platform,
+                              /*allocator=*/nullptr, snapshot_wrapper.get());
+  isolate_data->max_young_gen_size = max_young_generation_size;
+
+  if (!from_snapshot) {
+    set_up_context(context, isolate_data);
+  }
+
+  uint64_t env_flags = node::EnvironmentFlags::kDefaultFlags |
+                       node::EnvironmentFlags::kHideConsoleWindows |
+                       node::EnvironmentFlags::kNoGlobalSearchPaths |
+                       node::EnvironmentFlags::kNoRegisterESMLoader;
+
+  if (browser_env_ == BrowserEnvironment::kRenderer ||
+      browser_env_ == BrowserEnvironment::kWorker) {
+    // Only one ESM loader can be registered per isolate -
+    // in renderer processes this should be blink. We need to tell Node.js
+    // not to register its handler (overriding blinks) in non-browser processes.
+    // We also avoid overriding globals like setImmediate, clearImmediate
+    // queueMicrotask, fetch, Request, Response etc during the bootstrap phase
+    // of Node.js for processes that already have these defined by DOM.
+    // Check //third_party/electron_node/lib/internal/bootstrap/node.js and
+    // //third_party/electron_node/lib/internal/bootstrap/web/* for the list
+    // of overrides on globalThis.
+    env_flags |= node::EnvironmentFlags::kNoBrowserGlobals |
+                 node::EnvironmentFlags::kNoCreateInspector;
+  }
+
+  if (!electron::fuses::IsNodeCliInspectEnabled()) {
+    // If --inspect and friends are disabled we also shouldn't listen for
+    // SIGUSR1
+    env_flags |= node::EnvironmentFlags::kNoStartDebugSignalHandler;
+  }
+
+  node::Environment* env = electron::util::CreateEnvironment(
+      isolate, static_cast<node::IsolateData*>(isolate_data), context, args,
+      exec_args, static_cast<node::EnvironmentFlags::Flags>(env_flags),
+      process_type);
+  DCHECK(env);
+
+  // When consuming the snapshot, the main context was deserialized inside
+  // node::CreateEnvironment and was not entered yet -- enter it for the
+  // rest of this function (process-object setup needs a current context).
+  // The persistent context Enter() happens in electron_browser_main_parts.cc
+  // after this returns.
+  std::optional<v8::Context::Scope> snapshot_context_scope;
+  if (from_snapshot) {
+    context = env->context();
+    DCHECK(!context.IsEmpty());
+    snapshot_context_scope.emplace(context);
+    set_up_context(context, isolate_data);
+  }
+
+  // The Event ObjectTemplate (which carries preventDefault/defaultPrevented)
+  // is only populated by GetConstructor. Warm it after the context has Gin
+  // per-context data, including when the context came from a Node snapshot.
+  gin_helper::internal::Event::GetConstructor(
+      isolate, context, &gin_helper::internal::Event::kWrapperInfo);
+
+  gin_helper::Dictionary process(isolate, env->process_object());
   process.SetReadOnly("type", process_type);
-  process.Set("resourcesPath", resources_path);
-  // The path to helper app.
-  base::FilePath helper_exec_path;
-  base::PathService::Get(content::CHILD_PROCESS_EXE, &helper_exec_path);
-  process.Set("helperExecPath", helper_exec_path);
 
-  return env;
+  if (browser_env_ == BrowserEnvironment::kBrowser ||
+      browser_env_ == BrowserEnvironment::kRenderer) {
+    if (on_app_code_ready) {
+      process.SetMethod("appCodeLoaded", *on_app_code_ready);
+    } else {
+      process.SetMethod("appCodeLoaded",
+                        base::BindRepeating(&NodeBindings::SetAppCodeLoaded,
+                                            base::Unretained(this)));
+    }
+  }
+
+  auto env_deleter = [isolate, isolate_data,
+                      gin_context_holder = std::move(gin_context_holder),
+                      context = v8::Global<v8::Context>{isolate, context}](
+                         node::Environment* nenv) mutable {
+    // When `isolate_data` was created above, a pointer to it was kept
+    // in context's embedder_data[kElectronContextEmbedderDataIndex].
+    // Since we're about to free `isolate_data`, clear that entry
+    v8::HandleScope handle_scope{isolate};
+    gin_context_holder.reset();
+    context.Get(isolate)->SetAlignedPointerInEmbedderData(
+        kElectronContextEmbedderDataIndex, nullptr,
+        v8::kEmbedderDataTypeTagDefault);
+    context.Reset();
+
+    node::FreeEnvironment(nenv);
+    node::FreeIsolateData(isolate_data);
+  };
+
+  return {env, std::move(env_deleter)};
 }
 
-node::Environment* NodeBindings::CreateEnvironment(
-    v8::Handle<v8::Context> context,
-    node::MultiIsolatePlatform* platform) {
-#if BUILDFLAG(IS_WIN)
-  auto& electron_args = ElectronCommandLine::argv();
-  std::vector<std::string> args(electron_args.size());
-  std::transform(electron_args.cbegin(), electron_args.cend(), args.begin(),
-                 [](auto& a) { return base::WideToUTF8(a); });
-#else
-  auto args = ElectronCommandLine::argv();
-#endif
-  return CreateEnvironment(context, platform, args, {});
+std::shared_ptr<node::Environment> NodeBindings::CreateEnvironment(
+    v8::Isolate* const isolate,
+    v8::Local<v8::Context> context,
+    node::MultiIsolatePlatform* platform,
+    size_t max_young_generation_size,
+    std::optional<base::RepeatingCallback<void()>> on_app_code_ready) {
+  return CreateEnvironment(
+      isolate, context, platform, max_young_generation_size,
+      ElectronCommandLine::AsUtf8(), {}, on_app_code_ready);
 }
+
+namespace {
+
+// Node's internal/options caches the CLI option values on first use; drop that
+// cache through `require` (Node's internal require) so later reads are fresh.
+void RefreshCachedNodeOptions(v8::Local<v8::Context> context,
+                              v8::Local<v8::Function> require) {
+  v8::Isolate* const isolate = v8::Isolate::GetCurrent();
+  v8::Local<v8::Value> id = gin::StringToV8(isolate, "internal/options");
+  v8::Local<v8::Value> options;
+  v8::Local<v8::Value> refresh;
+  if (require->Call(context, v8::Null(isolate), 1, &id).ToLocal(&options) &&
+      options->IsObject() &&
+      options.As<v8::Object>()
+          ->Get(context, gin::StringToV8(isolate, "refreshOptions"))
+          .ToLocal(&refresh) &&
+      refresh->IsFunction()) {
+    std::ignore =
+        refresh.As<v8::Function>()->Call(context, options, 0, nullptr);
+  }
+}
+
+}  // namespace
 
 void NodeBindings::LoadEnvironment(node::Environment* env) {
-  node::LoadEnvironment(env, node::StartExecutionCallback{});
+  // Re-assert Electron's build-time cache for the internal/electron/js2c/*
+  // framework bundles (browser_init etc.). Every BuiltinLoader already starts
+  // from it (InstallProcessCodeCache), but when booting from the Node startup
+  // snapshot Environment's constructor then merges the caches node_mksnapshot
+  // embedded for the same bundle ids over it; RefreshCodeCache uses
+  // insert_or_assign, so this puts the build-time (eagerly compiled) entries
+  // back on top while the node-internal entries are kept. A no-op merge when
+  // bootstrapped from scratch.
+  electron::util::FeedEnvironmentCodeCache(env);
+
+  // The init bundle is this process's entry script: like Node's own runMain it
+  // runs without a v8::TryCatch, so an exception thrown while it loads the app
+  // reaches process.on('uncaughtException') through V8's message listener.
+  //
+  // Node pauses for --inspect-brk before an embedder entry point runs; mask it
+  // so the pause stays on the app's own entry rather than the first line of
+  // the init bundle, and refresh the options JS cached meanwhile.
+  node::DebugOptions* const debug_options = env->options()->get_debug_options();
+  const bool break_first_line = debug_options->break_first_line;
+  debug_options->break_first_line = false;
+  const std::string bundle_id =
+      "internal/electron/js2c/" + std::string(ProcessType()) + "_init";
+  node::LoadEnvironment(
+      env,
+      [&](const node::StartExecutionCallbackInfo& info) {
+        v8::Isolate* const isolate = env->isolate();
+        v8::Local<v8::Context> context = env->context();
+        v8::Local<v8::Function> require =
+            env->principal_realm()->builtin_module_require();
+        if (break_first_line) {
+          debug_options->break_first_line = true;
+          RefreshCachedNodeOptions(context, require);
+        }
+        v8::LocalVector<v8::String> params =
+            js2c::MakeBundleParams(isolate, js2c::kInitBundleParams);
+        v8::Local<v8::Value> args[] = {info.process_object, require};
+        v8::Local<v8::Function> bundle;
+        if (!electron::util::CompileBundle(context, bundle_id.c_str(), &params)
+                 .ToLocal(&bundle)) {
+          return v8::MaybeLocal<v8::Value>();
+        }
+        return bundle->Call(context, v8::Null(isolate), std::size(args), args);
+      },
+      &OnNodePreload);
+  debug_options->break_first_line = break_first_line;
   gin_helper::EmitEvent(env->isolate(), env->process_object(), "loaded");
+}
+
+std::string_view NodeBindings::ProcessType() const {
+  switch (browser_env_) {
+    case BrowserEnvironment::kBrowser:
+      return "browser";
+    case BrowserEnvironment::kRenderer:
+      return "renderer";
+    case BrowserEnvironment::kWorker:
+      return "worker";
+    case BrowserEnvironment::kUtility:
+      return "utility";
+  }
 }
 
 void NodeBindings::PrepareEmbedThread() {
@@ -681,12 +1064,21 @@ void NodeBindings::PrepareEmbedThread() {
   if (initialized_)
     return;
 
-  // Add dummy handle for libuv, otherwise libuv would quit when there is
-  // nothing to do.
-  uv_async_init(uv_loop_, dummy_uv_handle_.get(), nullptr);
+  // The async handle and semaphore live for the lifetime of this
+  // NodeBindings instance (destroyed in ~NodeBindings), but the embed
+  // thread itself may be stopped and restarted via StopPolling /
+  // PrepareEmbedThread for pooled worklet contexts. Only init the
+  // handles once.
+  if (!embed_thread_prepared_) {
+    // Add dummy handle for libuv, otherwise libuv would quit when there is
+    // nothing to do.
+    uv_async_init(uv_loop_, dummy_uv_handle_.get(), nullptr);
 
-  // Start worker that will interrupt main loop when having uv events.
-  uv_sem_init(&embed_sem_, 0);
+    // Start worker that will interrupt main loop when having uv events.
+    uv_sem_init(&embed_sem_, 0);
+    embed_thread_prepared_ = true;
+  }
+
   uv_thread_create(&embed_thread_, EmbedThreadRunner, this);
 }
 
@@ -706,6 +1098,37 @@ void NodeBindings::StartPolling() {
   UvRunOnce();
 }
 
+void NodeBindings::SetAppCodeLoaded() {
+  app_code_loaded_ = true;
+}
+
+void NodeBindings::JoinAppCode() {
+  // We can only "join" app code to the main thread in the browser process
+  if (browser_env_ != BrowserEnvironment::kBrowser) {
+    return;
+  }
+
+  auto* browser = Browser::Get();
+  node::Environment* env = uv_env();
+
+  if (!env)
+    return;
+
+  v8::HandleScope handle_scope(env->isolate());
+  // Enter node context while dealing with uv events.
+  v8::Context::Scope context_scope(env->context());
+
+  // Pump the event loop until we get the signal that the app code has finished
+  // loading
+  while (!app_code_loaded_ && !browser->is_shutting_down()) {
+    int r = uv_run(uv_loop_, UV_RUN_ONCE);
+    if (r == 0) {
+      base::RunLoop().QuitWhenIdle();  // Quit from uv.
+      break;
+    }
+  }
+}
+
 void NodeBindings::UvRunOnce() {
   node::Environment* env = uv_env();
 
@@ -720,28 +1143,25 @@ void NodeBindings::UvRunOnce() {
   // Enter node context while dealing with uv events.
   v8::Context::Scope context_scope(env->context());
 
-  // Node.js expects `kExplicit` microtasks policy and will run microtasks
-  // checkpoints after every call into JavaScript. Since we use a different
-  // policy in the renderer - switch to `kExplicit` and then drop back to the
-  // previous policy value.
-  v8::MicrotaskQueue* microtask_queue = env->context()->GetMicrotaskQueue();
-  auto old_policy = microtask_queue->microtasks_policy();
-  DCHECK_EQ(microtask_queue->GetMicrotasksScopeDepth(), 0);
-  microtask_queue->set_microtasks_policy(v8::MicrotasksPolicy::kExplicit);
+  {
+    util::ExplicitMicrotasksScope microtasks_scope(
+        env->context()->GetMicrotaskQueue());
 
-  if (browser_env_ != BrowserEnvironment::kBrowser)
-    TRACE_EVENT_BEGIN0("devtools.timeline", "FunctionCall");
+    if (browser_env_ != BrowserEnvironment::kBrowser)
+      TRACE_EVENT_BEGIN0("devtools.timeline", "FunctionCall");
 
-  // Deal with uv events.
-  int r = uv_run(uv_loop_, UV_RUN_NOWAIT);
+    // The embed thread is parked on |embed_sem_| until we post it below and
+    // re-reads uv_backend_timeout() before polling, so skip the interrupts.
+    uv_loop_interrupt_suspend(uv_loop_);
+    int r = uv_run(uv_loop_, UV_RUN_NOWAIT);
+    uv_loop_interrupt_resume(uv_loop_);
 
-  if (browser_env_ != BrowserEnvironment::kBrowser)
-    TRACE_EVENT_END0("devtools.timeline", "FunctionCall");
+    if (browser_env_ != BrowserEnvironment::kBrowser)
+      TRACE_EVENT_END0("devtools.timeline", "FunctionCall");
 
-  microtask_queue->set_microtasks_policy(old_policy);
-
-  if (r == 0)
-    base::RunLoop().QuitWhenIdle();  // Quit from uv.
+    if (r == 0)
+      base::RunLoop().QuitWhenIdle();  // Quit from uv.
+  }
 
   // Tell the worker thread to continue polling.
   uv_sem_post(&embed_sem_);
@@ -779,6 +1199,40 @@ void NodeBindings::EmbedThreadRunner(void* arg) {
     // Deal with event in main thread.
     self->WakeupMainThread();
   }
+}
+
+void OnNodePreload(node::Environment* env,
+                   v8::Local<v8::Value> process,
+                   v8::Local<v8::Value> require) {
+  // Node also runs the embedder preload when it bootstraps a ShadowRealm; the
+  // init bundle (asar, child_process hooks) belongs in the principal realm.
+  if (node::Realm::GetCurrent(env->isolate()->GetCurrentContext()) !=
+      env->principal_realm()) {
+    return;
+  }
+  // Set custom process properties.
+  gin_helper::Dictionary dict(env->isolate(), process.As<v8::Object>());
+  dict.SetReadOnly("resourcesPath", GetResourcesPath());
+  base::FilePath helper_exec_path;  // path to the helper app.
+  base::PathService::Get(content::CHILD_PROCESS_EXE, &helper_exec_path);
+  dict.SetReadOnly("helperExecPath", helper_exec_path);
+  gin_helper::Dictionary versions;
+  if (dict.Get("versions", &versions)) {
+    versions.SetReadOnly(ELECTRON_PROJECT_NAME, ELECTRON_VERSION_STRING);
+    versions.SetReadOnly("chrome", CHROME_VERSION_STRING);
+#if BUILDFLAG(HAS_VENDOR_VERSION)
+    versions.SetReadOnly(BUILDFLAG(VENDOR_VERSION_NAME),
+                         BUILDFLAG(VENDOR_VERSION_VALUE));
+#endif
+  }
+
+  // Execute lib/node/init.ts.
+  v8::LocalVector<v8::String> bundle_params =
+      js2c::MakeBundleParams(env->isolate(), js2c::kInitBundleParams);
+  v8::LocalVector<v8::Value> bundle_args(env->isolate(), {process, require});
+  electron::util::CompileAndCall(env->isolate(), env->context(),
+                                 js2c::kNodeInitId, &bundle_params,
+                                 &bundle_args);
 }
 
 }  // namespace electron

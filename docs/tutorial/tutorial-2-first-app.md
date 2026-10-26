@@ -1,6 +1,6 @@
 ---
 title: 'Building your First App'
-description: 'This guide will step you through the process of creating a barebones Hello World app in Electron, similar to electron/electron-quick-start.'
+description: 'This guide will step you through the process of creating a barebones Hello World app in Electron.'
 slug: tutorial-first-app
 hide_title: false
 ---
@@ -55,14 +55,27 @@ There are a few rules to follow for the purposes of this tutorial:
 - _author_, _license_, and _description_ can be any value, but will be necessary for
   [packaging][packaging] later on.
 
+:::caution Install dependencies with a regular `node_modules` folder
+
+Electron's packaging toolchain requires the `node_modules` folder to be physically on disk in the
+way that npm installs Node dependencies. By default, [Yarn Berry](https://yarnpkg.com/) and
+[pnpm](http://pnpm.io/) both use alternative installation strategies.
+
+Therefore, you must set [`nodeLinker: node-modules`](https://yarnpkg.com/configuration/yarnrc#nodeLinker)
+in Yarn or [`nodeLinker: hoisted`](https://pnpm.io/settings#nodelinker) in pnpm if you are using
+those package managers.
+
+:::
+
 Then, install Electron into your app's **devDependencies**, which is the list of external
 development-only package dependencies not required in production.
 
-:::info Why is Electron a devDependency?
+:::info Why is Electron a dev dependency?
 
-This may seem counter-intuitive since your production code is running Electron APIs.
-However, packaged apps will come bundled with the Electron binary, eliminating the need to specify
-it as a production dependency.
+This may seem counter-intuitive since your production code is running Electron APIs. Under the hood,
+Electron's JavaScript API binds to a binary that contains its implementations. The packaging step for
+Electron handles the bundling of this binary, eliminating the need to specify it as a production
+dependency.
 
 :::
 
@@ -125,7 +138,7 @@ main process entry point is configured correctly. Create a `main.js` file in the
 of your project with a single line of code:
 
 ```js title='main.js'
-console.log(`Hello from Electron 👋`)
+console.log('Hello from Electron 👋')
 ```
 
 Because Electron's main process is a Node.js runtime, you can execute arbitrary Node.js code
@@ -134,7 +147,7 @@ add `electron .` to the `start` command in the [`scripts`][package-scripts]
 field of your package.json. This command will tell the Electron executable to look for the main
 script in the current directory and run it in dev mode.
 
-```json {8-10} title='package.json'
+```json {7} title='package.json'
 {
   "name": "my-electron-app",
   "version": "1.0.0",
@@ -170,16 +183,16 @@ by creating a barebones web page in an `index.html` file in the root folder of y
 <!DOCTYPE html>
 <html>
   <head>
-    <meta charset="UTF-8" />
+    <meta charset="UTF-8">
     <!-- https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP -->
     <meta
       http-equiv="Content-Security-Policy"
       content="default-src 'self'; script-src 'self'"
-    />
+    >
     <meta
       http-equiv="X-Content-Security-Policy"
       content="default-src 'self'; script-src 'self'"
-    />
+    >
     <title>Hello from Electron renderer!</title>
   </head>
   <body>
@@ -199,7 +212,7 @@ const { app, BrowserWindow } = require('electron')
 const createWindow = () => {
   const win = new BrowserWindow({
     width: 800,
-    height: 600,
+    height: 600
   })
 
   win.loadFile('index.html')
@@ -222,20 +235,34 @@ with CommonJS module syntax:
 - [app][app], which controls your application's event lifecycle.
 - [BrowserWindow][browser-window], which creates and manages app windows.
 
-:::info Capitalization conventions
+<details>
+<summary>Module capitalization conventions</summary>
 
 You might have noticed the capitalization difference between the **a**pp
 and **B**rowser**W**indow modules. Electron follows typical JavaScript conventions here,
 where PascalCase modules are instantiable class constructors (e.g. BrowserWindow, Tray,
 Notification) whereas camelCase modules are not instantiable (e.g. app, ipcRenderer, webContents).
 
-:::
+</details>
 
-:::warning ES Modules in Electron
+<details>
+<summary>Typed import aliases</summary>
+
+For better type checking when writing TypeScript code, you can choose to import
+main process modules from `electron/main`.
+
+```js
+const { app, BrowserWindow } = require('electron/main')
+```
+
+For more information, see the [Process Model docs](../tutorial/process-model.md#process-specific-module-aliases-typescript).
+</details>
+
+:::info ES Modules in Electron
 
 [ECMAScript modules](https://nodejs.org/api/esm.html) (i.e. using `import` to load a module)
-are currently not directly supported in Electron. You can find more information about the
-state of ESM in Electron in [electron/electron#21457](https://github.com/electron/electron/issues/21457).
+are supported in Electron as of Electron 28. You can find more information about the
+state of ESM in Electron and how to use them in our app in [our ESM guide](../tutorial/esm.md).
 
 :::
 
@@ -247,7 +274,7 @@ The `createWindow()` function loads your web page into a new BrowserWindow insta
 const createWindow = () => {
   const win = new BrowserWindow({
     width: 800,
-    height: 600,
+    height: 600
   })
 
   win.loadFile('index.html')
@@ -256,7 +283,7 @@ const createWindow = () => {
 
 ### Calling your function when the app is ready
 
-```js title='main.js (Lines 12-14)'
+```js title='main.js (Lines 12-14)' @ts-type={createWindow:()=>void}
 app.whenReady().then(() => {
   createWindow()
 })
@@ -336,7 +363,7 @@ Because windows cannot be created before the `ready` event, you should only list
 `activate` events after your app is initialized. Do this by only listening for activate
 events inside your existing `whenReady()` callback.
 
-```js
+```js @ts-type={createWindow:()=>void}
 app.whenReady().then(() => {
   createWindow()
 

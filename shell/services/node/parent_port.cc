@@ -7,22 +7,38 @@
 #include <utility>
 
 #include "base/no_destructor.h"
+#include "gin/arguments.h"
 #include "gin/data_object_builder.h"
-#include "gin/handle.h"
+#include "gin/object_template_builder.h"
+#include "gin/per_isolate_data.h"
 #include "shell/browser/api/message_port.h"
+#include "shell/browser/javascript_environment.h"
 #include "shell/common/gin_helper/dictionary.h"
+#include "shell/common/gin_helper/error_thrower.h"
 #include "shell/common/gin_helper/event_emitter_caller.h"
+#include "shell/common/gin_helper/handle.h"
+#include "shell/common/gin_helper/wrappable_pointer_tags.h"
 #include "shell/common/node_includes.h"
-#include "shell/common/v8_value_serializer.h"
+#include "shell/common/v8_util.h"
 #include "third_party/blink/public/common/messaging/transferable_message_mojom_traits.h"
+#include "third_party/blink/public/mojom/blob/blob.mojom.h"
+#include "v8/include/cppgc/allocation.h"
+#include "v8/include/cppgc/persistent.h"
+#include "v8/include/v8-cppgc.h"
 
 namespace electron {
 
-gin::WrapperInfo ParentPort::kWrapperInfo = {gin::kEmbedderNativeGin};
+gin::WrapperInfo ParentPort::kWrapperInfo =
+    electron::MakeWrapperInfo(electron::kElectronParentPort);
 
 ParentPort* ParentPort::GetInstance() {
-  static base::NoDestructor<ParentPort> instance;
-  return instance.get();
+  static base::NoDestructor<cppgc::Persistent<ParentPort>> instance([] {
+    v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
+    return cppgc::Persistent<ParentPort>(
+        cppgc::MakeGarbageCollected<ParentPort>(
+            isolate->GetCppHeap()->GetAllocationHandle()));
+  }());
+  return instance->Get();
 }
 
 ParentPort::ParentPort() = default;
@@ -40,11 +56,20 @@ void ParentPort::Initialize(blink::MessagePortDescriptor port) {
       base::BindOnce(&ParentPort::Close, base::Unretained(this)));
 }
 
-void ParentPort::PostMessage(v8::Local<v8::Value> message_value) {
+void ParentPort::PostMessage(gin::Arguments* args) {
   if (!connector_closed_ && connector_ && connector_->is_valid()) {
-    v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
+    v8::Isolate* isolate = args->isolate();
+    // postMessage() with no argument posts undefined.
+    v8::Local<v8::Value> message_value = v8::Undefined(isolate);
+    args->GetNext(&message_value);
     blink::TransferableMessage transferable_message;
-    electron::SerializeV8Value(isolate, message_value, &transferable_message);
+
+    if (!electron::SerializeV8Value(isolate, message_value,
+                                    &transferable_message)) {
+      // SerializeV8Value sets an exception.
+      return;
+    }
+
     mojo::Message mojo_message =
         blink::mojom::TransferableMessage::WrapAsMessage(
             std::move(transferable_message));
@@ -82,8 +107,11 @@ bool ParentPort::Accept(mojo::Message* mojo_message) {
 
   v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
   v8::HandleScope handle_scope(isolate);
-  auto wrapped_ports =
-      MessagePort::EntanglePorts(isolate, std::move(message.ports));
+  v8::LocalVector<v8::Value> wrapped_ports(isolate);
+  if (!MessagePort::EntanglePorts(isolate, std::move(message.ports),
+                                  &wrapped_ports)) {
+    return false;
+  }
   v8::Local<v8::Value> message_value =
       electron::DeserializeV8Value(isolate, message);
   v8::Local<v8::Object> self;
@@ -98,21 +126,37 @@ bool ParentPort::Accept(mojo::Message* mojo_message) {
 }
 
 // static
-gin::Handle<ParentPort> ParentPort::Create(v8::Isolate* isolate) {
-  return gin::CreateHandle(isolate, ParentPort::GetInstance());
+ParentPort* ParentPort::Create(v8::Isolate* isolate) {
+  // The template is otherwise only made when the constructor is first used.
+  v8::Local<v8::Context> context = isolate->GetCurrentContext();
+  gin::PerIsolateData* data = gin::PerIsolateData::From(isolate);
+  if (data && data->GetObjectTemplate(&kWrapperInfo).IsEmpty())
+    GetConstructor(isolate, context, &kWrapperInfo);
+  return ParentPort::GetInstance();
 }
 
 // static
-gin::ObjectTemplateBuilder ParentPort::GetObjectTemplateBuilder(
-    v8::Isolate* isolate) {
-  return gin::Wrappable<ParentPort>::GetObjectTemplateBuilder(isolate)
-      .SetMethod("postMessage", &ParentPort::PostMessage)
-      .SetMethod("start", &ParentPort::Start)
-      .SetMethod("pause", &ParentPort::Pause);
+v8::Local<v8::Value> ParentPort::New(gin_helper::ErrorThrower thrower) {
+  thrower.ThrowTypeError("Illegal constructor");
+  return v8::Undefined(thrower.isolate());
 }
 
-const char* ParentPort::GetTypeName() {
-  return "ParentPort";
+// static
+void ParentPort::FillObjectTemplate(v8::Isolate* isolate,
+                                    v8::Local<v8::ObjectTemplate> templ) {
+  gin::ObjectTemplateBuilder(isolate, GetClassName(), templ)
+      .SetMethod("postMessage", &ParentPort::PostMessage)
+      .SetMethod("start", &ParentPort::Start)
+      .SetMethod("pause", &ParentPort::Pause)
+      .Build();
+}
+
+const gin::WrapperInfo* ParentPort::wrapper_info() const {
+  return &kWrapperInfo;
+}
+
+const char* ParentPort::GetHumanReadableName() const {
+  return "Electron / ParentPort";
 }
 
 }  // namespace electron
@@ -123,9 +167,9 @@ void Initialize(v8::Local<v8::Object> exports,
                 v8::Local<v8::Value> unused,
                 v8::Local<v8::Context> context,
                 void* priv) {
-  v8::Isolate* isolate = context->GetIsolate();
-  gin_helper::Dictionary dict(isolate, exports);
-  dict.SetMethod("createParentPort", &electron::ParentPort::Create);
+  v8::Isolate* const isolate = v8::Isolate::GetCurrent();
+  gin_helper::Dictionary dict{isolate, exports};
+  dict.SetMethod<&electron::ParentPort::Create>("createParentPort");
 }
 
 }  // namespace

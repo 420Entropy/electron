@@ -2,24 +2,30 @@ gclient_gn_args_from = 'src'
 
 vars = {
   'chromium_version':
-    '114.0.5710.0',
+    '158.0.8120.0',
   'node_version':
-    'v18.15.0',
+    'v24.22.1',
   'nan_version':
-    '16fa32231e2ccd89d2804b3f765319128b20c4ac',
+    'a1b4ba8f4bf2f46d2f270dbbb7bc0af482dc3e32',
   'squirrel.mac_version':
-    '0e5d146ba13101a1302d59ea6e6e0b3cace4ae38',
-
-  'pyyaml_version': '3.12',
+    '5c9e2133c09d6f8e2e3c5a45c5b0ffc00448c58a',
+  'reactiveobjc_version':
+    '74ab5baccc6f7202c8ac69a8d1e152c29dc1ea76',
+  'mantle_version':
+    '2a8e2123a3931038179ee06105c9e6ec336b12ea',
+  'sparkle_version':
+    '79bc9e872948e47877e76f194cb0c8e0412b0b90',
 
   'chromium_git': 'https://chromium.googlesource.com',
   'electron_git': 'https://github.com/electron',
   'nodejs_git': 'https://github.com/nodejs',
-  'yaml_git': 'https://github.com/yaml',
   'squirrel_git': 'https://github.com/Squirrel',
-
-  # KEEP IN SYNC WITH utils.js FILE
-  'yarn_version': '1.15.2',
+  'reactiveobjc_git': 'https://github.com/ReactiveCocoa',
+  'mantle_git': 'https://github.com/Mantle',
+  'sparkle_git': 'https://github.com/sparkle-project',
+  
+  # The path of the sysroots.json file.
+  'sysroots_json_path': 'electron/script/sysroots.json',
 
   # To be able to build clean Chromium from sources.
   'apply_patches': True,
@@ -31,10 +37,14 @@ vars = {
   'checkout_chromium': True,
   'checkout_node': True,
   'checkout_nan': True,
-  'checkout_pgo_profiles': True,
+  # Chrome's published PGO profiles are not consumed - Electron release
+  # builds use Electron-generated profiles (see build/pgo_profiles/). Set to
+  # True (and set the pgo_data_path GN arg) to build against Chrome's
+  # profiles instead.
+  'checkout_pgo_profiles': False,
 
-  # It's only needed to parse the native tests configurations.
-  'checkout_pyyaml': False,
+  # Can be used to disable the sysroot hooks.
+  'install_sysroot': True,
 
   'use_rts': False,
 
@@ -47,10 +57,6 @@ vars = {
 
   'checkout_nacl':
     False,
-  'checkout_libaom':
-    True,
-  'checkout_oculus_sdk':
-    False,
   'checkout_openxr':
     False,
   'build_with_chromium':
@@ -58,8 +64,6 @@ vars = {
   'checkout_android':
     False,
   'checkout_android_native_support':
-    False,
-  'checkout_google_benchmark':
     False,
   'checkout_clang_tidy':
     True,
@@ -78,22 +82,22 @@ deps = {
     'url': (Var("nodejs_git")) + '/node.git@' + (Var("node_version")),
     'condition': 'checkout_node and process_deps',
   },
-  'src/third_party/pyyaml': {
-    'url': (Var("yaml_git")) + '/pyyaml.git@' + (Var("pyyaml_version")),
-    'condition': 'checkout_pyyaml and process_deps',
-  },
   'src/third_party/squirrel.mac': {
     'url': Var("squirrel_git") + '/Squirrel.Mac.git@' + Var("squirrel.mac_version"),
     'condition': 'process_deps',
   },
   'src/third_party/squirrel.mac/vendor/ReactiveObjC': {
-    'url': 'https://github.com/ReactiveCocoa/ReactiveObjC.git@74ab5baccc6f7202c8ac69a8d1e152c29dc1ea76',
+    'url': Var("reactiveobjc_git") + '/ReactiveObjC.git@' + Var("reactiveobjc_version"),
     'condition': 'process_deps'
   },
   'src/third_party/squirrel.mac/vendor/Mantle': {
-    'url': 'https://github.com/Mantle/Mantle.git@78d3966b3c331292ea29ec38661b25df0a245948',
+    'url':  Var("mantle_git") + '/Mantle.git@' + Var("mantle_version"),
     'condition': 'process_deps',
-  }
+  },
+  'src/third_party/squirrel.mac/vendor/Sparkle': {
+    'url': Var("sparkle_git") + '/Sparkle.git@' + Var("sparkle_version"),
+    'condition': 'process_deps',
+  },
 }
 
 pre_deps_hooks = [
@@ -142,8 +146,99 @@ hooks = [
     'action': [
       'python3',
       '-c',
-      'import os, subprocess; os.chdir(os.path.join("src", "electron")); subprocess.check_call(["python3", "script/lib/npx.py", "yarn@' + (Var("yarn_version")) + '", "install", "--frozen-lockfile"]);',
+      'import os, subprocess; os.chdir(os.path.join("src", "electron")); subprocess.check_call(["node", ".yarn/releases/yarn-4.18.0.cjs", "install", "--immutable"]);',
     ],
+  },
+  {
+    # Keep src/electron/build/siso_revision in step with the siso commit this
+    # Chromium pins; CI builds siso from that file (see the script header).
+    'name': 'gen_siso_revision',
+    'condition': 'checkout_chromium and process_deps',
+    'pattern': 'src/electron',
+    'action': [
+      'node',
+      'src/electron/script/gen-siso-revision.js',
+    ],
+  },
+  {
+    'name': 'sysroot_arm',
+    'pattern': '.',
+    'condition': 'install_sysroot and checkout_linux and checkout_arm',
+    'action': ['python3', 'src/build/linux/sysroot_scripts/install-sysroot.py',
+               '--sysroots-json-path=' + Var('sysroots_json_path'),
+               '--arch=arm'],
+  },
+  {
+    'name': 'sysroot_arm64',
+    'pattern': '.',
+    'condition': 'install_sysroot and checkout_linux and checkout_arm64',
+    'action': ['python3', 'src/build/linux/sysroot_scripts/install-sysroot.py',
+               '--sysroots-json-path=' + Var('sysroots_json_path'),
+               '--arch=arm64'],
+  },
+  {
+    'name': 'sysroot_x86',
+    'pattern': '.',
+    'condition': 'install_sysroot and checkout_linux and (checkout_x86 or checkout_x64)',
+    'action': ['python3', 'src/build/linux/sysroot_scripts/install-sysroot.py',
+               '--sysroots-json-path=' + Var('sysroots_json_path'),
+               '--arch=x86'],
+  },
+  {
+    'name': 'sysroot_mips',
+    'pattern': '.',
+    'condition': 'install_sysroot and checkout_linux and checkout_mips',
+    'action': ['python3', 'src/build/linux/sysroot_scripts/install-sysroot.py',
+               '--sysroots-json-path=' + Var('sysroots_json_path'),
+               '--arch=mips'],
+  },
+  {
+    'name': 'sysroot_mips64',
+    'pattern': '.',
+    'condition': 'install_sysroot and checkout_linux and checkout_mips64',
+    'action': ['python3', 'src/build/linux/sysroot_scripts/install-sysroot.py',
+               '--sysroots-json-path=' + Var('sysroots_json_path'),
+               '--arch=mips64el'],
+  },
+  {
+    'name': 'sysroot_x64',
+    'pattern': '.',
+    'condition': 'install_sysroot and checkout_linux and checkout_x64',
+    'action': ['python3', 'src/build/linux/sysroot_scripts/install-sysroot.py',
+               '--sysroots-json-path=' + Var('sysroots_json_path'),
+               '--arch=x64'],
+  },
+  # Electron-collected PGO profiles, consumed by official builds in place of
+  # Chrome's published profiles (which cannot cover Electron's code). The
+  # state files in src/electron/build/pgo_profiles name the profile to use;
+  # these hooks download them.
+  {
+    'name': 'electron_pgo_profiles_linux',
+    'pattern': 'src/electron/build/pgo_profiles',
+    'condition': 'checkout_linux and process_deps',
+    'action': ['python3', 'src/electron/script/pgo/download-profiles.py',
+               '--targets', 'linux-x64,linux-arm64'],
+  },
+  {
+    'name': 'electron_pgo_profiles_win',
+    'pattern': 'src/electron/build/pgo_profiles',
+    'condition': 'checkout_win and process_deps',
+    'action': ['python3', 'src/electron/script/pgo/download-profiles.py',
+               '--targets', 'win-x64,win-arm64'],
+  },
+  {
+    'name': 'electron_pgo_profiles_mac',
+    'pattern': 'src/electron/build/pgo_profiles',
+    'condition': 'checkout_mac and process_deps',
+    'action': ['python3', 'src/electron/script/pgo/download-profiles.py',
+               '--targets', 'macos-x64,macos-arm64'],
+  },
+  {
+    'name': 'electron_pgo_profiles_v8_builtins',
+    'pattern': 'src/electron/build/pgo_profiles',
+    'condition': 'process_deps',
+    'action': ['python3', 'src/electron/script/pgo/download-profiles.py',
+               '--targets', 'v8-builtins'],
   },
 ]
 

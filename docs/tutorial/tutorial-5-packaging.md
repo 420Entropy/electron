@@ -35,19 +35,31 @@ as a **distributable**). Distributables can be either installers (e.g. MSI on Wi
 portable executable files (e.g. `.app` on macOS).
 
 Electron Forge is an all-in-one tool that handles the packaging and distribution of Electron
-apps. Under the hood, it combines a lot of existing Electron tools (e.g. [`electron-packager`][],
+apps. Under the hood, it combines a lot of existing Electron tools (e.g. [`@electron/packager`][],
 [`@electron/osx-sign`][], [`electron-winstaller`][], etc.) into a single interface so you do not
 have to worry about wiring them all together.
 
 ### Importing your project into Forge
 
-You can install Electron Forge's CLI in your project's `devDependencies` and import your
-existing project with a handy conversion script.
+Electron Forge's `create-electron-app` package can import your existing project with a handy
+conversion script, which also installs Forge's CLI in your project's `devDependencies` for you.
 
-```sh npm2yarn
-npm install --save-dev @electron-forge/cli
-npx electron-forge import
+<Tabs>
+  <TabItem value="npm" label="npm">
+
+```sh
+npx create-electron-app@latest import
 ```
+
+  </TabItem>
+  <TabItem value="yarn" label="Yarn">
+
+```sh
+yarn create electron-app import
+```
+
+  </TabItem>
+</Tabs>
 
 Once the conversion script is done, Forge should have added a few scripts
 to your `package.json` file.
@@ -153,14 +165,14 @@ For more information on code signing, check out the
 module.exports = {
   packagerConfig: {
     osxSign: {},
-    //...
+    // ...
     osxNotarize: {
       tool: 'notarytool',
       appleId: process.env.APPLE_ID,
       appleIdPassword: process.env.APPLE_PASSWORD,
-      teamId: process.env.APPLE_TEAM_ID,
+      teamId: process.env.APPLE_TEAM_ID
     }
-    //...
+    // ...
   }
 }
 ```
@@ -170,17 +182,17 @@ module.exports = {
 
 ```js title='forge.config.js'
 module.exports = {
-  //...
+  // ...
   makers: [
     {
       name: '@electron-forge/maker-squirrel',
       config: {
         certificateFile: './cert.pfx',
-        certificatePassword: process.env.CERTIFICATE_PASSWORD,
-      },
-    },
-  ],
-  //...
+        certificatePassword: process.env.CERTIFICATE_PASSWORD
+      }
+    }
+  ]
+  // ...
 }
 ```
 
@@ -200,7 +212,7 @@ information.
 
 [`@electron/osx-sign`]: https://github.com/electron/osx-sign
 [application packaging]: ./application-distribution.md
-[`electron-packager`]: https://github.com/electron/electron-packager
+[`@electron/packager`]: https://github.com/electron/packager
 [`electron-winstaller`]: https://github.com/electron/windows-installer
 [electron forge]: https://www.electronforge.io
 [electron forge cli documentation]: https://www.electronforge.io/cli#commands

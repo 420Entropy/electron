@@ -5,39 +5,56 @@
 #ifndef ELECTRON_SHELL_COMMON_ELECTRON_CONSTANTS_H_
 #define ELECTRON_SHELL_COMMON_ELECTRON_CONSTANTS_H_
 
-#include "base/files/file_path.h"
-#include "build/build_config.h"
+#include <string_view>
+
+#include "base/strings/cstring_view.h"
 #include "electron/buildflags/buildflags.h"
 
 namespace electron {
 
 // The app-command in NativeWindow.
-extern const char kBrowserForward[];
-extern const char kBrowserBackward[];
-
-// Strings describing Chrome security policy for DevTools security panel.
-extern const char kSHA1Certificate[];
-extern const char kSHA1MajorDescription[];
-extern const char kSHA1MinorDescription[];
-extern const char kCertificateError[];
-extern const char kValidCertificate[];
-extern const char kValidCertificateDescription[];
-extern const char kSecureProtocol[];
-extern const char kSecureProtocolDescription[];
+inline constexpr std::string_view kBrowserForward = "browser-forward";
+inline constexpr std::string_view kBrowserBackward = "browser-backward";
 
 // Keys for Device APIs
-extern const char kDeviceVendorIdKey[];
-extern const char kDeviceProductIdKey[];
-extern const char kDeviceSerialNumberKey[];
+inline constexpr std::string_view kDeviceVendorIdKey = "vendorId";
+inline constexpr std::string_view kDeviceProductIdKey = "productId";
+inline constexpr std::string_view kDeviceSerialNumberKey = "serialNumber";
 
-#if BUILDFLAG(ENABLE_RUN_AS_NODE)
-extern const char kRunAsNode[];
-#endif
+// Window state preference keys
+inline constexpr std::string_view kLeft = "left";
+inline constexpr std::string_view kTop = "top";
+inline constexpr std::string_view kRight = "right";
+inline constexpr std::string_view kBottom = "bottom";
+
+inline constexpr std::string_view kMaximized = "maximized";
+inline constexpr std::string_view kFullscreen = "fullscreen";
+inline constexpr std::string_view kKiosk = "kiosk";
+
+inline constexpr std::string_view kWorkAreaLeft = "workAreaLeft";
+inline constexpr std::string_view kWorkAreaTop = "workAreaTop";
+inline constexpr std::string_view kWorkAreaRight = "workAreaRight";
+inline constexpr std::string_view kWorkAreaBottom = "workAreaBottom";
+
+inline constexpr std::string_view kWindowStates = "windowStates";
+
+inline constexpr base::cstring_view kRunAsNode = "ELECTRON_RUN_AS_NODE";
+
+// Per-profile UUID to distinguish global shortcut sessions for
+// org.freedesktop.portal.GlobalShortcuts. This is a counterpart to
+// extensions::pref_names::kGlobalShortcutsUuid, which may be not defined
+// if extensions are disabled.
+inline constexpr char kElectronGlobalShortcutsUuid[] =
+    "electron.global_shortcuts.uuid";
+
+// Per-profile secret used to encrypt Touch ID WebAuthn credential metadata
+// stored in the macOS keychain.
+inline constexpr char kWebAuthnTouchIdMetadataSecretPrefName[] =
+    "electron.webauthn.touchid.metadata_secret";
 
 #if BUILDFLAG(ENABLE_PDF_VIEWER)
-extern const char kPDFExtensionPluginName[];
-extern const char kPDFInternalPluginName[];
-extern const base::FilePath::CharType kPdfPluginPath[];
+inline constexpr std::string_view kPDFExtensionPluginName =
+    "Chromium PDF Viewer";
 #endif  // BUILDFLAG(ENABLE_PDF_VIEWER)
 
 }  // namespace electron

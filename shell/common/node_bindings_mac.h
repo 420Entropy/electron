@@ -5,16 +5,16 @@
 #ifndef ELECTRON_SHELL_COMMON_NODE_BINDINGS_MAC_H_
 #define ELECTRON_SHELL_COMMON_NODE_BINDINGS_MAC_H_
 
-#include "base/compiler_specific.h"
 #include "shell/common/node_bindings.h"
 
 namespace electron {
 
 class NodeBindingsMac : public NodeBindings {
  public:
-  explicit NodeBindingsMac(BrowserEnvironment browser_env);
+  NodeBindingsMac(BrowserEnvironment browser_env, uv_loop_t* loop);
 
  private:
+  // NodeBindings
   void PollEvents() override;
 };
 

@@ -5,12 +5,12 @@
 #ifndef ELECTRON_SHELL_BROWSER_MAC_IN_APP_PURCHASE_OBSERVER_H_
 #define ELECTRON_SHELL_BROWSER_MAC_IN_APP_PURCHASE_OBSERVER_H_
 
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "base/functional/callback.h"
-#include "base/memory/weak_ptr.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "base/memory/raw_ptr_exclusion.h"
 
 #if defined(__OBJC__)
 @class InAppTransactionObserver;
@@ -38,7 +38,7 @@ struct Payment {
   std::string productIdentifier = "";
   int quantity = 1;
   std::string applicationUsername;
-  absl::optional<PaymentDiscount> paymentDiscount;
+  std::optional<PaymentDiscount> paymentDiscount;
 
   Payment();
   Payment(const Payment&);
@@ -59,6 +59,9 @@ struct Transaction {
   ~Transaction();
 };
 
+using TransactionsUpdatedCallback =
+    base::RepeatingCallback<void(const std::vector<Transaction>&)>;
+
 // --------------------------- Classes ---------------------------
 
 class TransactionObserver {
@@ -70,13 +73,11 @@ class TransactionObserver {
   TransactionObserver(const TransactionObserver&) = delete;
   TransactionObserver& operator=(const TransactionObserver&) = delete;
 
-  virtual void OnTransactionsUpdated(
-      const std::vector<Transaction>& transactions) = 0;
+ protected:
+  void StartObserving(TransactionsUpdatedCallback callback);
 
  private:
-  InAppTransactionObserver* observer_;
-
-  base::WeakPtrFactory<TransactionObserver> weak_ptr_factory_{this};
+  RAW_PTR_EXCLUSION InAppTransactionObserver* observer_ = nullptr;
 };
 
 }  // namespace in_app_purchase

@@ -5,32 +5,32 @@
 #ifndef ELECTRON_SHELL_COMMON_GIN_CONVERTERS_CONTENT_CONVERTER_H_
 #define ELECTRON_SHELL_COMMON_GIN_CONVERTERS_CONTENT_CONVERTER_H_
 
-#include <utility>
-
+#include "base/memory/raw_ptr.h"
+#include "content/public/browser/context_menu_params.h"
 #include "content/public/common/referrer.h"
 #include "content/public/common/stop_find_action.h"
 #include "gin/converter.h"
 #include "third_party/blink/public/common/permissions/permission_utils.h"
-#include "third_party/blink/public/mojom/choosers/popup_menu.mojom.h"
-#include "third_party/blink/public/mojom/permissions/permission_status.mojom.h"
+#include "ui/base/mojom/menu_source_type.mojom-forward.h"
 
 namespace content {
 struct ContextMenuParams;
-struct NativeWebKeyboardEvent;
+struct PermissionResult;
 class RenderFrameHost;
 class WebContents;
 }  // namespace content
 
-using ContextMenuParamsWithRenderFrameHost =
-    std::pair<content::ContextMenuParams, content::RenderFrameHost*>;
+namespace input {
+struct NativeWebKeyboardEvent;
+}
+
+struct ContextMenuParamsWithRenderFrameHost {
+  content::ContextMenuParams params;
+  raw_ptr<content::RenderFrameHost> render_frame_host;
+  bool is_paste_enabled;
+};
 
 namespace gin {
-
-template <>
-struct Converter<blink::mojom::MenuItem::Type> {
-  static v8::Local<v8::Value> ToV8(v8::Isolate* isolate,
-                                   const blink::mojom::MenuItem::Type& val);
-};
 
 template <>
 struct Converter<ContextMenuParamsWithRenderFrameHost> {
@@ -40,10 +40,19 @@ struct Converter<ContextMenuParamsWithRenderFrameHost> {
 };
 
 template <>
-struct Converter<blink::mojom::PermissionStatus> {
+struct Converter<ui::mojom::MenuSourceType> {
+  static v8::Local<v8::Value> ToV8(v8::Isolate* isolate,
+                                   const ui::mojom::MenuSourceType& val);
   static bool FromV8(v8::Isolate* isolate,
                      v8::Local<v8::Value> val,
-                     blink::mojom::PermissionStatus* out);
+                     ui::mojom::MenuSourceType* out);
+};
+
+template <>
+struct Converter<content::PermissionResult> {
+  static bool FromV8(v8::Isolate* isolate,
+                     v8::Local<v8::Value> val,
+                     content::PermissionResult* out);
 };
 
 template <>
@@ -78,12 +87,12 @@ struct Converter<content::Referrer> {
 };
 
 template <>
-struct Converter<content::NativeWebKeyboardEvent> {
+struct Converter<input::NativeWebKeyboardEvent> {
   static bool FromV8(v8::Isolate* isolate,
                      v8::Local<v8::Value> val,
-                     content::NativeWebKeyboardEvent* out);
+                     input::NativeWebKeyboardEvent* out);
   static v8::Local<v8::Value> ToV8(v8::Isolate* isolate,
-                                   const content::NativeWebKeyboardEvent& in);
+                                   const input::NativeWebKeyboardEvent& in);
 };
 
 }  // namespace gin

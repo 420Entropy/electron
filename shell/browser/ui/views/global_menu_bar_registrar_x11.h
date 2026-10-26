@@ -7,14 +7,13 @@
 
 #include <gio/gio.h>
 
-#include <set>
-
-#include "base/memory/ref_counted.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/singleton.h"
-#include "ui/base/glib/glib_signal.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_set.h"
+#include "ui/base/glib/scoped_gsignal.h"
 #include "ui/gfx/x/xproto.h"
 
-// Advertises our menu bars to Unity.
+// Advertises our menu bars to desktops that consume the AppMenu D-Bus service.
 //
 // GlobalMenuBarX11 is responsible for managing the DbusmenuServer for each
 // x11::Window. We need a separate object to own the dbus channel to
@@ -27,37 +26,33 @@ class GlobalMenuBarRegistrarX11 {
   void OnWindowMapped(x11::Window window);
   void OnWindowUnmapped(x11::Window window);
 
+  // disable copy
+  GlobalMenuBarRegistrarX11(const GlobalMenuBarRegistrarX11&) = delete;
+  GlobalMenuBarRegistrarX11& operator=(const GlobalMenuBarRegistrarX11&) =
+      delete;
+
  private:
   friend struct base::DefaultSingletonTraits<GlobalMenuBarRegistrarX11>;
 
   GlobalMenuBarRegistrarX11();
   ~GlobalMenuBarRegistrarX11();
 
-  // disable copy
-  GlobalMenuBarRegistrarX11(const GlobalMenuBarRegistrarX11&) = delete;
-  GlobalMenuBarRegistrarX11& operator=(const GlobalMenuBarRegistrarX11&) =
-      delete;
-
   // Sends the actual message.
   void RegisterXWindow(x11::Window window);
   void UnregisterXWindow(x11::Window window);
 
-  CHROMEG_CALLBACK_1(GlobalMenuBarRegistrarX11,
-                     void,
-                     OnProxyCreated,
-                     GObject*,
-                     GAsyncResult*);
-  CHROMEG_CALLBACK_1(GlobalMenuBarRegistrarX11,
-                     void,
-                     OnNameOwnerChanged,
-                     GObject*,
-                     GParamSpec*);
+  static void OnProxyCreated(GObject* source,
+                             GAsyncResult* result,
+                             gpointer user_data);
+  void OnNameOwnerChanged(GDBusProxy* /* ignored */, GParamSpec* /* ignored */);
+  void SetRegistrarProxy(GDBusProxy* proxy);
 
-  GDBusProxy* registrar_proxy_ = nullptr;
+  raw_ptr<GDBusProxy> registrar_proxy_ = nullptr;
 
   // x11::Window which want to be registered, but haven't yet been because
   // we're waiting for the proxy to become available.
-  std::set<x11::Window> live_windows_;
+  absl::flat_hash_set<x11::Window> live_windows_;
+  ScopedGSignal signal_;
 };
 
 #endif  // ELECTRON_SHELL_BROWSER_UI_VIEWS_GLOBAL_MENU_BAR_REGISTRAR_X11_H_

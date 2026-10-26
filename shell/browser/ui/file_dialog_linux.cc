@@ -1,0 +1,326 @@
+// Copyright (c) 2024 Microsoft, GmbH.
+// Use of this source code is governed by the MIT license that can be
+// found in the LICENSE file.
+
+#include <algorithm>
+#include <string>
+#include <vector>
+
+#include "base/command_line.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
+#include "base/logging.h"
+#include "base/memory/stack_allocated.h"
+#include "base/run_loop.h"
+#include "base/strings/string_number_conversions.h"
+#include "base/strings/utf_string_conversions.h"
+#include "components/dbus/thread_linux/dbus_thread_linux.h"
+#include "components/dbus/xdg/portal.h"
+#include "components/dbus/xdg/portal_constants.h"
+#include "shell/browser/javascript_environment.h"
+#include "shell/browser/native_window_views.h"
+#include "shell/browser/ui/file_dialog.h"
+#include "shell/common/electron_paths.h"
+#include "shell/common/gin_converters/callback_converter.h"
+#include "shell/common/gin_converters/file_path_converter.h"
+#include "shell/common/gin_helper/dictionary.h"
+#include "shell/common/gin_helper/promise.h"
+#include "ui/shell_dialogs/select_file_dialog.h"
+#include "ui/shell_dialogs/select_file_dialog_linux_portal.h"
+#include "ui/shell_dialogs/select_file_policy.h"
+#include "ui/shell_dialogs/selected_file_info.h"
+
+namespace file_dialog {
+
+DialogSettings::DialogSettings() = default;
+DialogSettings::DialogSettings(const DialogSettings&) = default;
+DialogSettings::~DialogSettings() = default;
+
+namespace {
+
+ui::SelectFileDialog::Type GetDialogType(int properties) {
+  if (properties & OPEN_DIALOG_OPEN_DIRECTORY)
+    return ui::SelectFileDialog::SELECT_FOLDER;
+
+  if (properties & OPEN_DIALOG_MULTI_SELECTIONS)
+    return ui::SelectFileDialog::SELECT_OPEN_MULTI_FILE;
+
+  return ui::SelectFileDialog::SELECT_OPEN_FILE;
+}
+
+ui::SelectFileDialog::FileTypeInfo GetFilterInfo(const Filters& filters) {
+  ui::SelectFileDialog::FileTypeInfo file_type_info;
+
+  for (const auto& [name, extension_group] : filters) {
+    const bool has_all_files_wildcard = std::ranges::any_of(
+        extension_group, [](const auto& ext) { return ext == "*"; });
+
+    if (has_all_files_wildcard) {
+      file_type_info.include_all_files = true;
+    } else {
+      file_type_info.extension_description_overrides.push_back(
+          base::UTF8ToUTF16(name));
+      file_type_info.extensions.emplace_back(extension_group);
+    }
+  }
+
+  return file_type_info;
+}
+
+// A relative defaultPath (e.g. a bare filename) would make the file chooser
+// open at the unusable relative directory ".", so anchor it to the default
+// directory instead.
+base::FilePath GetDefaultDialogPath(const DialogSettings& settings) {
+  if (settings.default_path.empty())
+    return electron::GetDefaultPath();
+  if (settings.default_path.IsAbsolute())
+    return settings.default_path;
+  return electron::GetDefaultPath().Append(settings.default_path);
+}
+
+// Version 4 of org.freedesktop.portal.FileChooser adds the current_folder
+// option to OpenFile
+// (https://github.com/flatpak/xdg-desktop-portal/commit/71165a5); older portals
+// ignore defaultPath for open dialogs.
+constexpr uint32_t kPortalVersionWithOpenDialogDefaultPath = 4;
+constexpr char kXdgPortalRequiredVersionSwitch[] =
+    "xdg-portal-required-version";
+
+// Applies --xdg-portal-required-version once and returns the effective minimum
+// portal version (never below Chromium's built-in minimum of 3).
+uint32_t GetRequiredPortalVersion() {
+  static const uint32_t required_version = [] {
+    uint32_t version = 0;
+    const std::string value =
+        base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
+            kXdgPortalRequiredVersionSwitch);
+    if (!value.empty() && !base::StringToUint(value, &version)) {
+      LOG(WARNING) << "Unable to parse --" << kXdgPortalRequiredVersionSwitch
+                   << "=" << value;
+    }
+    ui::SelectFileDialogLinuxPortal::SetRequiredPortalVersion(version);
+    return std::max(version, 3u);
+  }();
+  return required_version;
+}
+
+void LogIfNeededAboutUnsupportedPortalFeature(const DialogSettings& settings) {
+  const uint32_t required_version = GetRequiredPortalVersion();
+  if (settings.default_path.empty())
+    return;
+  dbus_xdg::RequestXdgDesktopPortal(
+      dbus_thread_linux::GetSharedSessionBus().get(),
+      dbus_xdg::kFileChooserInterfaceName,
+      base::BindOnce(
+          [](uint32_t required_version, uint32_t available_version) {
+            if (available_version >= required_version &&
+                available_version < kPortalVersionWithOpenDialogDefaultPath) {
+              LOG(INFO) << "Available portal version " << available_version
+                        << " does not support defaultPath option, try the"
+                        << " non-portal file chooser dialogs by launching"
+                        << " with --" << kXdgPortalRequiredVersionSwitch << "="
+                        << kPortalVersionWithOpenDialogDefaultPath;
+            }
+          },
+          required_version));
+}
+
+class FileChooserDialog : public ui::SelectFileDialog::Listener {
+ public:
+  enum class DialogType { OPEN, SAVE };
+
+  FileChooserDialog() {
+    GetRequiredPortalVersion();
+    dialog_ = ui::SelectFileDialog::Create(this, nullptr);
+  }
+
+  ~FileChooserDialog() override = default;
+
+  void RunSaveDialogImpl(const DialogSettings& settings) {
+    type_ = DialogType::SAVE;
+    ui::SelectFileDialog::FileTypeInfo file_info =
+        GetFilterInfo(settings.filters);
+    ApplySettings(settings);
+    base::FilePath default_path = GetDefaultDialogPath(settings);
+
+    dialog_->SelectFile(ui::SelectFileDialog::SELECT_SAVEAS_FILE,
+                        base::UTF8ToUTF16(settings.title), default_path,
+                        &file_info /* file_types */, 0 /* file_type_index */,
+                        base::FilePath::StringType() /* default_extension */,
+                        settings.parent_window
+                            ? settings.parent_window->GetNativeWindow()
+                            : nullptr,
+                        nullptr);
+  }
+
+  void RunSaveDialog(gin_helper::Promise<gin_helper::Dictionary> promise,
+                     const DialogSettings& settings) {
+    promise_ = std::move(promise);
+    RunSaveDialogImpl(settings);
+  }
+
+  void RunSaveDialog(base::OnceCallback<void(gin_helper::Dictionary)> callback,
+                     const DialogSettings& settings) {
+    callback_ = std::move(callback);
+    RunSaveDialogImpl(settings);
+  }
+
+  void RunOpenDialogImpl(const DialogSettings& settings) {
+    type_ = DialogType::OPEN;
+    ui::SelectFileDialog::FileTypeInfo file_info =
+        GetFilterInfo(settings.filters);
+    ApplySettings(settings);
+    base::FilePath default_path = GetDefaultDialogPath(settings);
+
+    dialog_->SelectFile(
+        GetDialogType(settings.properties), base::UTF8ToUTF16(settings.title),
+        default_path, &file_info, 0 /* file_type_index */,
+        base::FilePath::StringType() /* default_extension */,
+        settings.parent_window ? settings.parent_window->GetNativeWindow()
+                               : nullptr,
+        nullptr);
+  }
+
+  void RunOpenDialog(gin_helper::Promise<gin_helper::Dictionary> promise,
+                     const DialogSettings& settings) {
+    promise_ = std::move(promise);
+    RunOpenDialogImpl(settings);
+  }
+
+  void RunOpenDialog(base::OnceCallback<void(gin_helper::Dictionary)> callback,
+                     const DialogSettings& settings) {
+    callback_ = std::move(callback);
+    RunOpenDialogImpl(settings);
+  }
+
+  // ui::SelectFileDialog::Listener
+  void FileSelected(const ui::SelectedFileInfo& file, int index) override {
+    v8::Isolate* isolate = electron::JavascriptEnvironment::GetIsolate();
+    v8::HandleScope scope(isolate);
+    auto dict = gin_helper::Dictionary::CreateEmpty(isolate);
+    dict.Set("canceled", false);
+    if (type_ == DialogType::SAVE) {
+      dict.Set("filePath", file.file_path);
+    } else {
+      dict.Set("filePaths", std::vector<base::FilePath>{file.file_path});
+    }
+
+    if (callback_) {
+      std::move(callback_).Run(dict);
+    } else {
+      promise_.Resolve(dict);
+    }
+
+    delete this;
+  }
+
+  void MultiFilesSelected(
+      const std::vector<ui::SelectedFileInfo>& files) override {
+    v8::Isolate* isolate = electron::JavascriptEnvironment::GetIsolate();
+    v8::HandleScope scope(isolate);
+    auto dict = gin_helper::Dictionary::CreateEmpty(isolate);
+    dict.Set("canceled", false);
+    dict.Set("filePaths", ui::SelectedFileInfoListToFilePathList(files));
+
+    if (callback_) {
+      std::move(callback_).Run(dict);
+    } else {
+      promise_.Resolve(dict);
+    }
+
+    delete this;
+  }
+
+  void FileSelectionCanceled() override {
+    v8::Isolate* isolate = electron::JavascriptEnvironment::GetIsolate();
+    v8::HandleScope scope(isolate);
+    auto dict = gin_helper::Dictionary::CreateEmpty(isolate);
+    dict.Set("canceled", true);
+    if (type_ == DialogType::SAVE) {
+      dict.Set("filePath", base::FilePath());
+    } else {
+      dict.Set("filePaths", std::vector<base::FilePath>());
+    }
+
+    if (callback_) {
+      std::move(callback_).Run(dict);
+    } else {
+      promise_.Resolve(dict);
+    }
+
+    delete this;
+  }
+
+ private:
+  void ApplySettings(const DialogSettings& settings) {
+    dialog_->SetButtonLabel(settings.button_label);
+    dialog_->SetOverwriteConfirmationShown(
+        settings.properties & SAVE_DIALOG_SHOW_OVERWRITE_CONFIRMATION);
+    dialog_->SetMultipleSelectionsAllowed(settings.properties &
+                                          OPEN_DIALOG_MULTI_SELECTIONS);
+  }
+
+  DialogType type_;
+  scoped_refptr<ui::SelectFileDialog> dialog_;
+  base::OnceCallback<void(gin_helper::Dictionary)> callback_;
+  // gin::Dictionary is STACK_ALLOCATED(), but Promise<T> only names T as its
+  // resolve type and never stores one.
+  STACK_ALLOCATED_IGNORE("Promise<T> does not store a T")
+  gin_helper::Promise<gin_helper::Dictionary> promise_;
+};
+
+}  // namespace
+
+bool ShowOpenDialogSync(const DialogSettings& settings,
+                        std::vector<base::FilePath>* paths) {
+  LogIfNeededAboutUnsupportedPortalFeature(settings);
+  base::RunLoop run_loop(base::RunLoop::Type::kNestableTasksAllowed);
+  auto cb = base::BindOnce(
+      [](base::RepeatingClosure cb, std::vector<base::FilePath>* file_paths,
+         gin_helper::Dictionary result) {
+        result.Get("filePaths", file_paths);
+        std::move(cb).Run();
+      },
+      run_loop.QuitClosure(), paths);
+
+  FileChooserDialog* dialog = new FileChooserDialog();
+  dialog->RunOpenDialog(std::move(cb), settings);
+  run_loop.Run();
+  return !paths->empty();
+}
+
+void ShowOpenDialog(const DialogSettings& settings,
+                    gin_helper::Promise<gin_helper::Dictionary> promise) {
+  LogIfNeededAboutUnsupportedPortalFeature(settings);
+  FileChooserDialog* dialog = new FileChooserDialog();
+  dialog->RunOpenDialog(std::move(promise), settings);
+}
+
+std::optional<base::FilePath> ShowSaveDialogSync(
+    const DialogSettings& settings) {
+  std::optional<base::FilePath> path;
+
+  base::RunLoop run_loop{base::RunLoop::Type::kNestableTasksAllowed};
+  auto on_chooser_dialog_done = base::BindOnce(
+      [](base::RepeatingClosure run_loop_closure,
+         std::optional<base::FilePath>* path, gin_helper::Dictionary result) {
+        if (base::FilePath val; result.Get("filePath", &val))
+          *path = std::move(val);
+        std::move(run_loop_closure).Run();
+      },
+      run_loop.QuitClosure(), &path);
+
+  auto* const dialog = new FileChooserDialog{};
+  dialog->RunSaveDialog(std::move(on_chooser_dialog_done), settings);
+  run_loop.Run();
+
+  return path;
+}
+
+void ShowSaveDialog(const DialogSettings& settings,
+                    gin_helper::Promise<gin_helper::Dictionary> promise) {
+  FileChooserDialog* dialog = new FileChooserDialog();
+  dialog->RunSaveDialog(std::move(promise), settings);
+}
+
+}  // namespace file_dialog

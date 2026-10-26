@@ -5,7 +5,10 @@
 #include "shell/browser/api/electron_api_tray.h"
 
 #include <string>
+#include <string_view>
 
+#include "base/containers/fixed_flat_map.h"
+#include "base/functional/callback_helpers.h"
 #include "gin/dictionary.h"
 #include "gin/object_template_builder.h"
 #include "shell/browser/api/electron_api_menu.h"
@@ -18,9 +21,12 @@
 #include "shell/common/gin_converters/guid_converter.h"
 #include "shell/common/gin_converters/image_converter.h"
 #include "shell/common/gin_helper/dictionary.h"
-#include "shell/common/gin_helper/function_template_extensions.h"
+#include "shell/common/gin_helper/error_thrower.h"
+#include "shell/common/gin_helper/wrappable_pointer_tags.h"
 #include "shell/common/node_includes.h"
-#include "ui/gfx/image/image.h"
+#include "v8/include/cppgc/allocation.h"
+#include "v8/include/cppgc/persistent.h"
+#include "v8/include/v8-cppgc.h"
 
 namespace gin {
 
@@ -29,27 +35,16 @@ struct Converter<electron::TrayIcon::IconType> {
   static bool FromV8(v8::Isolate* isolate,
                      v8::Local<v8::Value> val,
                      electron::TrayIcon::IconType* out) {
-    using IconType = electron::TrayIcon::IconType;
-    std::string mode;
-    if (ConvertFromV8(isolate, val, &mode)) {
-      if (mode == "none") {
-        *out = IconType::kNone;
-        return true;
-      } else if (mode == "info") {
-        *out = IconType::kInfo;
-        return true;
-      } else if (mode == "warning") {
-        *out = IconType::kWarning;
-        return true;
-      } else if (mode == "error") {
-        *out = IconType::kError;
-        return true;
-      } else if (mode == "custom") {
-        *out = IconType::kCustom;
-        return true;
-      }
-    }
-    return false;
+    using Val = electron::TrayIcon::IconType;
+    static constexpr auto Lookup =
+        base::MakeFixedFlatMap<std::string_view, Val>({
+            {"custom", Val::kCustom},
+            {"error", Val::kError},
+            {"info", Val::kInfo},
+            {"none", Val::kNone},
+            {"warning", Val::kWarning},
+        });
+    return FromV8WithLookup(isolate, val, Lookup, out);
   }
 };
 
@@ -57,39 +52,51 @@ struct Converter<electron::TrayIcon::IconType> {
 
 namespace electron::api {
 
-gin::WrapperInfo Tray::kWrapperInfo = {gin::kEmbedderNativeGin};
+const gin::WrapperInfo Tray::kWrapperInfo =
+    electron::MakeWrapperInfo(electron::kElectronTray);
 
 Tray::Tray(v8::Isolate* isolate,
            v8::Local<v8::Value> image,
-           absl::optional<UUID> guid)
-    : tray_icon_(TrayIcon::Create(guid)) {
+           std::optional<base::Uuid> guid)
+    : guid_{guid}, tray_icon_{TrayIcon::Create(guid)} {
   SetImage(isolate, image);
   tray_icon_->AddObserver(this);
+  if (guid.has_value())
+    tray_icon_->SetAutoSaveName(guid.value().AsLowercaseString());
 }
 
 Tray::~Tray() = default;
 
 // static
-gin::Handle<Tray> Tray::New(gin_helper::ErrorThrower thrower,
-                            v8::Local<v8::Value> image,
-                            absl::optional<UUID> guid,
-                            gin::Arguments* args) {
+Tray* Tray::New(gin_helper::ErrorThrower thrower,
+                v8::Local<v8::Value> image,
+                std::optional<base::Uuid> guid,
+                gin::Arguments* args) {
   if (!Browser::Get()->is_ready()) {
     thrower.ThrowError("Cannot create Tray before app is ready");
-    return gin::Handle<Tray>();
+    return {};
   }
 
-#if BUILDFLAG(IS_WIN)
   if (!guid.has_value() && args->Length() > 1) {
-    thrower.ThrowError("Invalid GUID format");
-    return gin::Handle<Tray>();
+    thrower.ThrowError("Invalid GUID format - GUID must be a string");
+    return {};
   }
-#endif
 
-  auto handle = gin::CreateHandle(args->isolate(),
-                                  new Tray(args->isolate(), image, guid));
-  handle->Pin(args->isolate());
-  return handle;
+  // Error thrown by us will be dropped when entering V8.
+  // Make sure to abort early and propagate the error to JS.
+  // Refs https://chromium-review.googlesource.com/c/v8/v8/+/5050065
+  v8::Isolate* isolate = args->isolate();
+  v8::TryCatch try_catch{isolate};
+  Tray* tray = cppgc::MakeGarbageCollected<Tray>(
+      isolate->GetCppHeap()->GetAllocationHandle(), isolate, image, guid);
+  if (try_catch.HasCaught()) {
+    // Remove the already-created OS icon now, not at eventual collection.
+    tray->Destroy();
+    try_catch.ReThrow();
+    return {};
+  }
+
+  return tray;
 }
 
 void Tray::OnClicked(const gfx::Rect& bounds,
@@ -110,6 +117,12 @@ void Tray::OnRightClicked(const gfx::Rect& bounds, int modifiers) {
   v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
   v8::HandleScope scope(isolate);
   EmitWithoutEvent("right-click", CreateEventFromFlags(modifiers), bounds);
+}
+
+void Tray::OnMiddleClicked(const gfx::Rect& bounds, int modifiers) {
+  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
+  v8::HandleScope scope(isolate);
+  EmitWithoutEvent("middle-click", CreateEventFromFlags(modifiers), bounds);
 }
 
 void Tray::OnBalloonShow() {
@@ -179,9 +192,9 @@ void Tray::OnDragEnded() {
 }
 
 void Tray::Destroy() {
-  Unpin();
-  menu_.Reset();
+  menu_.Clear();
   tray_icon_.reset();
+  keep_alive_.Clear();
 }
 
 bool Tray::IsDestroyed() {
@@ -226,7 +239,7 @@ void Tray::SetToolTip(const std::string& tool_tip) {
 }
 
 void Tray::SetTitle(const std::string& title,
-                    const absl::optional<gin_helper::Dictionary>& options,
+                    const std::optional<gin_helper::Dictionary>& options,
                     gin::Arguments* args) {
   if (!CheckAlive())
     return;
@@ -257,7 +270,7 @@ void Tray::SetTitle(const std::string& title,
 
 std::string Tray::GetTitle() {
   if (!CheckAlive())
-    return std::string();
+    return {};
 #if BUILDFLAG(IS_MAC)
   return tray_icon_->GetTitle();
 #else
@@ -317,6 +330,8 @@ void Tray::DisplayBalloon(gin_helper::ErrorThrower thrower,
 #endif
   }
 
+  if (!CheckAlive())
+    return;
   tray_icon_->DisplayBalloon(balloon_options);
 }
 
@@ -335,7 +350,7 @@ void Tray::Focus() {
 void Tray::PopUpContextMenu(gin::Arguments* args) {
   if (!CheckAlive())
     return;
-  gin::Handle<Menu> menu;
+  Menu* menu = nullptr;
   gfx::Point pos;
 
   v8::Local<v8::Value> first_arg;
@@ -352,7 +367,19 @@ void Tray::PopUpContextMenu(gin::Arguments* args) {
       }
     }
   }
-  tray_icon_->PopUpContextMenu(pos, menu.IsEmpty() ? nullptr : menu->model());
+
+  // Converting the arguments can run JS that destroys the tray.
+  if (!CheckAlive())
+    return;
+  // Root |menu| until the platform is done with its model; JS may not hold it.
+  base::ScopedClosureRunner retain_menu;
+  if (menu) {
+    retain_menu.ReplaceClosure(base::BindOnce([](cppgc::Persistent<Menu>) {},
+                                              cppgc::Persistent<Menu>(menu)));
+  }
+  tray_icon_->PopUpContextMenu(pos,
+                               menu ? menu->model()->GetWeakPtr() : nullptr,
+                               std::move(retain_menu));
 }
 
 void Tray::CloseContextMenu() {
@@ -365,12 +392,13 @@ void Tray::SetContextMenu(gin_helper::ErrorThrower thrower,
                           v8::Local<v8::Value> arg) {
   if (!CheckAlive())
     return;
-  gin::Handle<Menu> menu;
+
   if (arg->IsNull()) {
-    menu_.Reset();
+    menu_.Clear();
     tray_icon_->SetContextMenu(nullptr);
-  } else if (gin::ConvertFromV8(thrower.isolate(), arg, &menu)) {
-    menu_.Reset(thrower.isolate(), menu.ToV8());
+  } else if (Menu* menu = nullptr;
+             gin::ConvertFromV8(thrower.isolate(), arg, &menu)) {
+    menu_ = menu;
     tray_icon_->SetContextMenu(menu->model());
   } else {
     thrower.ThrowTypeError("Must pass Menu or null");
@@ -379,8 +407,17 @@ void Tray::SetContextMenu(gin_helper::ErrorThrower thrower,
 
 gfx::Rect Tray::GetBounds() {
   if (!CheckAlive())
-    return gfx::Rect();
+    return {};
   return tray_icon_->GetBounds();
+}
+
+v8::Local<v8::Value> Tray::GetGUID() {
+  if (!CheckAlive())
+    return {};
+  auto* isolate = JavascriptEnvironment::GetIsolate();
+  if (!guid_)
+    return v8::Null(isolate);
+  return gin::ConvertToV8(isolate, guid_.value());
 }
 
 bool Tray::CheckAlive() {
@@ -396,7 +433,7 @@ bool Tray::CheckAlive() {
 // static
 void Tray::FillObjectTemplate(v8::Isolate* isolate,
                               v8::Local<v8::ObjectTemplate> templ) {
-  gin::ObjectTemplateBuilder(isolate, "Tray", templ)
+  gin::ObjectTemplateBuilder(isolate, GetClassName(), templ)
       .SetMethod("destroy", &Tray::Destroy)
       .SetMethod("isDestroyed", &Tray::IsDestroyed)
       .SetMethod("setImage", &Tray::SetImage)
@@ -415,7 +452,21 @@ void Tray::FillObjectTemplate(v8::Isolate* isolate,
       .SetMethod("closeContextMenu", &Tray::CloseContextMenu)
       .SetMethod("setContextMenu", &Tray::SetContextMenu)
       .SetMethod("getBounds", &Tray::GetBounds)
+      .SetMethod("getGUID", &Tray::GetGUID)
       .Build();
+}
+
+void Tray::Trace(cppgc::Visitor* visitor) const {
+  gin::Wrappable<Tray>::Trace(visitor);
+  visitor->Trace(menu_);
+}
+
+const gin::WrapperInfo* Tray::wrapper_info() const {
+  return &kWrapperInfo;
+}
+
+const char* Tray::GetHumanReadableName() const {
+  return "Electron / Tray";
 }
 
 }  // namespace electron::api
@@ -428,10 +479,9 @@ void Initialize(v8::Local<v8::Object> exports,
                 v8::Local<v8::Value> unused,
                 v8::Local<v8::Context> context,
                 void* priv) {
-  v8::Isolate* isolate = context->GetIsolate();
-
-  gin::Dictionary dict(isolate, exports);
-  dict.Set("Tray", Tray::GetConstructor(context));
+  v8::Isolate* const isolate = electron::JavascriptEnvironment::GetIsolate();
+  gin::Dictionary dict{isolate, exports};
+  dict.Set("Tray", Tray::GetConstructor(isolate, context, &Tray::kWrapperInfo));
 }
 
 }  // namespace

@@ -8,25 +8,44 @@
 #include <memory>
 #include <vector>
 
+#include "gin/weak_cell.h"
 #include "gin/wrappable.h"
-#include "mojo/public/cpp/bindings/connector.h"
 #include "mojo/public/cpp/bindings/message.h"
+#include "shell/browser/event_emitter_mixin.h"
+#include "shell/common/gc_plugin.h"
+#include "shell/common/gin_helper/constructible.h"
+#include "shell/common/gin_helper/self_keep_alive.h"
 #include "third_party/blink/public/common/messaging/message_port_channel.h"
 #include "third_party/blink/public/common/messaging/message_port_descriptor.h"
+#include "v8/include/v8-local-handle.h"
 
 namespace gin {
 class Arguments;
-template <typename T>
-class Handle;
 }  // namespace gin
+
+namespace gin_helper {
+class ErrorThrower;
+}  // namespace gin_helper
+
+namespace mojo {
+class Connector;
+}  // namespace mojo
 
 namespace electron {
 
-// A non-blink version of blink::MessagePort.
-class MessagePort : public gin::Wrappable<MessagePort>, mojo::MessageReceiver {
+// A non-blink version of blink::MessagePort; MessagePortMain in JS.
+class MessagePort final : public gin::Wrappable<MessagePort>,
+                          public gin_helper::EventEmitterMixin<MessagePort>,
+                          public gin_helper::Constructible<MessagePort>,
+                          private mojo::MessageReceiver {
  public:
+  MessagePort();
   ~MessagePort() override;
-  static gin::Handle<MessagePort> Create(v8::Isolate* isolate);
+  static MessagePort* Create(v8::Isolate* isolate);
+  // gin_helper::Constructible; not constructible from JavaScript.
+  static v8::Local<v8::Value> New(gin_helper::ErrorThrower thrower);
+  static void FillObjectTemplate(v8::Isolate*, v8::Local<v8::ObjectTemplate>);
+  static const char* GetClassName() { return "MessagePortMain"; }
 
   void PostMessage(gin::Arguments* args);
   void Start();
@@ -37,35 +56,28 @@ class MessagePort : public gin::Wrappable<MessagePort>, mojo::MessageReceiver {
 
   blink::MessagePortChannel Disentangle();
 
-  bool IsEntangled() const { return !closed_ && !IsNeutered(); }
-  bool IsNeutered() const { return !connector_ || !connector_->is_valid(); }
+  [[nodiscard]] bool IsEntangled() const;
+  [[nodiscard]] bool IsNeutered() const;
 
-  static std::vector<gin::Handle<MessagePort>> EntanglePorts(
-      v8::Isolate* isolate,
-      std::vector<blink::MessagePortChannel> channels);
+  static bool EntanglePorts(v8::Isolate* isolate,
+                            std::vector<blink::MessagePortChannel> channels,
+                            v8::LocalVector<v8::Value>* wrapped_ports);
 
   static std::vector<blink::MessagePortChannel> DisentanglePorts(
       v8::Isolate* isolate,
-      const std::vector<gin::Handle<MessagePort>>& ports,
-      bool* threw_exception);
+      const v8::LocalVector<v8::Value>& ports,
+      bool* threw_exception,
+      MessagePort* source_port = nullptr);
 
   // gin::Wrappable
-  gin::ObjectTemplateBuilder GetObjectTemplateBuilder(
-      v8::Isolate* isolate) override;
   static gin::WrapperInfo kWrapperInfo;
-  const char* GetTypeName() override;
+  const gin::WrapperInfo* wrapper_info() const override;
+  const char* GetHumanReadableName() const override;
+  void Trace(cppgc::Visitor* visitor) const override;
 
  private:
-  MessagePort();
-
-  // The blink version of MessagePort uses the very nice "ActiveScriptWrapper"
-  // class, which keeps the object alive through the V8 embedder hooks into the
-  // GC lifecycle: see
-  // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/platform/heap/thread_state.cc;l=258;drc=b892cf58e162a8f66cd76d7472f129fe0fb6a7d1
-  // We do not have that luxury, so we brutishly use v8::Global to accomplish
-  // something similar. Critically, whenever the value of
-  // "HasPendingActivity()" changes, we must call Pin() or Unpin() as
-  // appropriate.
+  // Started, entangled ports have pending activity and must stay alive even
+  // after their JavaScript wrapper becomes unreachable.
   bool HasPendingActivity() const;
   void Pin();
   void Unpin();
@@ -73,17 +85,18 @@ class MessagePort : public gin::Wrappable<MessagePort>, mojo::MessageReceiver {
   // mojo::MessageReceiver
   bool Accept(mojo::Message* mojo_message) override;
 
+  GC_PLUGIN_IGNORE("The connector is owned by and cannot outlive MessagePort.")
   std::unique_ptr<mojo::Connector> connector_;
   bool started_ = false;
   bool closed_ = false;
 
-  v8::Global<v8::Value> pinned_;
+  gin_helper::SelfKeepAlive<MessagePort> keep_alive_{nullptr};
 
   // The internal port owned by this class. The handle itself is moved into the
   // |connector_| while entangled.
   blink::MessagePortDescriptor port_;
 
-  base::WeakPtrFactory<MessagePort> weak_factory_{this};
+  gin::WeakCellFactory<MessagePort> weak_factory_{this};
 };
 
 }  // namespace electron

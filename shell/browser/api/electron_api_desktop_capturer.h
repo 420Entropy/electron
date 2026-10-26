@@ -9,17 +9,15 @@
 #include <string>
 #include <vector>
 
-#include "chrome/browser/media/webrtc/desktop_media_list_observer.h"
-#include "chrome/browser/media/webrtc/native_desktop_media_list.h"
-#include "gin/handle.h"
+#include "base/timer/timer.h"
+#include "chrome/browser/media/webrtc/desktop_media_list.h"
+#include "gin/weak_cell.h"
 #include "gin/wrappable.h"
-#include "shell/common/gin_helper/pinnable.h"
+#include "shell/common/gin_helper/self_keep_alive.h"
 
 namespace electron::api {
 
-class DesktopCapturer : public gin::Wrappable<DesktopCapturer>,
-                        public gin_helper::Pinnable<DesktopCapturer>,
-                        public DesktopMediaListObserver {
+class DesktopCapturer final : public gin::Wrappable<DesktopCapturer> {
  public:
   struct Source {
     DesktopMediaList::Source media_list_source;
@@ -28,53 +26,69 @@ class DesktopCapturer : public gin::Wrappable<DesktopCapturer>,
 
     // Whether or not this source should provide an icon.
     bool fetch_icon = false;
+
+    // ScreenCast portal restore token; empty when the source has none.
+    std::string restore_token;
   };
 
-  static gin::Handle<DesktopCapturer> Create(v8::Isolate* isolate);
+  static DesktopCapturer* Create(v8::Isolate* isolate);
+
+  static bool IsDisplayMediaSystemPickerAvailable();
+
+  [[nodiscard]] static std::string GetRestoreToken(
+      const std::string& source_id);
 
   void StartHandling(bool capture_window,
                      bool capture_screen,
                      const gfx::Size& thumbnail_size,
-                     bool fetch_window_icons);
+                     bool fetch_window_icons,
+                     bool persistent,
+                     const std::string& restore_token);
 
   // gin::Wrappable
-  static gin::WrapperInfo kWrapperInfo;
+  static const gin::WrapperInfo kWrapperInfo;
+  void Trace(cppgc::Visitor* visitor) const override;
+  const gin::WrapperInfo* wrapper_info() const override;
   gin::ObjectTemplateBuilder GetObjectTemplateBuilder(
       v8::Isolate* isolate) override;
-  const char* GetTypeName() override;
+  const char* GetHumanReadableName() const override;
 
   // disable copy
   DesktopCapturer(const DesktopCapturer&) = delete;
   DesktopCapturer& operator=(const DesktopCapturer&) = delete;
 
- protected:
-  explicit DesktopCapturer(v8::Isolate* isolate);
+  // Make public for cppgc::MakeGarbageCollected.
+  DesktopCapturer();
   ~DesktopCapturer() override;
 
-  // DesktopMediaListObserver:
-  void OnSourceAdded(int index) override {}
-  void OnSourceRemoved(int index) override {}
-  void OnSourceMoved(int old_index, int new_index) override {}
-  void OnSourceNameChanged(int index) override {}
-  void OnSourceThumbnailChanged(int index) override {}
-  void OnSourcePreviewChanged(size_t index) override {}
-  void OnDelegatedSourceListSelection() override {}
-  void OnDelegatedSourceListDismissed() override {}
-
  private:
-  void UpdateSourcesList(DesktopMediaList* list);
+  class ListObserver;
 
+  cppgc::Persistent<gin::WeakCell<DesktopCapturer>> WeakCallbackTarget();
+
+  void FinalizeList(std::unique_ptr<ListObserver>& observer,
+                    std::unique_ptr<DesktopMediaList>& list);
+  void OnListReady(DesktopMediaList::Type type);
+  void OnReadyTimeout();
+  void CollectSourcesFrom(DesktopMediaList* list);
+  void HandleFailure();
+  void HandleSuccess();
+
+  std::unique_ptr<ListObserver> window_observer_;
+  std::unique_ptr<ListObserver> screen_observer_;
   std::unique_ptr<DesktopMediaList> window_capturer_;
   std::unique_ptr<DesktopMediaList> screen_capturer_;
   std::vector<DesktopCapturer::Source> captured_sources_;
-  bool capture_window_ = false;
-  bool capture_screen_ = false;
+  int pending_lists_ = 0;
+  bool finished_ = false;
   bool fetch_window_icons_ = false;
+  base::OneShotTimer deadline_;
 #if BUILDFLAG(IS_WIN)
   bool using_directx_capturer_ = false;
 #endif  // BUILDFLAG(IS_WIN)
 
-  base::WeakPtrFactory<DesktopCapturer> weak_ptr_factory_{this};
+  gin_helper::SelfKeepAlive<DesktopCapturer> keep_alive_{this};
+  gin::WeakCellFactory<DesktopCapturer> weak_factory_{this};
 };
 
 }  // namespace electron::api

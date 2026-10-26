@@ -8,10 +8,10 @@
 #ifndef ELECTRON_SHELL_BROWSER_UI_VIEWS_WIN_CAPTION_BUTTON_CONTAINER_H_
 #define ELECTRON_SHELL_BROWSER_UI_VIEWS_WIN_CAPTION_BUTTON_CONTAINER_H_
 
+#include "base/memory/raw_ptr.h"
 #include "base/scoped_observation.h"
 #include "ui/base/metadata/metadata_header_macros.h"
 #include "ui/base/pointer/touch_ui_controller.h"
-#include "ui/views/controls/button/button.h"
 #include "ui/views/view.h"
 #include "ui/views/widget/widget.h"
 #include "ui/views/widget/widget_observer.h"
@@ -25,7 +25,9 @@ class WinCaptionButton;
 // frame and browser window as needed. When extended horizontally, becomes a
 // grab bar for moving the window.
 class WinCaptionButtonContainer : public views::View,
-                                  public views::WidgetObserver {
+                                  private views::WidgetObserver {
+  METADATA_HEADER(WinCaptionButtonContainer, views::View)
+
  public:
   explicit WinCaptionButtonContainer(WinFrameView* frame_view);
   ~WinCaptionButtonContainer() override;
@@ -38,8 +40,13 @@ class WinCaptionButtonContainer : public views::View,
   // See also ClientView::NonClientHitTest.
   int NonClientHitTest(const gfx::Point& point) const;
 
-  gfx::Size GetButtonSize() const;
   void SetButtonSize(gfx::Size size);
+
+  // Add tooltip text to caption buttons.
+  void UpdateButtonToolTipsForWindowControlsOverlay();
+
+  // Sets caption button container background color.
+  void UpdateBackground();
 
   // Sets caption button visibility and enabled state based on window state.
   // Only one of maximize or restore button should ever be visible at the same
@@ -58,11 +65,11 @@ class WinCaptionButtonContainer : public views::View,
   void OnWidgetBoundsChanged(views::Widget* widget,
                              const gfx::Rect& new_bounds) override;
 
-  WinFrameView* const frame_view_;
-  WinCaptionButton* const minimize_button_;
-  WinCaptionButton* const maximize_button_;
-  WinCaptionButton* const restore_button_;
-  WinCaptionButton* const close_button_;
+  const raw_ptr<WinFrameView> frame_view_;
+  const raw_ptr<WinCaptionButton> minimize_button_;
+  const raw_ptr<WinCaptionButton> maximize_button_;
+  const raw_ptr<WinCaptionButton> restore_button_;
+  const raw_ptr<WinCaptionButton> close_button_;
 
   base::ScopedObservation<views::Widget, views::WidgetObserver>
       widget_observation_{this};

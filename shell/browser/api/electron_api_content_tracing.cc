@@ -2,26 +2,74 @@
 // Use of this source code is governed by the MIT license that can be
 // found in the LICENSE file.
 
+#include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include "base/files/file_util.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
+#include "base/strings/strcat.h"
+#include "base/strings/string_number_conversions.h"
+#include "base/task/bind_post_task.h"
 #include "base/task/thread_pool.h"
 #include "base/threading/thread_restrictions.h"
 #include "base/trace_event/trace_config.h"
+#include "content/browser/tracing/tracing_controller_impl.h"  // nogncheck
 #include "content/public/browser/tracing_controller.h"
+#include "services/tracing/public/cpp/perfetto/perfetto_config.h"
+#include "services/tracing/public/cpp/perfetto/perfetto_data_source_names.h"
+#include "shell/browser/browser.h"
+#include "shell/browser/javascript_environment.h"
 #include "shell/common/gin_converters/callback_converter.h"
 #include "shell/common/gin_converters/file_path_converter.h"
 #include "shell/common/gin_converters/value_converter.h"
 #include "shell/common/gin_helper/dictionary.h"
 #include "shell/common/gin_helper/promise.h"
 #include "shell/common/node_includes.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "third_party/perfetto/include/perfetto/tracing/core/trace_config.h"
+#include "third_party/perfetto/protos/perfetto/config/chrome/sampling_heap_profiler.gen.h"
+#include "third_party/perfetto/protos/perfetto/config/trace_config.gen.h"
 
 using content::TracingController;
+using namespace std::literals;
+
+namespace {
+
+struct NativeHeapProfilerOptions {
+  // 0 writes one snapshot when tracing stops, matching Chromium's default.
+  uint32_t dump_interval_ms = 0;
+  // 0 uses Chromium's default sampling interval
+  // (base::PoissonAllocationSampler::kDefaultSamplingIntervalBytes); the data
+  // source itself treats 0 this way, so there's no need to duplicate the
+  // constant here and risk drifting from it.
+  uint32_t sampling_interval_bytes = 0;
+};
+
+}  // namespace
 
 namespace gin {
+
+template <>
+struct Converter<NativeHeapProfilerOptions> {
+  static bool FromV8(v8::Isolate* isolate,
+                     v8::Local<v8::Value> val,
+                     NativeHeapProfilerOptions* out) {
+    gin_helper::Dictionary options;
+    if (!ConvertFromV8(isolate, val, &options))
+      return false;
+
+    if (options.Has("samplingInterval") &&
+        (!options.Get("samplingInterval", &out->sampling_interval_bytes) ||
+         out->sampling_interval_bytes == 0)) {
+      return false;
+    }
+    return !options.Has("dumpInterval") ||
+           options.Get("dumpInterval", &out->dump_interval_ms);
+  }
+};
 
 template <>
 struct Converter<base::trace_event::TraceConfig> {
@@ -42,9 +90,9 @@ struct Converter<base::trace_event::TraceConfig> {
       }
     }
 
-    base::Value::Dict memory_dump_config;
+    base::DictValue memory_dump_config;
     if (ConvertFromV8(isolate, val, &memory_dump_config)) {
-      *out = base::trace_event::TraceConfig(std::move(memory_dump_config));
+      *out = base::trace_event::TraceConfig(memory_dump_config);
       return true;
     }
 
@@ -56,51 +104,84 @@ struct Converter<base::trace_event::TraceConfig> {
 
 namespace {
 
-using CompletionCallback = base::OnceCallback<void(const base::FilePath&)>;
+void AddHeapProfilingDataSource(
+    const base::trace_event::TraceConfig& trace_config,
+    const NativeHeapProfilerOptions& heap_profiler_options,
+    perfetto::TraceConfig* perfetto_config) {
+  auto* heap_data_source = perfetto_config->add_data_sources();
+  auto* data_source = heap_data_source->mutable_config();
+  data_source->set_name(tracing::kNativeHeapProfilerSourceName);
+  data_source->set_target_buffer(0);
+  for (const auto& included_pid :
+       trace_config.process_filter_config().included_process_ids()) {
+    *heap_data_source->add_producer_name_filter() = base::StrCat(
+        {tracing::kPerfettoProducerNamePrefix,
+         base::NumberToString(static_cast<uint32_t>(included_pid))});
+  }
 
-absl::optional<base::FilePath> CreateTemporaryFileOnIO() {
+  perfetto::protos::gen::ChromiumSamplingHeapProfilerConfig heap_config;
+  heap_config.set_sampling_interval_bytes(
+      heap_profiler_options.sampling_interval_bytes);
+  heap_config.set_sampling_interval_ms(heap_profiler_options.dump_interval_ms);
+  data_source->set_chromium_sampling_heap_profiler_raw(
+      heap_config.SerializeAsString());
+}
+
+std::optional<base::FilePath> CreateTemporaryFileOnIO() {
   base::FilePath temp_file_path;
   if (!base::CreateTemporaryFile(&temp_file_path))
-    return absl::nullopt;
-  return absl::make_optional(std::move(temp_file_path));
+    return std::nullopt;
+  return std::make_optional(std::move(temp_file_path));
 }
 
 void StopTracing(gin_helper::Promise<base::FilePath> promise,
-                 absl::optional<base::FilePath> file_path) {
+                 std::optional<base::FilePath> file_path) {
   auto resolve_or_reject = base::BindOnce(
       [](gin_helper::Promise<base::FilePath> promise,
-         const base::FilePath& path, absl::optional<std::string> error) {
-        if (error) {
-          promise.RejectWithErrorMessage(error.value());
+         const base::FilePath& path, const std::string_view error) {
+        if (!std::empty(error)) {
+          promise.RejectWithErrorMessage(error);
         } else {
           promise.Resolve(path);
         }
       },
-      std::move(promise), *file_path);
-  if (file_path) {
+      std::move(promise), file_path.value_or(base::FilePath()));
+
+  auto* instance = TracingController::GetInstance();
+  if (!instance->IsTracing()) {
+    std::move(resolve_or_reject)
+        .Run("Failed to stop tracing - no trace in progress"sv);
+  } else if (file_path) {
     auto split_callback = base::SplitOnceCallback(std::move(resolve_or_reject));
+    // The file endpoint hands this closure to a thread pool sequence and, if
+    // it fails to write the trace file, drops it there without running it. The
+    // promise it owns must be destroyed on the thread that created it, so make
+    // sure both running and destroying the closure happen back on this thread.
     auto endpoint = TracingController::CreateFileEndpoint(
-        *file_path,
-        base::BindOnce(std::move(split_callback.first), absl::nullopt));
-    if (!TracingController::GetInstance()->StopTracing(endpoint)) {
-      std::move(split_callback.second)
-          .Run(absl::make_optional(
-              "Failed to stop tracing (was a trace in progress?)"));
+        *file_path, base::BindPostTaskToCurrentDefault(
+                        base::BindOnce(std::move(split_callback.first), ""sv)));
+    if (!instance->StopTracing(endpoint)) {
+      std::move(split_callback.second).Run("Failed to stop tracing"sv);
     }
   } else {
     std::move(resolve_or_reject)
-        .Run(absl::make_optional(
-            "Failed to create temporary file for trace data"));
+        .Run("Failed to create temporary file for trace data"sv);
   }
 }
 
-v8::Local<v8::Promise> StopRecording(gin_helper::Arguments* args) {
-  gin_helper::Promise<base::FilePath> promise(args->isolate());
+v8::Local<v8::Promise> StopRecording(gin::Arguments* const args) {
+  gin_helper::Promise<base::FilePath> promise{args->isolate()};
   v8::Local<v8::Promise> handle = promise.GetHandle();
+
+  if (!electron::Browser::Get()->is_ready()) {
+    promise.RejectWithErrorMessage(
+        "contentTracing cannot be used before app is ready");
+    return handle;
+  }
 
   base::FilePath path;
   if (args->GetNext(&path) && !path.empty()) {
-    StopTracing(std::move(promise), absl::make_optional(path));
+    StopTracing(std::move(promise), std::make_optional(path));
   } else {
     // use a temporary file.
     base::ThreadPool::PostTaskAndReplyWithResult(
@@ -116,6 +197,12 @@ v8::Local<v8::Promise> GetCategories(v8::Isolate* isolate) {
   gin_helper::Promise<const std::set<std::string>&> promise(isolate);
   v8::Local<v8::Promise> handle = promise.GetHandle();
 
+  if (!electron::Browser::Get()->is_ready()) {
+    promise.RejectWithErrorMessage(
+        "contentTracing cannot be used before app is ready");
+    return handle;
+  }
+
   // Note: This method always succeeds.
   TracingController::GetInstance()->GetCategories(base::BindOnce(
       gin_helper::Promise<const std::set<std::string>&>::ResolvePromise,
@@ -124,19 +211,78 @@ v8::Local<v8::Promise> GetCategories(v8::Isolate* isolate) {
   return handle;
 }
 
-v8::Local<v8::Promise> StartTracing(
-    v8::Isolate* isolate,
-    const base::trace_event::TraceConfig& trace_config) {
+v8::Local<v8::Promise> StartTracing(gin::Arguments* const args) {
+  v8::Isolate* const isolate = args->isolate();
   gin_helper::Promise<void> promise(isolate);
   v8::Local<v8::Promise> handle = promise.GetHandle();
 
-  if (!TracingController::GetInstance()->StartTracing(
-          trace_config,
+  if (!electron::Browser::Get()->is_ready()) {
+    promise.RejectWithErrorMessage(
+        "contentTracing cannot be used before app is ready");
+    return handle;
+  }
+
+  gin_helper::Dictionary options;
+  if (!args->GetNext(&options)) {
+    args->ThrowTypeError(
+        "contentTracing.startRecording() requires a TraceConfig or "
+        "TraceCategoriesAndOptions object as its first argument");
+    return v8::Local<v8::Promise>();
+  }
+
+  // nativeHeapProfiling is an Electron-only addition to the Chromium-schema
+  // TraceConfig/TraceCategoriesAndOptions object -- pull it out before
+  // converting the rest, since the TraceConfig converter below doesn't know
+  // about it (and safely ignores it as just another unrecognized key).
+  std::optional<NativeHeapProfilerOptions> heap_profiler_options;
+  if (options.Has("nativeHeapProfiling")) {
+    NativeHeapProfilerOptions native_heap_profiling;
+    if (!options.Get("nativeHeapProfiling", &native_heap_profiling)) {
+      args->ThrowTypeError(
+          "contentTracing.startRecording()'s nativeHeapProfiling option is "
+          "invalid");
+      return v8::Local<v8::Promise>();
+    }
+    heap_profiler_options = native_heap_profiling;
+  }
+
+  base::trace_event::TraceConfig trace_config;
+  if (!gin::ConvertFromV8(isolate, options.GetHandle(), &trace_config)) {
+    args->ThrowTypeError(
+        "contentTracing.startRecording() requires a TraceConfig or "
+        "TraceCategoriesAndOptions object as its first argument");
+    return v8::Local<v8::Promise>();
+  }
+
+  auto* instance = content::TracingControllerImpl::GetInstance();
+  if (instance->IsTracing()) {
+    if (heap_profiler_options) {
+      // Silently resolving here would mislead the caller into believing heap
+      // profiling is now on, when the already-running recording's options
+      // are left untouched.
+      promise.RejectWithErrorMessage(
+          "Cannot start heap profiling while a recording is in progress");
+      return handle;
+    }
+    return gin_helper::Promise<void>::ResolvedPromise(isolate);
+  }
+
+  // Recordings always use the Perfetto protobuf format.
+  perfetto::TraceConfig perfetto_config = tracing::GetDefaultPerfettoConfig(
+      trace_config, /*privacy_filtering_enabled=*/false,
+      /*convert_to_legacy_json=*/false);
+  if (heap_profiler_options) {
+    AddHeapProfilingDataSource(trace_config, *heap_profiler_options,
+                               &perfetto_config);
+  }
+
+  if (!instance->StartTracingWithPerfettoConfig(
+          perfetto_config,
           base::BindOnce(gin_helper::Promise<void>::ResolvePromise,
                          std::move(promise)))) {
-    // If StartTracing returns false, that means it didn't invoke its callback.
-    // Return an already-resolved promise and abandon the previous promise (it
-    // was std::move()d into the StartTracing callback and has been deleted by
+    // If StartTracingWithPerfettoConfig returns false, it didn't invoke its
+    // callback. Return an already-resolved promise and abandon the previous
+    // promise (it was std::move()d into the callback and has been deleted by
     // this point).
     return gin_helper::Promise<void>::ResolvedPromise(isolate);
   }
@@ -147,7 +293,10 @@ void OnTraceBufferUsageAvailable(
     gin_helper::Promise<gin_helper::Dictionary> promise,
     float percent_full,
     size_t approximate_count) {
-  gin_helper::Dictionary dict = gin::Dictionary::CreateEmpty(promise.isolate());
+  v8::Isolate* isolate = promise.isolate();
+  v8::HandleScope handle_scope(isolate);
+
+  auto dict = gin_helper::Dictionary::CreateEmpty(isolate);
   dict.Set("percentage", percent_full);
   dict.Set("value", approximate_count);
 
@@ -157,6 +306,12 @@ void OnTraceBufferUsageAvailable(
 v8::Local<v8::Promise> GetTraceBufferUsage(v8::Isolate* isolate) {
   gin_helper::Promise<gin_helper::Dictionary> promise(isolate);
   v8::Local<v8::Promise> handle = promise.GetHandle();
+
+  if (!electron::Browser::Get()->is_ready()) {
+    promise.RejectWithErrorMessage(
+        "contentTracing cannot be used before app is ready");
+    return handle;
+  }
 
   // Note: This method always succeeds.
   TracingController::GetInstance()->GetTraceBufferUsage(
@@ -168,11 +323,12 @@ void Initialize(v8::Local<v8::Object> exports,
                 v8::Local<v8::Value> unused,
                 v8::Local<v8::Context> context,
                 void* priv) {
-  gin_helper::Dictionary dict(context->GetIsolate(), exports);
-  dict.SetMethod("getCategories", &GetCategories);
-  dict.SetMethod("startRecording", &StartTracing);
-  dict.SetMethod("stopRecording", &StopRecording);
-  dict.SetMethod("getTraceBufferUsage", &GetTraceBufferUsage);
+  v8::Isolate* const isolate = electron::JavascriptEnvironment::GetIsolate();
+  gin_helper::Dictionary dict{isolate, exports};
+  dict.SetMethod<&GetCategories>("getCategories");
+  dict.SetMethod<&StartTracing>("startRecording");
+  dict.SetMethod<&StopRecording>("stopRecording");
+  dict.SetMethod<&GetTraceBufferUsage>("getTraceBufferUsage");
 }
 
 }  // namespace

@@ -5,22 +5,35 @@
 #include "shell/browser/api/electron_api_web_request.h"
 
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 
-#include "base/stl_util.h"
+#include "base/containers/fixed_flat_map.h"
+#include "base/memory/raw_ptr.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/values.h"
-#include "extensions/browser/api/web_request/web_request_resource_type.h"
+#include "content/public/browser/web_contents.h"
+#include "extensions/browser/api/web_request/web_request_info.h"
+#include "extensions/browser/extension_navigation_ui_data.h"
+#include "extensions/common/api/web_request/web_request_resource_type.h"
+#include "extensions/common/url_pattern.h"
 #include "gin/converter.h"
 #include "gin/dictionary.h"
 #include "gin/object_template_builder.h"
-#include "net/http/http_content_disposition.h"
+#include "gin/persistent.h"
+#include "net/url_request/redirect_info.h"
+#include "services/network/public/cpp/url_loader_completion_status.h"
+#include "services/network/public/mojom/url_response_head.mojom.h"
 #include "shell/browser/api/electron_api_session.h"
 #include "shell/browser/api/electron_api_web_contents.h"
 #include "shell/browser/api/electron_api_web_frame_main.h"
+#include "shell/browser/electron_browser_client.h"
 #include "shell/browser/electron_browser_context.h"
 #include "shell/browser/javascript_environment.h"
+#include "shell/browser/login_handler.h"
+#include "shell/browser/net/url_loader_factory_gate.h"
 #include "shell/common/gin_converters/callback_converter.h"
 #include "shell/common/gin_converters/frame_converter.h"
 #include "shell/common/gin_converters/gurl_converter.h"
@@ -28,6 +41,25 @@
 #include "shell/common/gin_converters/std_converter.h"
 #include "shell/common/gin_converters/value_converter.h"
 #include "shell/common/gin_helper/dictionary.h"
+#include "shell/common/gin_helper/wrappable_pointer_tags.h"
+#include "shell/common/node_util.h"
+
+static constexpr auto ResourceTypes =
+    base::MakeFixedFlatMap<std::string_view,
+                           extensions::WebRequestResourceType>({
+        {"cspReport", extensions::WebRequestResourceType::CSP_REPORT},
+        {"font", extensions::WebRequestResourceType::FONT},
+        {"image", extensions::WebRequestResourceType::IMAGE},
+        {"mainFrame", extensions::WebRequestResourceType::MAIN_FRAME},
+        {"media", extensions::WebRequestResourceType::MEDIA},
+        {"object", extensions::WebRequestResourceType::OBJECT},
+        {"ping", extensions::WebRequestResourceType::PING},
+        {"script", extensions::WebRequestResourceType::SCRIPT},
+        {"stylesheet", extensions::WebRequestResourceType::STYLESHEET},
+        {"subFrame", extensions::WebRequestResourceType::SUB_FRAME},
+        {"webSocket", extensions::WebRequestResourceType::WEB_SOCKET},
+        {"xhr", extensions::WebRequestResourceType::XHR},
+    });
 
 namespace gin {
 
@@ -35,48 +67,11 @@ template <>
 struct Converter<extensions::WebRequestResourceType> {
   static v8::Local<v8::Value> ToV8(v8::Isolate* isolate,
                                    extensions::WebRequestResourceType type) {
-    const char* result;
-    switch (type) {
-      case extensions::WebRequestResourceType::MAIN_FRAME:
-        result = "mainFrame";
-        break;
-      case extensions::WebRequestResourceType::SUB_FRAME:
-        result = "subFrame";
-        break;
-      case extensions::WebRequestResourceType::STYLESHEET:
-        result = "stylesheet";
-        break;
-      case extensions::WebRequestResourceType::SCRIPT:
-        result = "script";
-        break;
-      case extensions::WebRequestResourceType::IMAGE:
-        result = "image";
-        break;
-      case extensions::WebRequestResourceType::FONT:
-        result = "font";
-        break;
-      case extensions::WebRequestResourceType::OBJECT:
-        result = "object";
-        break;
-      case extensions::WebRequestResourceType::XHR:
-        result = "xhr";
-        break;
-      case extensions::WebRequestResourceType::PING:
-        result = "ping";
-        break;
-      case extensions::WebRequestResourceType::CSP_REPORT:
-        result = "cspReport";
-        break;
-      case extensions::WebRequestResourceType::MEDIA:
-        result = "media";
-        break;
-      case extensions::WebRequestResourceType::WEB_SOCKET:
-        result = "webSocket";
-        break;
-      default:
-        result = "other";
-    }
-    return StringToV8(isolate, result);
+    for (const auto& [name, val] : ResourceTypes)
+      if (type == val)
+        return StringToV8(isolate, name);
+
+    return StringToV8(isolate, "other");
   }
 };
 
@@ -86,42 +81,11 @@ namespace electron::api {
 
 namespace {
 
-const char kUserDataKey[] = "WebRequest";
+extensions::WebRequestResourceType ParseResourceType(std::string_view value) {
+  if (auto iter = ResourceTypes.find(value); iter != ResourceTypes.end())
+    return iter->second;
 
-// BrowserContext <=> WebRequest relationship.
-struct UserData : public base::SupportsUserData::Data {
-  explicit UserData(WebRequest* data) : data(data) {}
-  WebRequest* data;
-};
-
-extensions::WebRequestResourceType ParseResourceType(const std::string& value) {
-  if (value == "mainFrame") {
-    return extensions::WebRequestResourceType::MAIN_FRAME;
-  } else if (value == "subFrame") {
-    return extensions::WebRequestResourceType::SUB_FRAME;
-  } else if (value == "stylesheet") {
-    return extensions::WebRequestResourceType::STYLESHEET;
-  } else if (value == "script") {
-    return extensions::WebRequestResourceType::SCRIPT;
-  } else if (value == "image") {
-    return extensions::WebRequestResourceType::IMAGE;
-  } else if (value == "font") {
-    return extensions::WebRequestResourceType::FONT;
-  } else if (value == "object") {
-    return extensions::WebRequestResourceType::OBJECT;
-  } else if (value == "xhr") {
-    return extensions::WebRequestResourceType::XHR;
-  } else if (value == "ping") {
-    return extensions::WebRequestResourceType::PING;
-  } else if (value == "cspReport") {
-    return extensions::WebRequestResourceType::CSP_REPORT;
-  } else if (value == "media") {
-    return extensions::WebRequestResourceType::MEDIA;
-  } else if (value == "webSocket") {
-    return extensions::WebRequestResourceType::WEB_SOCKET;
-  } else {
-    return extensions::WebRequestResourceType::OTHER;
-  }
+  return extensions::WebRequestResourceType::OTHER;
 }
 
 // Convert HttpResponseHeaders to V8.
@@ -131,32 +95,13 @@ extensions::WebRequestResourceType ParseResourceType(const std::string& value) {
 // to pass the original keys.
 v8::Local<v8::Value> HttpResponseHeadersToV8(
     net::HttpResponseHeaders* headers) {
-  base::Value::Dict response_headers;
+  base::DictValue response_headers;
   if (headers) {
     size_t iter = 0;
     std::string key;
     std::string value;
     while (headers->EnumerateHeaderLines(&iter, &key, &value)) {
-      // Note that Web servers not developed with nodejs allow non-utf8
-      // characters in content-disposition's filename field. Use Chromium's
-      // HttpContentDisposition class to decode the correct encoding instead of
-      // arbitrarily converting it to UTF8. It should also be noted that if the
-      // encoding is not specified, HttpContentDisposition will transcode
-      // according to the system's encoding.
-      if (base::EqualsCaseInsensitiveASCII("Content-Disposition", key) &&
-          !value.empty()) {
-        net::HttpContentDisposition header(value, std::string());
-        std::string decodedFilename =
-            header.is_attachment() ? " attachment" : " inline";
-        // The filename must be encased in double quotes for serialization
-        // to happen correctly.
-        std::string filename = "\"" + header.filename() + "\"";
-        value = decodedFilename + "; filename=" + filename;
-      }
-      base::Value::List* values = response_headers.FindList(key);
-      if (!values)
-        values = &response_headers.Set(key, base::Value::List())->GetList();
-      values->Append(base::Value(value));
+      response_headers.EnsureList(key)->Append(value);
     }
   }
   return gin::ConvertToV8(v8::Isolate::GetCurrent(), response_headers);
@@ -164,14 +109,20 @@ v8::Local<v8::Value> HttpResponseHeadersToV8(
 
 // Overloaded by multiple types to fill the |details| object.
 void ToDictionary(gin_helper::Dictionary* details,
-                  extensions::WebRequestInfo* info) {
+                  const extensions::WebRequestInfo* info) {
   details->Set("id", info->id);
   details->Set("url", info->url);
   details->Set("method", info->method);
-  details->Set("timestamp", base::Time::Now().ToDoubleT() * 1000);
+  details->Set("timestamp",
+               base::Time::Now().InSecondsFSinceUnixEpoch() * 1000);
   details->Set("resourceType", info->web_request_type);
   if (!info->response_ip.empty())
     details->Set("ip", info->response_ip);
+  // The origin that issued the request (Chrome's webRequest `initiator`). It
+  // is kept from the original request across redirects and, unlike
+  // `referrer`, is not under the requesting document's control.
+  if (info->initiator)
+    details->Set("initiatorOrigin", info->initiator->Serialize());
   if (info->response_headers) {
     details->Set("fromCache", info->response_from_cache);
     details->Set("statusLine", info->response_headers->GetStatusLine());
@@ -180,8 +131,7 @@ void ToDictionary(gin_helper::Dictionary* details,
                  HttpResponseHeadersToV8(info->response_headers.get()));
   }
 
-  auto* render_frame_host = content::RenderFrameHost::FromID(
-      info->render_process_id, info->frame_routing_id);
+  auto* render_frame_host = content::RenderFrameHost::FromID(info->global_id);
   if (render_frame_host) {
     details->SetGetter("frame", render_frame_host);
     auto* web_contents =
@@ -197,8 +147,6 @@ void ToDictionary(gin_helper::Dictionary* details,
 void ToDictionary(gin_helper::Dictionary* details,
                   const network::ResourceRequest& request) {
   details->Set("referrer", request.referrer);
-  if (request.request_body)
-    details->Set("uploadData", *request.request_body);
 }
 
 void ToDictionary(gin_helper::Dictionary* details,
@@ -226,53 +174,72 @@ void FillDetails(gin_helper::Dictionary* details, Arg arg, Args... args) {
   FillDetails(details, args...);
 }
 
-// Fill the native types with the result from the response object.
-void ReadFromResponse(v8::Isolate* isolate,
-                      gin::Dictionary* response,
-                      GURL* new_location) {
-  response->Get("redirectURL", new_location);
+// Modified from extensions/browser/api/web_request/web_request_api_helpers.cc.
+std::pair<std::set<std::string>, std::set<std::string>>
+CalculateOnBeforeSendHeadersDelta(const net::HttpRequestHeaders* old_headers,
+                                  const net::HttpRequestHeaders* new_headers) {
+  // Newly introduced or overridden request headers.
+  std::set<std::string> modified_request_headers;
+  // Keys of request headers to be deleted.
+  std::set<std::string> deleted_request_headers;
+
+  // The event listener might not have passed any new headers if it
+  // just wanted to cancel the request.
+  if (new_headers) {
+    // Find deleted headers.
+    {
+      net::HttpRequestHeaders::Iterator i(*old_headers);
+      while (i.GetNext()) {
+        if (!new_headers->HasHeader(i.name())) {
+          deleted_request_headers.insert(i.name());
+        }
+      }
+    }
+
+    // Find modified headers.
+    {
+      net::HttpRequestHeaders::Iterator i(*new_headers);
+      while (i.GetNext()) {
+        if (i.value() != old_headers->GetHeader(i.name())) {
+          modified_request_headers.insert(i.name());
+        }
+      }
+    }
+  }
+
+  return std::make_pair(modified_request_headers, deleted_request_headers);
 }
 
-void ReadFromResponse(v8::Isolate* isolate,
-                      gin::Dictionary* response,
-                      net::HttpRequestHeaders* headers) {
-  v8::Local<v8::Value> value;
-  if (response->Get("requestHeaders", &value) && value->IsObject()) {
-    headers->Clear();
-    gin::Converter<net::HttpRequestHeaders>::FromV8(isolate, value, headers);
-  }
-}
-
-void ReadFromResponse(v8::Isolate* isolate,
-                      gin::Dictionary* response,
-                      const std::pair<scoped_refptr<net::HttpResponseHeaders>*,
-                                      const std::string>& headers) {
-  std::string status_line;
-  if (!response->Get("statusLine", &status_line))
-    status_line = headers.second;
-  v8::Local<v8::Value> value;
-  if (response->Get("responseHeaders", &value) && value->IsObject()) {
-    *headers.first = new net::HttpResponseHeaders("");
-    (*headers.first)->ReplaceStatusLine(status_line);
-    gin::Converter<net::HttpResponseHeaders*>::FromV8(isolate, value,
-                                                      (*headers.first).get());
-  }
+WebRequest* ForObservedRequest(
+    const base::WeakPtr<ElectronBrowserContext>& browser_context) {
+  if (!browser_context)
+    return nullptr;
+  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
+  v8::HandleScope scope(isolate);
+  return WebRequest::FromOrCreate(isolate, browser_context.get());
 }
 
 }  // namespace
 
-gin::WrapperInfo WebRequest::kWrapperInfo = {gin::kEmbedderNativeGin};
+const gin::WrapperInfo WebRequest::kWrapperInfo =
+    electron::MakeWrapperInfo(electron::kElectronWebRequest);
 
-WebRequest::RequestFilter::RequestFilter(
-    std::set<URLPattern> url_patterns,
-    std::set<extensions::WebRequestResourceType> types)
-    : url_patterns_(std::move(url_patterns)), types_(std::move(types)) {}
 WebRequest::RequestFilter::RequestFilter(const RequestFilter&) = default;
+WebRequest::RequestFilter::RequestFilter(RequestFilter&&) = default;
+WebRequest::RequestFilter& WebRequest::RequestFilter::operator=(
+    const RequestFilter&) = default;
+WebRequest::RequestFilter& WebRequest::RequestFilter::operator=(
+    RequestFilter&&) = default;
 WebRequest::RequestFilter::RequestFilter() = default;
 WebRequest::RequestFilter::~RequestFilter() = default;
 
-void WebRequest::RequestFilter::AddUrlPattern(URLPattern pattern) {
-  url_patterns_.emplace(std::move(pattern));
+void WebRequest::RequestFilter::AddUrlPattern(URLPattern pattern,
+                                              bool is_match_pattern) {
+  if (is_match_pattern) {
+    include_url_patterns_.emplace(std::move(pattern));
+  } else {
+    exclude_url_patterns_.emplace(std::move(pattern));
+  }
 }
 
 void WebRequest::RequestFilter::AddType(
@@ -280,11 +247,13 @@ void WebRequest::RequestFilter::AddType(
   types_.insert(type);
 }
 
-bool WebRequest::RequestFilter::MatchesURL(const GURL& url) const {
-  if (url_patterns_.empty())
-    return true;
+bool WebRequest::RequestFilter::MatchesURL(
+    const GURL& url,
+    const std::set<URLPattern>& patterns) const {
+  if (patterns.empty())
+    return false;
 
-  for (const auto& pattern : url_patterns_) {
+  for (const auto& pattern : patterns) {
     if (pattern.MatchesURL(url))
       return true;
   }
@@ -293,13 +262,68 @@ bool WebRequest::RequestFilter::MatchesURL(const GURL& url) const {
 
 bool WebRequest::RequestFilter::MatchesType(
     extensions::WebRequestResourceType type) const {
-  return types_.empty() || types_.find(type) != types_.end();
+  return types_.empty() || types_.contains(type);
 }
 
 bool WebRequest::RequestFilter::MatchesRequest(
-    extensions::WebRequestInfo* info) const {
-  return MatchesURL(info->url) && MatchesType(info->web_request_type);
+    const extensions::WebRequestInfo* info) const {
+  // Matches URL and type, and does not match exclude URL.
+  return MatchesURL(info->url, include_url_patterns_) &&
+         !MatchesURL(info->url, exclude_url_patterns_) &&
+         MatchesType(info->web_request_type);
 }
+
+uint32_t WebRequest::RequestFilter::TypeMask() const {
+  if (types_.empty())
+    return kAllResourceTypes;
+  uint32_t mask = 0;
+  for (auto type : types_)
+    mask |= 1u << static_cast<int>(type);
+  return mask;
+}
+
+void WebRequest::RequestFilter::AddUrlPatterns(
+    const std::set<std::string>& filter_patterns,
+    RequestFilter* filter,
+    gin::Arguments* args,
+    bool is_match_pattern) {
+  for (const std::string& filter_pattern : filter_patterns) {
+    URLPattern pattern(URLPattern::SCHEME_ALL);
+    const URLPattern::ParseResult result = pattern.Parse(filter_pattern);
+    if (result == URLPattern::ParseResult::kSuccess) {
+      filter->AddUrlPattern(std::move(pattern), is_match_pattern);
+    } else {
+      const char* error_type = URLPattern::GetParseResultString(result);
+      args->ThrowTypeError("Invalid url pattern " + filter_pattern + ": " +
+                           error_type);
+      return;
+    }
+  }
+}
+
+struct WebRequest::BlockedRequest {
+  BlockedRequest() = default;
+  raw_ptr<const extensions::WebRequestInfo> request = nullptr;
+  net::CompletionOnceCallback callback;
+  // Only used for onBeforeSendHeaders.
+  BeforeSendHeadersCallback before_send_headers_callback;
+  // The callback to invoke for auth. If |auth_callback.is_null()| is false,
+  // |callback| must be NULL.
+  // Only valid for OnAuthRequired.
+  AuthCallback auth_callback;
+  // Only used for onBeforeSendHeaders.
+  raw_ptr<net::HttpRequestHeaders> request_headers = nullptr;
+  // Only used for onHeadersReceived.
+  scoped_refptr<const net::HttpResponseHeaders> original_response_headers;
+  // Only used for onHeadersReceived.
+  raw_ptr<scoped_refptr<net::HttpResponseHeaders>> override_response_headers =
+      nullptr;
+  std::string status_line;
+  // Only used for onBeforeRequest.
+  raw_ptr<GURL> new_url = nullptr;
+  // Owns the LoginHandler while waiting for auth credentials.
+  std::unique_ptr<LoginHandler> login_handler;
+};
 
 WebRequest::SimpleListenerInfo::SimpleListenerInfo(RequestFilter filter_,
                                                    SimpleListener listener_)
@@ -314,15 +338,10 @@ WebRequest::ResponseListenerInfo::ResponseListenerInfo(
 WebRequest::ResponseListenerInfo::ResponseListenerInfo() = default;
 WebRequest::ResponseListenerInfo::~ResponseListenerInfo() = default;
 
-WebRequest::WebRequest(v8::Isolate* isolate,
-                       content::BrowserContext* browser_context)
-    : browser_context_(browser_context) {
-  browser_context_->SetUserData(kUserDataKey, std::make_unique<UserData>(this));
-}
-
-WebRequest::~WebRequest() {
-  browser_context_->RemoveUserData(kUserDataKey);
-}
+WebRequest::WebRequest(base::PassKey<Session>,
+                       base::WeakPtr<ElectronBrowserContext> browser_context)
+    : browser_context_{std::move(browser_context)} {}
+WebRequest::~WebRequest() = default;
 
 gin::ObjectTemplateBuilder WebRequest::GetObjectTemplateBuilder(
     v8::Isolate* isolate) {
@@ -349,8 +368,17 @@ gin::ObjectTemplateBuilder WebRequest::GetObjectTemplateBuilder(
                  &WebRequest::SetSimpleListener<SimpleEvent::kOnCompleted>);
 }
 
-const char* WebRequest::GetTypeName() {
-  return "WebRequest";
+const gin::WrapperInfo* WebRequest::wrapper_info() const {
+  return &kWrapperInfo;
+}
+
+const char* WebRequest::GetHumanReadableName() const {
+  return "Electron / WebRequest";
+}
+
+void WebRequest::Trace(cppgc::Visitor* visitor) const {
+  gin::Wrappable<WebRequest>::Trace(visitor);
+  visitor->Trace(weak_factory_);
 }
 
 bool WebRequest::HasListener() const {
@@ -361,19 +389,156 @@ int WebRequest::OnBeforeRequest(extensions::WebRequestInfo* info,
                                 const network::ResourceRequest& request,
                                 net::CompletionOnceCallback callback,
                                 GURL* new_url) {
-  return HandleResponseEvent(ResponseEvent::kOnBeforeRequest, info,
-                             std::move(callback), new_url, request);
+  return HandleOnBeforeRequestResponseEvent(info, request, std::move(callback),
+                                            new_url);
+}
+
+int WebRequest::HandleOnBeforeRequestResponseEvent(
+    extensions::WebRequestInfo* request_info,
+    const network::ResourceRequest& request,
+    net::CompletionOnceCallback callback,
+    GURL* new_url) {
+  const auto iter = response_listeners_.find(ResponseEvent::kOnBeforeRequest);
+  if (iter == std::end(response_listeners_))
+    return net::OK;
+
+  const auto& info = iter->second;
+  if (!info.filter.MatchesRequest(request_info))
+    return net::OK;
+
+  BlockedRequest blocked_request;
+  blocked_request.callback = std::move(callback);
+  blocked_request.new_url = new_url;
+  blocked_requests_[request_info->id] = std::move(blocked_request);
+
+  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
+  v8::HandleScope handle_scope(isolate);
+  gin_helper::Dictionary details(isolate, v8::Object::New(isolate));
+  FillDetails(&details, request_info, request, *new_url);
+  if (request.request_body)
+    details.Set("uploadData", *request.request_body);
+
+  auto& allocation_handle = isolate->GetCppHeap()->GetAllocationHandle();
+  ResponseCallback response = base::BindOnce(
+      &WebRequest::OnBeforeRequestListenerResult,
+      gin::WrapPersistent(weak_factory_.GetWeakCell(allocation_handle)),
+      request_info->id);
+  info.listener.Run(gin::ConvertToV8(isolate, details), std::move(response));
+  return net::ERR_IO_PENDING;
+}
+
+void WebRequest::OnBeforeRequestListenerResult(uint64_t id,
+                                               v8::Local<v8::Value> response) {
+  auto nh = blocked_requests_.extract(id);
+  if (!nh)
+    return;
+
+  auto& request = nh.mapped();
+
+  int result = net::OK;
+  if (response->IsObject()) {
+    v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
+    gin::Dictionary dict(isolate, response.As<v8::Object>());
+
+    bool cancel = false;
+    dict.Get("cancel", &cancel);
+    if (cancel) {
+      result = net::ERR_BLOCKED_BY_CLIENT;
+    } else {
+      dict.Get("redirectURL", request.new_url.get());
+    }
+  }
+
+  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+      FROM_HERE, base::BindOnce(std::move(request.callback), result));
 }
 
 int WebRequest::OnBeforeSendHeaders(extensions::WebRequestInfo* info,
                                     const network::ResourceRequest& request,
                                     BeforeSendHeadersCallback callback,
                                     net::HttpRequestHeaders* headers) {
-  return HandleResponseEvent(
-      ResponseEvent::kOnBeforeSendHeaders, info,
-      base::BindOnce(std::move(callback), std::set<std::string>(),
-                     std::set<std::string>()),
-      headers, request, *headers);
+  return HandleOnBeforeSendHeadersResponseEvent(info, request,
+                                                std::move(callback), headers);
+}
+
+int WebRequest::HandleOnBeforeSendHeadersResponseEvent(
+    extensions::WebRequestInfo* request_info,
+    const network::ResourceRequest& request,
+    BeforeSendHeadersCallback callback,
+    net::HttpRequestHeaders* headers) {
+  const auto iter =
+      response_listeners_.find(ResponseEvent::kOnBeforeSendHeaders);
+  if (iter == std::end(response_listeners_))
+    return net::OK;
+
+  const auto& info = iter->second;
+  if (!info.filter.MatchesRequest(request_info))
+    return net::OK;
+
+  BlockedRequest blocked_request;
+  blocked_request.before_send_headers_callback = std::move(callback);
+  blocked_request.request_headers = headers;
+  blocked_requests_[request_info->id] = std::move(blocked_request);
+
+  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
+  v8::HandleScope handle_scope(isolate);
+  gin_helper::Dictionary details(isolate, v8::Object::New(isolate));
+  FillDetails(&details, request_info, request, *headers);
+  if (request.request_body)
+    details.Set("uploadData", *request.request_body);
+
+  ResponseCallback response =
+      base::BindOnce(&WebRequest::OnBeforeSendHeadersListenerResult,
+                     base::Unretained(this), request_info->id);
+  info.listener.Run(gin::ConvertToV8(isolate, details), std::move(response));
+  return net::ERR_IO_PENDING;
+}
+
+void WebRequest::OnBeforeSendHeadersListenerResult(
+    uint64_t id,
+    v8::Local<v8::Value> response) {
+  auto nh = blocked_requests_.extract(id);
+  if (!nh)
+    return;
+
+  auto& request = nh.mapped();
+
+  net::HttpRequestHeaders* old_headers = request.request_headers;
+  net::HttpRequestHeaders new_headers;
+
+  int result = net::OK;
+  bool user_modified_headers = false;
+  if (response->IsObject()) {
+    v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
+    gin::Dictionary dict(isolate, response.As<v8::Object>());
+
+    bool cancel = false;
+    dict.Get("cancel", &cancel);
+    if (cancel) {
+      result = net::ERR_BLOCKED_BY_CLIENT;
+    } else {
+      v8::Local<v8::Value> value;
+      if (dict.Get("requestHeaders", &value) && value->IsObject()) {
+        user_modified_headers = true;
+        gin::Converter<net::HttpRequestHeaders>::FromV8(isolate, value,
+                                                        &new_headers);
+      }
+    }
+  }
+
+  // If the user passes |cancel|, |new_headers| should be nullptr.
+  const auto updated_headers = CalculateOnBeforeSendHeadersDelta(
+      old_headers,
+      result == net::ERR_BLOCKED_BY_CLIENT ? nullptr : &new_headers);
+
+  // Leave |request.request_headers| unchanged if the user didn't modify it.
+  if (user_modified_headers)
+    request.request_headers->Swap(&new_headers);
+
+  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+      FROM_HERE,
+      base::BindOnce(std::move(request.before_send_headers_callback),
+                     updated_headers.first, updated_headers.second, result));
 }
 
 int WebRequest::OnHeadersReceived(
@@ -383,18 +548,122 @@ int WebRequest::OnHeadersReceived(
     const net::HttpResponseHeaders* original_response_headers,
     scoped_refptr<net::HttpResponseHeaders>* override_response_headers,
     GURL* allowed_unsafe_redirect_url) {
-  const std::string& status_line =
-      original_response_headers ? original_response_headers->GetStatusLine()
-                                : std::string();
-  return HandleResponseEvent(
-      ResponseEvent::kOnHeadersReceived, info, std::move(callback),
-      std::make_pair(override_response_headers, status_line), request);
+  return HandleOnHeadersReceivedResponseEvent(
+      info, request, std::move(callback), original_response_headers,
+      override_response_headers);
+}
+
+int WebRequest::HandleOnHeadersReceivedResponseEvent(
+    extensions::WebRequestInfo* request_info,
+    const network::ResourceRequest& request,
+    net::CompletionOnceCallback callback,
+    const net::HttpResponseHeaders* original_response_headers,
+    scoped_refptr<net::HttpResponseHeaders>* override_response_headers) {
+  const auto iter = response_listeners_.find(ResponseEvent::kOnHeadersReceived);
+  if (iter == std::end(response_listeners_))
+    return net::OK;
+
+  const auto& info = iter->second;
+  if (!info.filter.MatchesRequest(request_info))
+    return net::OK;
+
+  BlockedRequest blocked_request;
+  blocked_request.callback = std::move(callback);
+  blocked_request.override_response_headers = override_response_headers;
+  blocked_request.status_line = original_response_headers
+                                    ? original_response_headers->GetStatusLine()
+                                    : std::string();
+  blocked_requests_[request_info->id] = std::move(blocked_request);
+
+  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
+  v8::HandleScope handle_scope(isolate);
+  gin_helper::Dictionary details(isolate, v8::Object::New(isolate));
+  FillDetails(&details, request_info, request);
+
+  ResponseCallback response =
+      base::BindOnce(&WebRequest::OnHeadersReceivedListenerResult,
+                     base::Unretained(this), request_info->id);
+  info.listener.Run(gin::ConvertToV8(isolate, details), std::move(response));
+  return net::ERR_IO_PENDING;
+}
+
+void WebRequest::OnHeadersReceivedListenerResult(
+    uint64_t id,
+    v8::Local<v8::Value> response) {
+  auto nh = blocked_requests_.extract(id);
+  if (!nh)
+    return;
+
+  auto& request = nh.mapped();
+
+  int result = net::OK;
+  bool user_modified_headers = false;
+  scoped_refptr<net::HttpResponseHeaders> override_headers(
+      new net::HttpResponseHeaders(""));
+  if (response->IsObject()) {
+    v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
+    gin::Dictionary dict(isolate, response.As<v8::Object>());
+
+    bool cancel = false;
+    dict.Get("cancel", &cancel);
+    if (cancel) {
+      result = net::ERR_BLOCKED_BY_CLIENT;
+    } else {
+      std::string status_line;
+      if (!dict.Get("statusLine", &status_line))
+        status_line = request.status_line;
+      v8::Local<v8::Value> value;
+      if (dict.Get("responseHeaders", &value) && value->IsObject()) {
+        user_modified_headers = true;
+        override_headers->ReplaceStatusLine(status_line);
+        gin::Converter<net::HttpResponseHeaders*>::FromV8(
+            isolate, value, override_headers.get());
+      }
+    }
+  }
+
+  if (user_modified_headers)
+    request.override_response_headers->swap(override_headers);
+
+  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+      FROM_HERE, base::BindOnce(std::move(request.callback), result));
 }
 
 void WebRequest::OnSendHeaders(extensions::WebRequestInfo* info,
                                const network::ResourceRequest& request,
                                const net::HttpRequestHeaders& headers) {
   HandleSimpleEvent(SimpleEvent::kOnSendHeaders, info, request, headers);
+}
+
+WebRequest::AuthRequiredResponse WebRequest::OnAuthRequired(
+    const extensions::WebRequestInfo* request_info,
+    const net::AuthChallengeInfo& auth_info,
+    WebRequest::AuthCallback callback,
+    net::AuthCredentials* credentials) {
+  content::RenderFrameHost* rfh =
+      content::RenderFrameHost::FromID(request_info->global_id);
+  content::WebContents* web_contents = nullptr;
+  if (rfh)
+    web_contents = content::WebContents::FromRenderFrameHost(rfh);
+
+  BlockedRequest blocked_request;
+  blocked_request.auth_callback = std::move(callback);
+  blocked_requests_[request_info->id] = std::move(blocked_request);
+
+  auto login_callback =
+      base::BindOnce(&WebRequest::OnLoginAuthResult, base::Unretained(this),
+                     request_info->id, credentials);
+
+  scoped_refptr<net::HttpResponseHeaders> response_headers =
+      request_info->response_headers;
+  blocked_requests_[request_info->id].login_handler =
+      std::make_unique<LoginHandler>(
+          auth_info, web_contents,
+          static_cast<base::ProcessId>(
+              request_info->global_id.child_id.GetUnsafeValue()),
+          request_info->url, response_headers, std::move(login_callback));
+
+  return AuthRequiredResponse::AUTH_REQUIRED_RESPONSE_IO_PENDING;
 }
 
 void WebRequest::OnBeforeRedirect(extensions::WebRequestInfo* info,
@@ -412,7 +681,7 @@ void WebRequest::OnResponseStarted(extensions::WebRequestInfo* info,
 void WebRequest::OnErrorOccurred(extensions::WebRequestInfo* info,
                                  const network::ResourceRequest& request,
                                  int net_error) {
-  callbacks_.erase(info->id);
+  blocked_requests_.erase(info->id);
 
   HandleSimpleEvent(SimpleEvent::kOnErrorOccurred, info, request, net_error);
 }
@@ -420,13 +689,13 @@ void WebRequest::OnErrorOccurred(extensions::WebRequestInfo* info,
 void WebRequest::OnCompleted(extensions::WebRequestInfo* info,
                              const network::ResourceRequest& request,
                              int net_error) {
-  callbacks_.erase(info->id);
+  blocked_requests_.erase(info->id);
 
   HandleSimpleEvent(SimpleEvent::kOnCompleted, info, request, net_error);
 }
 
 void WebRequest::OnRequestWillBeDestroyed(extensions::WebRequestInfo* info) {
-  callbacks_.erase(info->id);
+  blocked_requests_.erase(info->id);
 }
 
 template <WebRequest::SimpleEvent event>
@@ -445,37 +714,43 @@ void WebRequest::SetListener(Event event,
                              gin::Arguments* args) {
   v8::Local<v8::Value> arg;
 
-  // { urls, types }.
-  std::set<std::string> filter_patterns, filter_types;
+  // { urls, excludeUrls, types }.
+  std::set<std::string> filter_include_patterns, filter_exclude_patterns,
+      filter_types;
+  RequestFilter filter;
+
   gin::Dictionary dict(args->isolate());
   if (args->GetNext(&arg) && !arg->IsFunction()) {
     // Note that gin treats Function as Dictionary when doing conversions, so we
     // have to explicitly check if the argument is Function before trying to
     // convert it to Dictionary.
     if (gin::ConvertFromV8(args->isolate(), arg, &dict)) {
-      if (!dict.Get("urls", &filter_patterns)) {
+      if (!dict.Get("urls", &filter_include_patterns)) {
         args->ThrowTypeError("Parameter 'filter' must have property 'urls'.");
         return;
       }
+
+      if (filter_include_patterns.empty()) {
+        util::EmitDeprecationWarning(
+            "The urls array in WebRequestFilter is empty, which is deprecated. "
+            "Please use '<all_urls>' to match all URLs.");
+        filter_include_patterns.insert("<all_urls>");
+      }
+
+      dict.Get("excludeUrls", &filter_exclude_patterns);
       dict.Get("types", &filter_types);
       args->GetNext(&arg);
     }
+  } else {
+    // If no filter is defined, create one with <all_urls> so it matches all
+    // requests
+    dict = gin::Dictionary::CreateEmpty(args->isolate());
+    filter_include_patterns.insert("<all_urls>");
+    dict.Set("urls", filter_include_patterns);
   }
 
-  RequestFilter filter;
-
-  for (const std::string& filter_pattern : filter_patterns) {
-    URLPattern pattern(URLPattern::SCHEME_ALL);
-    const URLPattern::ParseResult result = pattern.Parse(filter_pattern);
-    if (result == URLPattern::ParseResult::kSuccess) {
-      filter.AddUrlPattern(std::move(pattern));
-    } else {
-      const char* error_type = URLPattern::GetParseResultString(result);
-      args->ThrowTypeError("Invalid url pattern " + filter_pattern + ": " +
-                           error_type);
-      return;
-    }
-  }
+  filter.AddUrlPatterns(filter_include_patterns, &filter, args);
+  filter.AddUrlPatterns(filter_exclude_patterns, &filter, args, false);
 
   for (const std::string& filter_type : filter_types) {
     auto type = ParseResourceType(filter_type);
@@ -499,6 +774,135 @@ void WebRequest::SetListener(Event event,
     listeners->erase(event);
   else
     (*listeners)[event] = {std::move(filter), std::move(listener)};
+  UpdateInterceptState();
+}
+
+void WebRequest::UpdateInterceptState() {
+  if (!browser_context_)
+    return;
+  uint32_t blocking = 0, observers = 0;
+  for (const auto& [event, info] : response_listeners_)
+    blocking |= info.filter.TypeMask();
+  for (const auto& [event, info] : simple_listeners_)
+    observers |= info.filter.TypeMask();
+  browser_context_->intercept_state()->SetListenerTypes(blocking, observers);
+}
+
+struct WebRequest::ObservedRequest {
+  ObservedRequest(uint64_t id,
+                  content::GlobalRenderFrameHostId frame,
+                  const network::ResourceRequest& request)
+      : id(id), frame(frame), request(request) {
+    RebuildInfo();
+  }
+
+  // WebRequestInfo is immutable; like ProxyingURLLoaderFactory, build a fresh
+  // one (same id) when a redirect changes the request.
+  void RebuildInfo() {
+    info = std::make_unique<extensions::WebRequestInfo>(
+        extensions::WebRequestInfoInitParams(
+            id, frame, nullptr, request, /*is_download=*/false,
+            /*is_async=*/true, /*is_service_worker_script=*/false,
+            /*navigation_id=*/std::nullopt));
+  }
+
+  const uint64_t id;
+  const content::GlobalRenderFrameHostId frame;
+  network::ResourceRequest request;
+  std::unique_ptr<extensions::WebRequestInfo> info;
+};
+
+// static
+void WebRequest::ObservedRequestStarted(
+    base::WeakPtr<ElectronBrowserContext> browser_context,
+    uint64_t key,
+    int render_process_id,
+    int frame_routing_id,
+    const network::ResourceRequest& request) {
+  auto* self = ForObservedRequest(browser_context);
+  if (!self)
+    return;
+  auto observed = std::make_unique<ObservedRequest>(
+      ElectronBrowserClient::Get()->NextWebRequestId(),
+      content::GlobalRenderFrameHostId(render_process_id, frame_routing_id),
+      request);
+  auto& entry = *observed;
+  self->observed_requests_.emplace(key, std::move(observed));
+  self->OnSendHeaders(entry.info.get(), entry.request, entry.request.headers);
+}
+
+// static
+void WebRequest::ObservedRequestRedirected(
+    base::WeakPtr<ElectronBrowserContext> browser_context,
+    uint64_t key,
+    const net::RedirectInfo& redirect_info,
+    network::mojom::URLResponseHeadPtr head) {
+  auto* self = ForObservedRequest(browser_context);
+  if (!self)
+    return;
+  auto it = self->observed_requests_.find(key);
+  if (it == self->observed_requests_.end())
+    return;
+  ObservedRequest& observed = *it->second;
+  observed.info->AddResponseInfoFromResourceResponse(*head);
+  self->OnBeforeRedirect(observed.info.get(), observed.request,
+                         redirect_info.new_url);
+}
+
+// static
+void WebRequest::ObservedRequestFollowedRedirect(
+    base::WeakPtr<ElectronBrowserContext> browser_context,
+    uint64_t key,
+    const network::ResourceRequest& request) {
+  auto* self = ForObservedRequest(browser_context);
+  if (!self)
+    return;
+  auto it = self->observed_requests_.find(key);
+  if (it == self->observed_requests_.end())
+    return;
+  ObservedRequest& observed = *it->second;
+  observed.request = request;
+  observed.RebuildInfo();
+  self->OnSendHeaders(observed.info.get(), observed.request,
+                      observed.request.headers);
+}
+
+// static
+void WebRequest::ObservedRequestResponded(
+    base::WeakPtr<ElectronBrowserContext> browser_context,
+    uint64_t key,
+    network::mojom::URLResponseHeadPtr head) {
+  auto* self = ForObservedRequest(browser_context);
+  if (!self)
+    return;
+  auto it = self->observed_requests_.find(key);
+  if (it == self->observed_requests_.end())
+    return;
+  ObservedRequest& observed = *it->second;
+  observed.info->AddResponseInfoFromResourceResponse(*head);
+  self->OnResponseStarted(observed.info.get(), observed.request);
+}
+
+// static
+void WebRequest::ObservedRequestFinished(
+    base::WeakPtr<ElectronBrowserContext> browser_context,
+    uint64_t key,
+    const network::URLLoaderCompletionStatus& status) {
+  auto* self = ForObservedRequest(browser_context);
+  if (!self)
+    return;
+  auto it = self->observed_requests_.find(key);
+  if (it == self->observed_requests_.end())
+    return;
+  auto observed = std::move(it->second);
+  self->observed_requests_.erase(it);
+  if (status.error_code == net::OK)
+    self->OnCompleted(observed->info.get(), observed->request,
+                      status.error_code);
+  else
+    self->OnErrorOccurred(observed->info.get(), observed->request,
+                          status.error_code);
+  self->OnRequestWillBeDestroyed(observed->info.get());
 }
 
 template <typename... Args>
@@ -520,99 +924,38 @@ void WebRequest::HandleSimpleEvent(SimpleEvent event,
   info.listener.Run(gin::ConvertToV8(isolate, details));
 }
 
-template <typename Out, typename... Args>
-int WebRequest::HandleResponseEvent(ResponseEvent event,
-                                    extensions::WebRequestInfo* request_info,
-                                    net::CompletionOnceCallback callback,
-                                    Out out,
-                                    Args... args) {
-  const auto iter = response_listeners_.find(event);
-  if (iter == std::end(response_listeners_))
-    return net::OK;
+void WebRequest::OnLoginAuthResult(
+    uint64_t id,
+    net::AuthCredentials* credentials,
+    const std::optional<net::AuthCredentials>& maybe_creds) {
+  auto nh = blocked_requests_.extract(id);
+  CHECK(nh);
 
-  const auto& info = iter->second;
-  if (!info.filter.MatchesRequest(request_info))
-    return net::OK;
-
-  callbacks_[request_info->id] = std::move(callback);
-
-  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
-  v8::HandleScope handle_scope(isolate);
-  gin_helper::Dictionary details(isolate, v8::Object::New(isolate));
-  FillDetails(&details, request_info, args...);
-
-  ResponseCallback response =
-      base::BindOnce(&WebRequest::OnListenerResult<Out>, base::Unretained(this),
-                     request_info->id, out);
-  info.listener.Run(gin::ConvertToV8(isolate, details), std::move(response));
-  return net::ERR_IO_PENDING;
-}
-
-template <typename T>
-void WebRequest::OnListenerResult(uint64_t id,
-                                  T out,
-                                  v8::Local<v8::Value> response) {
-  const auto iter = callbacks_.find(id);
-  if (iter == std::end(callbacks_))
-    return;
-
-  int result = net::OK;
-  if (response->IsObject()) {
-    v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
-    gin::Dictionary dict(isolate, response.As<v8::Object>());
-
-    bool cancel = false;
-    dict.Get("cancel", &cancel);
-    if (cancel)
-      result = net::ERR_BLOCKED_BY_CLIENT;
-    else
-      ReadFromResponse(isolate, &dict, out);
+  AuthRequiredResponse action =
+      AuthRequiredResponse::AUTH_REQUIRED_RESPONSE_NO_ACTION;
+  if (maybe_creds.has_value()) {
+    *credentials = maybe_creds.value();
+    action = AuthRequiredResponse::AUTH_REQUIRED_RESPONSE_SET_AUTH;
   }
 
-  // The ProxyingURLLoaderFactory expects the callback to be executed
-  // asynchronously, because it used to work on IO thread before NetworkService.
   base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
-      FROM_HERE, base::BindOnce(std::move(callbacks_[id]), result));
-  callbacks_.erase(iter);
+      FROM_HERE, base::BindOnce(std::move(nh.mapped().auth_callback), action));
 }
 
 // static
-gin::Handle<WebRequest> WebRequest::FromOrCreate(
-    v8::Isolate* isolate,
-    content::BrowserContext* browser_context) {
-  gin::Handle<WebRequest> handle = From(isolate, browser_context);
-  if (handle.IsEmpty()) {
-    // Make sure the |Session| object has the |webRequest| property created.
-    v8::Local<v8::Value> web_request =
-        Session::CreateFrom(
-            isolate, static_cast<ElectronBrowserContext*>(browser_context))
-            ->WebRequest(isolate);
-    gin::ConvertFromV8(isolate, web_request, &handle);
-  }
-  DCHECK(!handle.IsEmpty());
-  return handle;
+WebRequest* WebRequest::FromOrCreate(v8::Isolate* isolate,
+                                     content::BrowserContext* browser_context) {
+  return Session::FromOrCreate(isolate, browser_context)->WebRequest(isolate);
 }
 
 // static
-gin::Handle<WebRequest> WebRequest::Create(
+WebRequest* WebRequest::Create(
     v8::Isolate* isolate,
-    content::BrowserContext* browser_context) {
-  DCHECK(From(isolate, browser_context).IsEmpty())
-      << "WebRequest already created";
-  return gin::CreateHandle(isolate, new WebRequest(isolate, browser_context));
-}
-
-// static
-gin::Handle<WebRequest> WebRequest::From(
-    v8::Isolate* isolate,
-    content::BrowserContext* browser_context) {
-  if (!browser_context)
-    return gin::Handle<WebRequest>();
-  auto* user_data =
-      static_cast<UserData*>(browser_context->GetUserData(kUserDataKey));
-  if (!user_data)
-    return gin::Handle<WebRequest>();
-  return gin::CreateHandle(isolate, user_data->data);
+    base::PassKey<Session> passkey,
+    base::WeakPtr<ElectronBrowserContext> browser_context) {
+  return cppgc::MakeGarbageCollected<WebRequest>(
+      isolate->GetCppHeap()->GetAllocationHandle(), passkey,
+      std::move(browser_context));
 }
 
 }  // namespace electron::api

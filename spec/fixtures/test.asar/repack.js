@@ -2,13 +2,15 @@
 // using a new version of the asar package
 
 const asar = require('@electron/asar');
-const fs = require('fs');
-const os = require('os');
-const path = require('path');
+
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 
 const archives = [];
 for (const child of fs.readdirSync(__dirname)) {
-  if (child.endsWith('.asar')) {
+  // This generic repacker cannot preserve icon.asar's mixed packed, unpacked, and linked entries.
+  if (child.endsWith('.asar') && child !== 'icon.asar') {
     archives.push(path.resolve(__dirname, child));
   }
 }

@@ -4,17 +4,38 @@
 
 #include "shell/browser/api/electron_api_notification.h"
 
-#include "base/guid.h"
+#include <memory>
+
+#include "base/functional/bind.h"
 #include "base/strings/utf_string_conversions.h"
-#include "gin/handle.h"
+#include "base/uuid.h"
+#include "build/build_config.h"
 #include "shell/browser/api/electron_api_menu.h"
 #include "shell/browser/browser.h"
 #include "shell/browser/electron_browser_client.h"
+#include "shell/browser/javascript_environment.h"
+#include "shell/browser/notifications/notification_delegate.h"
 #include "shell/common/gin_converters/image_converter.h"
+#include "shell/common/gin_converters/value_converter.h"
 #include "shell/common/gin_helper/dictionary.h"
+#include "shell/common/gin_helper/error_thrower.h"
+#include "shell/common/gin_helper/node_entry_scope.h"
 #include "shell/common/gin_helper/object_template_builder.h"
+#include "shell/common/gin_helper/promise.h"
+#include "shell/common/gin_helper/wrappable_pointer_tags.h"
 #include "shell/common/node_includes.h"
 #include "url/gurl.h"
+#include "v8/include/cppgc/allocation.h"
+#include "v8/include/cppgc/persistent.h"
+#include "v8/include/v8-cppgc.h"
+
+#if BUILDFLAG(IS_WIN)
+#include <windows.h>
+
+#include "base/no_destructor.h"
+#include "base/strings/utf_string_conversions.h"
+#include "shell/browser/notifications/win/windows_toast_activator.h"
+#endif
 
 namespace gin {
 
@@ -31,14 +52,20 @@ struct Converter<electron::NotificationAction> {
       return false;
     }
     dict.Get("text", &(out->text));
+    std::vector<std::u16string> items;
+    if (dict.Get("items", &items))
+      out->items = std::move(items);
     return true;
   }
 
   static v8::Local<v8::Value> ToV8(v8::Isolate* isolate,
                                    electron::NotificationAction val) {
-    gin::Dictionary dict = gin::Dictionary::CreateEmpty(isolate);
+    auto dict = gin::Dictionary::CreateEmpty(isolate);
     dict.Set("text", val.text);
     dict.Set("type", val.type);
+    if (!val.items.empty()) {
+      dict.Set("items", val.items);
+    }
     return ConvertToV8(isolate, dict);
   }
 };
@@ -47,21 +74,104 @@ struct Converter<electron::NotificationAction> {
 
 namespace electron::api {
 
-gin::WrapperInfo Notification::kWrapperInfo = {gin::kEmbedderNativeGin};
+gin::WrapperInfo Notification::kWrapperInfo =
+    electron::MakeWrapperInfo(electron::kElectronNotification);
 
-Notification::Notification(gin::Arguments* args) {
+class Notification::PlatformLifecycle final
+    : public NativePeer<Notification>,
+      public electron::NotificationDelegate {
+ public:
+  PlatformLifecycle(Notification* notification, bool is_restored)
+      : NativePeer<Notification>(notification), is_restored_(is_restored) {
+    StartObservingShutdown();
+  }
+
+  electron::Notification* platform_notification() const {
+    return notification_.get();
+  }
+
+  // Returns null once teardown has begun, so a released peer is never handed
+  // to the presenter as a delegate.
+  electron::Notification* CreatePlatformNotification(
+      electron::NotificationPresenter* presenter,
+      const std::string& id) {
+    if (!is_active())
+      return nullptr;
+    notification_ = presenter->CreateNotification(this, id);
+    return notification_.get();
+  }
+
+  base::WeakPtr<electron::Notification> TakePlatformNotification() {
+    base::WeakPtr<electron::Notification> notification = notification_;
+    notification_.reset();
+    return notification;
+  }
+
+  // electron::NotificationDelegate:
+  void NotificationAction(int action_index, int selection_index) override {
+    if (auto notification = wrapper())
+      notification->NotificationAction(action_index, selection_index);
+  }
+
+  void NotificationClick() override {
+    if (auto notification = wrapper())
+      notification->NotificationClick();
+  }
+
+  void NotificationReplied(const std::string& reply) override {
+    if (auto notification = wrapper())
+      notification->NotificationReplied(reply);
+  }
+
+  void NotificationDisplayed() override {
+    if (auto notification = wrapper())
+      notification->NotificationDisplayed();
+  }
+
+  void NotificationClosed(const std::string& reason) override {
+    if (auto notification = wrapper())
+      notification->NotificationClosed(reason);
+  }
+
+  void NotificationFailed(const std::string& error) override {
+    if (auto notification = wrapper())
+      notification->NotificationFailed(error);
+  }
+
+ private:
+  ~PlatformLifecycle() override = default;
+
+  // NativePeer:
+  void TearDownNative() override {
+    base::WeakPtr<electron::Notification> notification =
+        TakePlatformNotification();
+    if (!notification)
+      return;
+    notification->set_delegate(nullptr);
+    if (is_restored_)
+      notification->Destroy();
+  }
+
+  const bool is_restored_;
+  base::WeakPtr<electron::Notification> notification_;
+};
+
+Notification::Notification(gin::Arguments* args)
+    : platform_lifecycle_(NativePeer<Notification>::Create<PlatformLifecycle>(
+          this,
+          /*is_restored=*/false)) {
   presenter_ = static_cast<ElectronBrowserClient*>(ElectronBrowserClient::Get())
                    ->GetNotificationPresenter();
 
   gin::Dictionary opts(nullptr);
   if (args->GetNext(&opts)) {
+    opts.Get("id", &id_);
+    opts.Get("groupId", &group_id_);
+    opts.Get("groupTitle", &group_title_);
     opts.Get("title", &title_);
     opts.Get("subtitle", &subtitle_);
     opts.Get("body", &body_);
-    has_icon_ = opts.Get("icon", &icon_);
-    if (has_icon_) {
-      opts.Get("icon", &icon_path_);
-    }
+    opts.Get("icon", &icon_);
     opts.Get("silent", &silent_);
     opts.Get("replyPlaceholder", &reply_placeholder_);
     opts.Get("urgency", &urgency_);
@@ -72,70 +182,57 @@ Notification::Notification(gin::Arguments* args) {
     opts.Get("closeButtonText", &close_button_text_);
     opts.Get("toastXml", &toast_xml_);
   }
+
+  if (id_.empty())
+    id_ = base::Uuid::GenerateRandomV4().AsLowercaseString();
 }
 
-Notification::~Notification() {
-  if (notification_)
-    notification_->set_delegate(nullptr);
-}
+Notification::Notification(const NotificationInfo& info)
+    : id_(info.id),
+      group_id_(info.group_id),
+      title_(base::UTF8ToUTF16(info.title)),
+      subtitle_(base::UTF8ToUTF16(info.subtitle)),
+      body_(base::UTF8ToUTF16(info.body)),
+      is_restored_(true),
+      presenter_(nullptr),
+      platform_lifecycle_(NativePeer<Notification>::Create<PlatformLifecycle>(
+          this,
+          /*is_restored=*/true)) {}
+
+Notification::~Notification() = default;
 
 // static
-gin::Handle<Notification> Notification::New(gin_helper::ErrorThrower thrower,
-                                            gin::Arguments* args) {
+Notification* Notification::New(gin_helper::ErrorThrower thrower,
+                                gin::Arguments* args) {
   if (!Browser::Get()->is_ready()) {
     thrower.ThrowError("Cannot create Notification before app is ready");
-    return gin::Handle<Notification>();
+    return nullptr;
   }
-  return gin::CreateHandle(thrower.isolate(), new Notification(args));
-}
 
-// Getters
-std::u16string Notification::GetTitle() const {
-  return title_;
-}
+  auto* notification = cppgc::MakeGarbageCollected<Notification>(
+      thrower.isolate()->GetCppHeap()->GetAllocationHandle(), args);
 
-std::u16string Notification::GetSubtitle() const {
-  return subtitle_;
-}
+#if BUILDFLAG(IS_WIN)
+  constexpr size_t kMaxTagLength = 64;
+  if (!notification->id_.empty() &&
+      base::UTF8ToWide(notification->id_).length() > kMaxTagLength) {
+    thrower.ThrowError(
+        "Notification id exceeds Windows limit of 64 UTF-16 characters");
+    return nullptr;
+  }
+  if (!notification->group_id_.empty() &&
+      base::UTF8ToWide(notification->group_id_).length() > kMaxTagLength) {
+    thrower.ThrowError(
+        "Notification groupId exceeds Windows limit of 64 UTF-16 characters");
+    return nullptr;
+  }
+  if (!notification->group_title_.empty() && notification->group_id_.empty()) {
+    thrower.ThrowError("Notification groupTitle requires groupId to be set");
+    return nullptr;
+  }
+#endif
 
-std::u16string Notification::GetBody() const {
-  return body_;
-}
-
-bool Notification::GetSilent() const {
-  return silent_;
-}
-
-bool Notification::GetHasReply() const {
-  return has_reply_;
-}
-
-std::u16string Notification::GetTimeoutType() const {
-  return timeout_type_;
-}
-
-std::u16string Notification::GetReplyPlaceholder() const {
-  return reply_placeholder_;
-}
-
-std::u16string Notification::GetSound() const {
-  return sound_;
-}
-
-std::u16string Notification::GetUrgency() const {
-  return urgency_;
-}
-
-std::vector<electron::NotificationAction> Notification::GetActions() const {
-  return actions_;
-}
-
-std::u16string Notification::GetCloseButtonText() const {
-  return close_button_text_;
-}
-
-std::u16string Notification::GetToastXml() const {
-  return toast_xml_;
+  return notification;
 }
 
 // Setters
@@ -188,8 +285,20 @@ void Notification::SetToastXml(const std::u16string& new_toast_xml) {
   toast_xml_ = new_toast_xml;
 }
 
-void Notification::NotificationAction(int index) {
-  Emit("action", index);
+void Notification::NotificationAction(int action_index, int selection_index) {
+  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
+  v8::HandleScope handle_scope(isolate);
+
+  gin_helper::internal::Event* event =
+      gin_helper::internal::Event::New(isolate);
+  v8::Local<v8::Object> event_object =
+      event->GetWrapper(isolate).ToLocalChecked();
+
+  gin_helper::Dictionary dict(isolate, event_object);
+  dict.Set("selectionIndex", selection_index);
+  dict.Set("actionIndex", action_index);
+
+  EmitWithoutEvent("action", event_object, action_index, selection_index);
 }
 
 void Notification::NotificationClick() {
@@ -197,7 +306,18 @@ void Notification::NotificationClick() {
 }
 
 void Notification::NotificationReplied(const std::string& reply) {
-  Emit("reply", reply);
+  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
+  v8::HandleScope handle_scope(isolate);
+
+  gin_helper::internal::Event* event =
+      gin_helper::internal::Event::New(isolate);
+  v8::Local<v8::Object> event_object =
+      event->GetWrapper(isolate).ToLocalChecked();
+
+  gin_helper::Dictionary dict(isolate, event_object);
+  dict.Set("reply", reply);
+
+  EmitWithoutEvent("reply", event_object, reply);
 }
 
 void Notification::NotificationDisplayed() {
@@ -208,26 +328,58 @@ void Notification::NotificationFailed(const std::string& error) {
   Emit("failed", error);
 }
 
-void Notification::NotificationDestroyed() {}
+void Notification::NotificationClosed(const std::string& reason) {
+  if (reason.empty()) {
+    Emit("close");
+  } else {
+    v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
+    v8::HandleScope handle_scope(isolate);
 
-void Notification::NotificationClosed() {
-  Emit("close");
+    gin_helper::internal::Event* event =
+        gin_helper::internal::Event::New(isolate);
+    v8::Local<v8::Object> event_object =
+        event->GetWrapper(isolate).ToLocalChecked();
+
+    gin_helper::Dictionary dict(isolate, event_object);
+    dict.Set("reason", reason);
+
+    EmitWithoutEvent("close", event_object);
+  }
 }
 
 void Notification::Close() {
-  if (notification_) {
-    notification_->Dismiss();
-    notification_->set_delegate(nullptr);
-    notification_.reset();
+  base::WeakPtr<electron::Notification> notification =
+      platform_lifecycle_->TakePlatformNotification();
+
+  if (!notification) {
+    return;
   }
+
+  if (notification->is_dismissed()) {
+    notification->Remove();
+  } else {
+    notification->Dismiss();
+  }
+  // Dismiss() may run JS ('close' is emitted synchronously on some platforms).
+  if (notification)
+    notification->set_delegate(nullptr);
 }
 
 // Showing notifications
 void Notification::Show() {
+  // Restored notifications are read-only snapshots from Notification Center.
+  // Re-showing them would remove the original and create a duplicate.
+  if (is_restored_)
+    return;
+
   Close();
+  // A 'close' listener may have re-entered Show() and already created one.
+  if (platform_lifecycle_->platform_notification())
+    return;
   if (presenter_) {
-    notification_ = presenter_->CreateNotification(this, base::GenerateGUID());
-    if (notification_) {
+    electron::Notification* notification =
+        platform_lifecycle_->CreatePlatformNotification(presenter_, id_);
+    if (notification) {
       electron::NotificationOptions options;
       options.title = title_;
       options.subtitle = subtitle_;
@@ -243,7 +395,9 @@ void Notification::Show() {
       options.close_button_text = close_button_text_;
       options.urgency = urgency_;
       options.toast_xml = toast_xml_;
-      notification_->Show(options);
+      options.group_id = group_id_;
+      options.group_title = group_title_;
+      notification->Show(options);
     }
   }
 }
@@ -253,34 +407,237 @@ bool Notification::IsSupported() {
                ->GetNotificationPresenter();
 }
 
+#if BUILDFLAG(IS_WIN)
+namespace {
+
+// Helper to convert ActivationArguments to JS object
+v8::Local<v8::Value> ActivationArgumentsToV8(
+    v8::Isolate* isolate,
+    const electron::ActivationArguments& details) {
+  gin_helper::Dictionary dict = gin_helper::Dictionary::CreateEmpty(isolate);
+  dict.Set("type", details.type);
+  dict.Set("arguments", details.arguments);
+
+  if (details.type == "action") {
+    dict.Set("actionIndex", details.action_index);
+  } else if (details.type == "reply") {
+    dict.Set("reply", details.reply);
+  }
+
+  if (!details.user_inputs.empty()) {
+    gin_helper::Dictionary inputs =
+        gin_helper::Dictionary::CreateEmpty(isolate);
+    for (const auto& [key, value] : details.user_inputs) {
+      inputs.Set(key, value);
+    }
+    dict.Set("userInputs", inputs);
+  }
+
+  return dict.GetHandle();
+}
+
+// Storage for the JavaScript callback (persistent so it survives GC).
+// Uses base::NoDestructor to avoid exit-time destructor issues with globals.
+// v8::Global supports Reset() for reassignment.
+base::NoDestructor<v8::Global<v8::Function>> g_js_launch_callback;
+
+void InvokeJsCallback(const electron::ActivationArguments& details) {
+  if (g_js_launch_callback->IsEmpty())
+    return;
+
+  v8::Isolate* isolate = electron::JavascriptEnvironment::GetIsolate();
+  v8::HandleScope handle_scope(isolate);
+  v8::Local<v8::Context> context = isolate->GetCurrentContext();
+  if (context.IsEmpty())
+    return;
+
+  v8::Context::Scope context_scope(context);
+
+  v8::Local<v8::Function> callback = g_js_launch_callback->Get(isolate);
+  gin_helper::NodeEntryScope node_scope(context, callback);
+  v8::Local<v8::Value> argv[] = {ActivationArgumentsToV8(isolate, details)};
+
+  v8::TryCatch try_catch(isolate);
+  callback->Call(context, v8::Undefined(isolate), 1, argv)
+      .FromMaybe(v8::Local<v8::Value>());
+  // Callback stays registered for future activations
+}
+
+}  // namespace
+
+// static
+void Notification::HandleActivation(v8::Isolate* isolate,
+                                    v8::Local<v8::Function> callback) {
+  // Replace any previous callback using Reset (v8::Global supports this)
+  g_js_launch_callback->Reset(isolate, callback);
+
+  // Register the C++ callback that invokes the JS callback.
+  // - If activation details already exist, callback is invoked immediately.
+  // - Callback remains registered for all future activations.
+  electron::SetActivationHandler(
+      [](const electron::ActivationArguments& details) {
+        InvokeJsCallback(details);
+      });
+}
+#endif
+
+// static
+v8::Local<v8::Promise> Notification::GetHistory(v8::Isolate* isolate) {
+  gin_helper::Promise<v8::Local<v8::Value>> promise(isolate);
+  v8::Local<v8::Promise> handle = promise.GetHandle();
+
+  auto* presenter =
+      static_cast<ElectronBrowserClient*>(ElectronBrowserClient::Get())
+          ->GetNotificationPresenter();
+  if (!presenter) {
+    promise.Resolve(v8::Array::New(isolate));
+    return handle;
+  }
+
+  presenter->GetDeliveredNotifications(base::BindOnce(
+      [](gin_helper::Promise<v8::Local<v8::Value>> promise,
+         std::vector<electron::NotificationInfo> notifications) {
+        v8::Isolate* isolate = promise.isolate();
+        v8::HandleScope handle_scope(isolate);
+
+        // The browser client may have been torn down by the time this
+        // callback fires — null-check to avoid a use-after-free.
+        auto* browser_client = ElectronBrowserClient::Get();
+        if (!browser_client) {
+          promise.Resolve(v8::Array::New(isolate).As<v8::Value>());
+          return;
+        }
+
+        auto* presenter = static_cast<ElectronBrowserClient*>(browser_client)
+                              ->GetNotificationPresenter();
+        if (!presenter) {
+          promise.Resolve(v8::Array::New(isolate).As<v8::Value>());
+          return;
+        }
+
+        v8::Local<v8::Array> result =
+            v8::Array::New(isolate, notifications.size());
+        for (size_t i = 0; i < notifications.size(); i++) {
+          const auto& info = notifications[i];
+
+          // The API object is cppgc owned, while the presenter owns the
+          // platform notification. The API object's native peer links to the
+          // platform notification and is its delegate; the peer's
+          // WeakPersistent target is cleared when cppgc finds the API object
+          // unreachable.
+          auto* notif = cppgc::MakeGarbageCollected<Notification>(
+              isolate->GetCppHeap()->GetAllocationHandle(), info);
+          if (electron::Notification* platform_notification =
+                  notif->platform_lifecycle_->CreatePlatformNotification(
+                      presenter, notif->id_)) {
+            platform_notification->Restore();
+          }
+
+          v8::Local<v8::Object> wrapper =
+              notif->GetWrapper(isolate).ToLocalChecked();
+          result
+              ->CreateDataProperty(isolate->GetCurrentContext(),
+                                   static_cast<uint32_t>(i), wrapper)
+              .Check();
+        }
+
+        promise.Resolve(result.As<v8::Value>());
+      },
+      std::move(promise)));
+
+  return handle;
+}
+
+// static
+void Notification::Remove(gin::Arguments* args) {
+  auto* presenter =
+      static_cast<ElectronBrowserClient*>(ElectronBrowserClient::Get())
+          ->GetNotificationPresenter();
+  if (!presenter)
+    return;
+
+  // Accept either a single string or an array of strings.
+  // Peek at the value type first to avoid gin::Arguments cursor issues.
+  v8::Local<v8::Value> val;
+  if (!args->GetNext(&val)) {
+    args->ThrowTypeError("Expected a string or array of strings");
+    return;
+  }
+
+  if (val->IsString()) {
+    std::string id;
+    gin::ConvertFromV8(args->isolate(), val, &id);
+    presenter->RemoveDeliveredNotifications({id});
+  } else if (val->IsArray()) {
+    std::vector<std::string> ids;
+    if (!gin::ConvertFromV8(args->isolate(), val, &ids)) {
+      args->ThrowTypeError("Expected a string or array of strings");
+      return;
+    }
+    presenter->RemoveDeliveredNotifications(ids);
+  } else {
+    args->ThrowTypeError("Expected a string or array of strings");
+  }
+}
+
+// static
+void Notification::RemoveAll() {
+  auto* presenter =
+      static_cast<ElectronBrowserClient*>(ElectronBrowserClient::Get())
+          ->GetNotificationPresenter();
+  if (!presenter)
+    return;
+
+  presenter->RemoveAllDeliveredNotifications();
+}
+
+// static
+void Notification::RemoveGroup(const std::string& group_id) {
+  auto* presenter =
+      static_cast<ElectronBrowserClient*>(ElectronBrowserClient::Get())
+          ->GetNotificationPresenter();
+  if (!presenter)
+    return;
+
+  presenter->RemoveDeliveredNotificationsByGroupId(group_id);
+}
+
 void Notification::FillObjectTemplate(v8::Isolate* isolate,
                                       v8::Local<v8::ObjectTemplate> templ) {
-  gin::ObjectTemplateBuilder(isolate, "Notification", templ)
+  gin::ObjectTemplateBuilder(isolate, GetClassName(), templ)
       .SetMethod("show", &Notification::Show)
       .SetMethod("close", &Notification::Close)
-      .SetProperty("title", &Notification::GetTitle, &Notification::SetTitle)
-      .SetProperty("subtitle", &Notification::GetSubtitle,
+      .SetProperty("id", &Notification::id)
+      .SetProperty("groupId", &Notification::group_id)
+      .SetProperty("groupTitle", &Notification::group_title)
+      .SetProperty("title", &Notification::title, &Notification::SetTitle)
+      .SetProperty("subtitle", &Notification::subtitle,
                    &Notification::SetSubtitle)
-      .SetProperty("body", &Notification::GetBody, &Notification::SetBody)
-      .SetProperty("silent", &Notification::GetSilent, &Notification::SetSilent)
-      .SetProperty("hasReply", &Notification::GetHasReply,
+      .SetProperty("body", &Notification::body, &Notification::SetBody)
+      .SetProperty("silent", &Notification::is_silent, &Notification::SetSilent)
+      .SetProperty("hasReply", &Notification::has_reply,
                    &Notification::SetHasReply)
-      .SetProperty("timeoutType", &Notification::GetTimeoutType,
+      .SetProperty("timeoutType", &Notification::timeout_type,
                    &Notification::SetTimeoutType)
-      .SetProperty("replyPlaceholder", &Notification::GetReplyPlaceholder,
+      .SetProperty("replyPlaceholder", &Notification::reply_placeholder,
                    &Notification::SetReplyPlaceholder)
-      .SetProperty("urgency", &Notification::GetUrgency,
-                   &Notification::SetUrgency)
-      .SetProperty("sound", &Notification::GetSound, &Notification::SetSound)
-      .SetProperty("actions", &Notification::GetActions,
-                   &Notification::SetActions)
-      .SetProperty("closeButtonText", &Notification::GetCloseButtonText,
+      .SetProperty("urgency", &Notification::urgency, &Notification::SetUrgency)
+      .SetProperty("sound", &Notification::sound, &Notification::SetSound)
+      .SetProperty("actions", &Notification::actions, &Notification::SetActions)
+      .SetProperty("closeButtonText", &Notification::close_button_text,
                    &Notification::SetCloseButtonText)
-      .SetProperty("toastXml", &Notification::GetToastXml,
+      .SetProperty("toastXml", &Notification::toast_xml,
                    &Notification::SetToastXml)
       .Build();
 }
 
+const gin::WrapperInfo* Notification::wrapper_info() const {
+  return &kWrapperInfo;
+}
+
+const char* Notification::GetHumanReadableName() const {
+  return "Electron / Notification";
+}
 }  // namespace electron::api
 
 namespace {
@@ -291,10 +648,19 @@ void Initialize(v8::Local<v8::Object> exports,
                 v8::Local<v8::Value> unused,
                 v8::Local<v8::Context> context,
                 void* priv) {
-  v8::Isolate* isolate = context->GetIsolate();
-  gin_helper::Dictionary dict(isolate, exports);
-  dict.Set("Notification", Notification::GetConstructor(context));
-  dict.SetMethod("isSupported", &Notification::IsSupported);
+  v8::Isolate* const isolate = electron::JavascriptEnvironment::GetIsolate();
+  v8::Local<v8::Function> constructor = Notification::GetConstructor(
+      isolate, context, &Notification::kWrapperInfo);
+  gin_helper::Dictionary statics{isolate, constructor};
+  statics.SetMethod<&Notification::IsSupported>("isSupported");
+#if BUILDFLAG(IS_WIN)
+  statics.SetMethod<&Notification::HandleActivation>("handleActivation");
+#endif
+  statics.SetMethod<&Notification::GetHistory>("getHistory");
+  statics.SetMethod<&Notification::Remove>("remove");
+  statics.SetMethod<&Notification::RemoveAll>("removeAll");
+  statics.SetMethod<&Notification::RemoveGroup>("removeGroup");
+  gin_helper::Dictionary{isolate, exports}.Set("Notification", constructor);
 }
 
 }  // namespace

@@ -13,8 +13,9 @@
 #include <windows.ui.notifications.h>
 #include <wrl/implements.h>
 #include <string>
-#include <vector>
 
+#include "base/memory/scoped_refptr.h"
+#include "base/task/single_thread_task_runner.h"
 #include "shell/browser/notifications/notification.h"
 
 using Microsoft::WRL::ClassicCom;
@@ -24,8 +25,6 @@ using Microsoft::WRL::RuntimeClass;
 using Microsoft::WRL::RuntimeClassFlags;
 
 namespace electron {
-
-class ScopedHString;
 
 using DesktopToastActivatedEventHandler =
     ABI::Windows::Foundation::ITypedEventHandler<
@@ -53,39 +52,24 @@ class WindowsToastNotification : public Notification {
   // Notification:
   void Show(const NotificationOptions& options) override;
   void Dismiss() override;
+  void Remove() override;
 
  private:
   friend class ToastEventHandler;
 
-  HRESULT ShowInternal(const NotificationOptions& options);
-  HRESULT GetToastXml(
-      ABI::Windows::UI::Notifications::IToastNotificationManagerStatics*
-          toastManager,
+  static std::u16string GetToastXml(
+      const std::string& notification_id,
       const std::u16string& title,
       const std::u16string& msg,
       const std::wstring& icon_path,
       const std::u16string& timeout_type,
       const bool silent,
-      ABI::Windows::Data::Xml::Dom::IXmlDocument** toast_xml);
-  HRESULT SetXmlAudioSilent(ABI::Windows::Data::Xml::Dom::IXmlDocument* doc);
-  HRESULT SetXmlScenarioReminder(
-      ABI::Windows::Data::Xml::Dom::IXmlDocument* doc);
-  HRESULT SetXmlText(ABI::Windows::Data::Xml::Dom::IXmlDocument* doc,
-                     const std::u16string& text);
-  HRESULT SetXmlText(ABI::Windows::Data::Xml::Dom::IXmlDocument* doc,
-                     const std::u16string& title,
-                     const std::u16string& body);
-  HRESULT SetXmlImage(ABI::Windows::Data::Xml::Dom::IXmlDocument* doc,
-                      const std::wstring& icon_path);
-  HRESULT GetTextNodeList(
-      ScopedHString* tag,
-      ABI::Windows::Data::Xml::Dom::IXmlDocument* doc,
-      ABI::Windows::Data::Xml::Dom::IXmlNodeList** node_list,
-      uint32_t req_length);
-  HRESULT AppendTextToXml(ABI::Windows::Data::Xml::Dom::IXmlDocument* doc,
-                          ABI::Windows::Data::Xml::Dom::IXmlNode* node,
-                          const std::u16string& text);
-  HRESULT XmlDocumentFromString(
+      const std::vector<NotificationAction>& actions,
+      bool has_reply,
+      const std::u16string& reply_placeholder,
+      const std::string& group_id,
+      const std::u16string& group_title);
+  static HRESULT XmlDocumentFromString(
       const wchar_t* xmlString,
       ABI::Windows::Data::Xml::Dom::IXmlDocument** doc);
   HRESULT SetupCallbacks(
@@ -93,11 +77,45 @@ class WindowsToastNotification : public Notification {
   bool RemoveCallbacks(
       ABI::Windows::UI::Notifications::IToastNotification* toast);
 
+  // Helper methods for async Show() implementation
+  static bool CreateToastXmlDocument(
+      const NotificationOptions& options,
+      NotificationPresenter* presenter,
+      const std::string& notification_id,
+      base::WeakPtr<Notification> weak_notification,
+      scoped_refptr<base::SingleThreadTaskRunner> ui_task_runner,
+      ComPtr<ABI::Windows::Data::Xml::Dom::IXmlDocument>* toast_xml);
+  static void CreateToastNotificationOnBackgroundThread(
+      const NotificationOptions& options,
+      NotificationPresenter* presenter,
+      const std::string& notification_id,
+      base::WeakPtr<Notification> weak_notification,
+      scoped_refptr<base::SingleThreadTaskRunner> ui_task_runner);
+  static bool CreateToastNotification(
+      ComPtr<ABI::Windows::Data::Xml::Dom::IXmlDocument> toast_xml,
+      const NotificationOptions& options,
+      const std::string& notification_id,
+      base::WeakPtr<Notification> weak_notification,
+      scoped_refptr<base::SingleThreadTaskRunner> ui_task_runner,
+      ComPtr<ABI::Windows::UI::Notifications::IToastNotification>*
+          toast_notification);
+  static void SetupAndShowOnUIThread(
+      base::WeakPtr<Notification> weak_notification,
+      ComPtr<ABI::Windows::UI::Notifications::IToastNotification> notification,
+      const std::string& group_id);
+  static void PostNotificationFailedToUIThread(
+      base::WeakPtr<Notification> weak_notification,
+      const std::string& error,
+      scoped_refptr<base::SingleThreadTaskRunner> ui_task_runner);
+
   static ComPtr<
-      ABI::Windows::UI::Notifications::IToastNotificationManagerStatics>
+      ABI::Windows::UI::Notifications::IToastNotificationManagerStatics>*
       toast_manager_;
-  static ComPtr<ABI::Windows::UI::Notifications::IToastNotifier>
+  static ComPtr<ABI::Windows::UI::Notifications::IToastNotifier>*
       toast_notifier_;
+
+  // Returns the task runner for toast operations, creating it if necessary.
+  static scoped_refptr<base::SequencedTaskRunner> GetToastTaskRunner();
 
   EventRegistrationToken activated_token_;
   EventRegistrationToken dismissed_token_;
@@ -106,6 +124,9 @@ class WindowsToastNotification : public Notification {
   ComPtr<ToastEventHandler> event_handler_;
   ComPtr<ABI::Windows::UI::Notifications::IToastNotification>
       toast_notification_;
+
+  // Stored for Remove() to use when removing from Action Center
+  std::string group_id_;
 };
 
 class ToastEventHandler : public RuntimeClass<RuntimeClassFlags<ClassicCom>,
@@ -120,12 +141,17 @@ class ToastEventHandler : public RuntimeClass<RuntimeClassFlags<ClassicCom>,
   ToastEventHandler(const ToastEventHandler&) = delete;
   ToastEventHandler& operator=(const ToastEventHandler&) = delete;
 
+  // DesktopToastActivatedEventHandler
   IFACEMETHODIMP Invoke(
       ABI::Windows::UI::Notifications::IToastNotification* sender,
       IInspectable* args) override;
+
+  // DesktopToastDismissedEventHandler
   IFACEMETHODIMP Invoke(
       ABI::Windows::UI::Notifications::IToastNotification* sender,
       ABI::Windows::UI::Notifications::IToastDismissedEventArgs* e) override;
+
+  // DesktopToastFailedEventHandler
   IFACEMETHODIMP Invoke(
       ABI::Windows::UI::Notifications::IToastNotification* sender,
       ABI::Windows::UI::Notifications::IToastFailedEventArgs* e) override;

@@ -6,7 +6,7 @@ Process: [Main](../glossary.md#main-process)
 
 For example, when registering for push notifications via Apple push notification services (APNS):
 
-```javascript
+```js
 const { pushNotifications, Notification } = require('electron')
 
 pushNotifications.registerForAPNSNotifications().then((token) => {
@@ -27,7 +27,7 @@ The `pushNotification` module emits the following events:
 Returns:
 
 * `event` Event
-* `userInfo` Record<String, any>
+* `userInfo` Record\<String, any\>
 
 Emitted when the app receives a remote notification while running.
 See: https://developer.apple.com/documentation/appkit/nsapplicationdelegate/1428430-application?language=objc
@@ -46,4 +46,7 @@ See: https://developer.apple.com/documentation/appkit/nsapplication/1428476-regi
 ### `pushNotifications.unregisterForAPNSNotifications()` _macOS_
 
 Unregisters the app from notifications received from APNS.
+
+Apps unregistered through this method can always reregister.
+
 See: https://developer.apple.com/documentation/appkit/nsapplication/1428747-unregisterforremotenotifications?language=objc

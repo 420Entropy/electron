@@ -6,8 +6,9 @@
 #define ELECTRON_SHELL_BROWSER_UI_ACCELERATOR_UTIL_H_
 
 #include <map>
-#include <string>
+#include <string_view>
 
+#include "base/memory/raw_ptr.h"
 #include "shell/browser/ui/electron_menu_model.h"
 #include "ui/base/accelerators/accelerator.h"
 
@@ -15,12 +16,12 @@ namespace accelerator_util {
 
 typedef struct {
   size_t position;
-  electron::ElectronMenuModel* model;
+  raw_ptr<electron::ElectronMenuModel> model;
 } MenuItem;
 typedef std::map<ui::Accelerator, MenuItem> AcceleratorTable;
 
 // Parse a string as an accelerator.
-bool StringToAccelerator(const std::string& shortcut,
+bool StringToAccelerator(std::string_view shortcut,
                          ui::Accelerator* accelerator);
 
 // Generate a table that contains menu model's accelerators and command ids.

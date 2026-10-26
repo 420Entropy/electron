@@ -6,35 +6,28 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include "base/files/file_path.h"
-#include "base/files/file_util.h"
-#include "base/functional/bind.h"
 #include "base/json/json_string_value_serializer.h"
+#include "base/logging.h"
 #include "base/path_service.h"
 #include "base/values.h"
 #include "chrome/common/chrome_paths.h"
 #include "chrome/grit/browser_resources.h"
 #include "components/value_store/value_store_factory_impl.h"
 #include "content/public/browser/browser_context.h"
-#include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
-#include "content/public/browser/notification_details.h"
-#include "content/public/browser/notification_service.h"
-#include "content/public/browser/notification_source.h"
 #include "electron/buildflags/buildflags.h"
 #include "extensions/browser/api/app_runtime/app_runtime_api.h"
-#include "extensions/browser/extension_registry.h"
-#include "extensions/browser/info_map.h"
 #include "extensions/browser/management_policy.h"
-#include "extensions/browser/notification_types.h"
 #include "extensions/browser/null_app_sorting.h"
 #include "extensions/browser/quota_service.h"
 #include "extensions/browser/service_worker_manager.h"
+#include "extensions/browser/state_store.h"
 #include "extensions/browser/user_script_manager.h"
 #include "extensions/common/constants.h"
-#include "extensions/common/file_util.h"
 #include "shell/browser/extensions/electron_extension_loader.h"
 
 #if BUILDFLAG(ENABLE_PDF_VIEWER)
@@ -50,7 +43,23 @@ ElectronExtensionSystem::ElectronExtensionSystem(
     BrowserContext* browser_context)
     : browser_context_(browser_context),
       store_factory_(base::MakeRefCounted<value_store::ValueStoreFactoryImpl>(
-          browser_context->GetPath())) {}
+          browser_context->GetPath())) {
+  // Extensions cannot be loaded in in-memory sessions, which must not write
+  // to disk either.
+  if (browser_context->IsOffTheRecord())
+    return;
+
+  // Created here rather than in InitForRegularProfile() because keyed
+  // services built with the browser context, such as AlarmManager, look the
+  // stores up when they are constructed. The rules and scripts stores load
+  // immediately so their contents are ready before the first network request.
+  state_store_ = std::make_unique<StateStore>(
+      browser_context, store_factory_, StateStore::BackendType::STATE, true);
+  rules_store_ = std::make_unique<StateStore>(
+      browser_context, store_factory_, StateStore::BackendType::RULES, false);
+  dynamic_user_scripts_store_ = std::make_unique<StateStore>(
+      browser_context, store_factory_, StateStore::BackendType::SCRIPTS, false);
+}
 
 ElectronExtensionSystem::~ElectronExtensionSystem() = default;
 
@@ -94,23 +103,30 @@ void ElectronExtensionSystem::InitForRegularProfile(bool extensions_enabled) {
   management_policy_ = std::make_unique<ManagementPolicy>();
 }
 
-std::unique_ptr<base::Value::Dict> ParseManifest(
-    base::StringPiece manifest_contents) {
+#if BUILDFLAG(ENABLE_PDF_VIEWER)
+namespace {
+
+std::unique_ptr<base::DictValue> ParseManifest(
+    const std::string_view manifest_contents) {
   JSONStringValueDeserializer deserializer(manifest_contents);
-  std::unique_ptr<base::Value> manifest = deserializer.Deserialize(NULL, NULL);
+  std::unique_ptr<base::Value> manifest =
+      deserializer.Deserialize(nullptr, nullptr);
 
   if (!manifest.get() || !manifest->is_dict()) {
     LOG(ERROR) << "Failed to parse extension manifest.";
-    return std::unique_ptr<base::Value::Dict>();
+    return {};
   }
-  return std::make_unique<base::Value::Dict>(std::move(manifest->GetDict()));
+  return std::make_unique<base::DictValue>(std::move(*manifest).TakeDict());
 }
 
+}  // namespace
+#endif  // if BUILDFLAG(ENABLE_PDF_VIEWER)
+
 void ElectronExtensionSystem::LoadComponentExtensions() {
-  std::string utf8_error;
 #if BUILDFLAG(ENABLE_PDF_VIEWER)
+  std::u16string error;
   std::string pdf_manifest_string = pdf_extension_util::GetManifest();
-  std::unique_ptr<base::Value::Dict> pdf_manifest =
+  std::unique_ptr<base::DictValue> pdf_manifest =
       ParseManifest(pdf_manifest_string);
   if (pdf_manifest) {
     base::FilePath root_directory;
@@ -119,7 +135,7 @@ void ElectronExtensionSystem::LoadComponentExtensions() {
     scoped_refptr<const Extension> pdf_extension =
         extensions::Extension::Create(
             root_directory, extensions::mojom::ManifestLocation::kComponent,
-            *pdf_manifest, extensions::Extension::REQUIRE_KEY, &utf8_error);
+            *pdf_manifest, extensions::Extension::REQUIRE_KEY, &error);
     extension_loader_->registrar()->AddExtension(pdf_extension);
   }
 #endif
@@ -142,26 +158,20 @@ UserScriptManager* ElectronExtensionSystem::user_script_manager() {
 }
 
 StateStore* ElectronExtensionSystem::state_store() {
-  return nullptr;
+  return state_store_.get();
 }
 
 StateStore* ElectronExtensionSystem::rules_store() {
-  return nullptr;
+  return rules_store_.get();
 }
 
 StateStore* ElectronExtensionSystem::dynamic_user_scripts_store() {
-  return nullptr;
+  return dynamic_user_scripts_store_.get();
 }
 
 scoped_refptr<value_store::ValueStoreFactory>
 ElectronExtensionSystem::store_factory() {
   return store_factory_;
-}
-
-InfoMap* ElectronExtensionSystem::info_map() {
-  if (!info_map_.get())
-    info_map_ = base::MakeRefCounted<InfoMap>();
-  return info_map_.get();
 }
 
 QuotaService* ElectronExtensionSystem::quota_service() {
@@ -171,20 +181,6 @@ QuotaService* ElectronExtensionSystem::quota_service() {
 AppSorting* ElectronExtensionSystem::app_sorting() {
   return app_sorting_.get();
 }
-
-void ElectronExtensionSystem::RegisterExtensionWithRequestContexts(
-    const Extension* extension,
-    base::OnceClosure callback) {
-  content::GetIOThreadTaskRunner({})->PostTaskAndReply(
-      FROM_HERE,
-      base::BindOnce(&InfoMap::AddExtension, info_map(),
-                     base::RetainedRef(extension), base::Time::Now(), false,
-                     false),
-      std::move(callback));
-}
-
-void ElectronExtensionSystem::UnregisterExtensionWithRequestContexts(
-    const std::string& extension_id) {}
 
 const base::OneShotEvent& ElectronExtensionSystem::ready() const {
   return ready_;
@@ -198,11 +194,6 @@ ContentVerifier* ElectronExtensionSystem::content_verifier() {
   return nullptr;
 }
 
-std::unique_ptr<ExtensionSet> ElectronExtensionSystem::GetDependentExtensions(
-    const Extension* extension) {
-  return std::make_unique<ExtensionSet>();
-}
-
 void ElectronExtensionSystem::InstallUpdate(
     const std::string& extension_id,
     const std::string& public_key,
@@ -210,27 +201,12 @@ void ElectronExtensionSystem::InstallUpdate(
     bool install_immediately,
     InstallUpdateCallback install_update_callback) {
   NOTREACHED();
-  base::DeletePathRecursively(temp_dir);
-}
-
-bool ElectronExtensionSystem::FinishDelayedInstallationIfReady(
-    const std::string& extension_id,
-    bool install_immediately) {
-  NOTREACHED();
-  return false;
 }
 
 void ElectronExtensionSystem::PerformActionBasedOnOmahaAttributes(
     const std::string& extension_id,
-    const base::Value& attributes) {
+    const base::DictValue& attributes) {
   NOTREACHED();
-}
-
-void ElectronExtensionSystem::OnExtensionRegisteredWithRequestContexts(
-    scoped_refptr<Extension> extension) {
-  ExtensionRegistry* registry = ExtensionRegistry::Get(browser_context_);
-  registry->AddReady(extension);
-  registry->TriggerOnReady(extension.get());
 }
 
 }  // namespace extensions

@@ -1,14 +1,16 @@
 import { EventEmitter } from 'events';
-import { Duplex, PassThrough } from 'stream';
 import { Socket } from 'net';
-import { MessagePortMain } from '@electron/internal/browser/message-port-main';
+import { Duplex, PassThrough } from 'stream';
+
 const { _fork } = process._linkedBinding('electron_browser_utility_process');
 
-class ForkUtilityProcess extends EventEmitter {
+class ForkUtilityProcess extends EventEmitter implements Electron.UtilityProcess {
   #handle: ElectronInternal.UtilityProcessWrapper | null;
   #stdout: Duplex | null = null;
   #stderr: Duplex | null = null;
-  constructor (modulePath: string, args?: string[], options?: Electron.ForkOptions) {
+  #stdoutConnected = false;
+  #stderrConnected = false;
+  constructor(modulePath: string, args?: string[], options?: Electron.ForkOptions) {
     super();
 
     if (!modulePath) {
@@ -34,24 +36,24 @@ class ForkUtilityProcess extends EventEmitter {
 
     if (options.execArgv != null) {
       if (!Array.isArray(options.execArgv)) {
-        throw new Error('execArgv must be an array of strings.');
+        throw new TypeError('execArgv must be an array of strings.');
       }
     }
 
     if (options.serviceName != null) {
       if (typeof options.serviceName !== 'string') {
-        throw new Error('serviceName must be a string.');
+        throw new TypeError('serviceName must be a string.');
       }
     }
 
     if (options.cwd != null) {
       if (typeof options.cwd !== 'string') {
-        throw new Error('cwd path must be a string.');
+        throw new TypeError('cwd path must be a string.');
       }
     }
 
     if (typeof options.stdio === 'string') {
-      const stdio : Array<'pipe' | 'ignore' | 'inherit'> = [];
+      const stdio: Array<'pipe' | 'ignore' | 'inherit'> = [];
       switch (options.stdio) {
         case 'inherit':
         case 'ignore':
@@ -95,20 +97,24 @@ class ForkUtilityProcess extends EventEmitter {
           this.emit('exit', ...args);
         } finally {
           this.#handle = null;
-          if (this.#stdout) {
-            this.#stdout.removeAllListeners();
-            this.#stdout = null;
-          }
-          if (this.#stderr) {
-            this.#stderr.removeAllListeners();
-            this.#stderr = null;
-          }
+          // Leave the streams' listeners alone: output the child wrote just
+          // before exiting may still be in the pipe, and a connected stream
+          // ends on its own once that has been read. Only end the ones that
+          // never got connected, so their readers do not wait forever.
+          const stdout = this.#stdout;
+          const stderr = this.#stderr;
+          this.#stdout = null;
+          this.#stderr = null;
+          if (!this.#stdoutConnected) stdout?.end();
+          if (!this.#stderrConnected) stderr?.end();
         }
         return false;
       } else if (channel === 'stdout' && this.#stdout) {
+        this.#stdoutConnected = true;
         new Socket({ fd: args[0], readable: true }).pipe(this.#stdout);
         return true;
       } else if (channel === 'stderr' && this.#stderr) {
+        this.#stderrConnected = true;
         new Socket({ fd: args[0], readable: true }).pipe(this.#stderr);
         return true;
       } else {
@@ -117,27 +123,30 @@ class ForkUtilityProcess extends EventEmitter {
     };
   }
 
-  get pid () {
+  get pid() {
     return this.#handle?.pid;
   }
 
-  get stdout () {
+  get stdout() {
     return this.#stdout;
   }
 
-  get stderr () {
+  get stderr() {
     return this.#stderr;
   }
 
-  postMessage (message: any, transfer?: MessagePortMain[]) {
+  _unwrapHandle() {
+    return this.#handle;
+  }
+
+  postMessage(message: any, transfer?: Electron.MessagePortMain[]) {
     if (Array.isArray(transfer)) {
-      transfer = transfer.map((o: any) => o instanceof MessagePortMain ? o._internalPort : o);
       return this.#handle?.postMessage(message, transfer);
     }
     return this.#handle?.postMessage(message);
   }
 
-  kill () : boolean {
+  kill(): boolean {
     if (this.#handle === null) {
       return false;
     }
@@ -145,6 +154,6 @@ class ForkUtilityProcess extends EventEmitter {
   }
 }
 
-export function fork (modulePath: string, args?: string[], options?: Electron.ForkOptions) {
+export function fork(modulePath: string, args?: string[], options?: Electron.ForkOptions) {
   return new ForkUtilityProcess(modulePath, args, options);
 }

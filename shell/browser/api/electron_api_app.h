@@ -5,30 +5,33 @@
 #ifndef ELECTRON_SHELL_BROWSER_API_ELECTRON_API_APP_H_
 #define ELECTRON_SHELL_BROWSER_API_ELECTRON_API_APP_H_
 
-#include <map>
 #include <memory>
 #include <string>
 #include <vector>
 
+#include "base/containers/flat_map.h"
 #include "base/task/cancelable_task_tracker.h"
-#include "chrome/browser/icon_manager.h"
 #include "chrome/browser/process_singleton.h"
 #include "content/public/browser/browser_child_process_observer.h"
 #include "content/public/browser/gpu_data_manager_observer.h"
 #include "content/public/browser/render_process_host.h"
+#include "content/public/browser/scoped_accessibility_mode.h"
+#include "content/public/common/child_process_id.h"
 #include "crypto/crypto_buildflags.h"
-#include "gin/handle.h"
+#include "electron/mas.h"
+#include "gin/wrappable.h"
 #include "net/base/completion_once_callback.h"
 #include "net/base/completion_repeating_callback.h"
+#include "net/base/features.h"
 #include "net/ssl/client_cert_identity.h"
-#include "shell/browser/api/process_metric.h"
 #include "shell/browser/browser.h"
 #include "shell/browser/browser_observer.h"
 #include "shell/browser/electron_browser_client.h"
 #include "shell/browser/event_emitter_mixin.h"
-#include "shell/common/gin_helper/dictionary.h"
-#include "shell/common/gin_helper/error_thrower.h"
-#include "shell/common/gin_helper/promise.h"
+#include "shell/common/gin_helper/cached_string.h"
+#include "v8/include/cppgc/member.h"
+#include "v8/include/cppgc/persistent.h"
+#include "v8/include/v8-traced-handle.h"
 
 #if BUILDFLAG(USE_NSS_CERTS)
 #include "shell/browser/certificate_manager_model.h"
@@ -38,7 +41,14 @@ namespace base {
 class FilePath;
 }
 
+namespace gin_helper {
+class Dictionary;
+class ErrorThrower;
+}  // namespace gin_helper
+
 namespace electron {
+
+struct ProcessMetric;
 
 #if BUILDFLAG(IS_WIN)
 enum class JumpListResult : int;
@@ -46,24 +56,24 @@ enum class JumpListResult : int;
 
 namespace api {
 
-class App : public ElectronBrowserClient::Delegate,
-            public gin::Wrappable<App>,
-            public gin_helper::EventEmitterMixin<App>,
-            public BrowserObserver,
-            public content::GpuDataManagerObserver,
-            public content::BrowserChildProcessObserver {
- public:
-  using FileIconCallback =
-      base::RepeatingCallback<void(v8::Local<v8::Value>, const gfx::Image&)>;
+class Menu;
 
-  static gin::Handle<App> Create(v8::Isolate* isolate);
+class App final : public gin::Wrappable<App>,
+                  public ElectronBrowserClient::Delegate,
+                  public gin_helper::EventEmitterMixin<App>,
+                  private BrowserObserver,
+                  private content::GpuDataManagerObserver,
+                  private content::BrowserChildProcessObserver {
+ public:
   static App* Get();
 
   // gin::Wrappable
   static gin::WrapperInfo kWrapperInfo;
+  void Trace(cppgc::Visitor*) const override;
   gin::ObjectTemplateBuilder GetObjectTemplateBuilder(
       v8::Isolate* isolate) override;
-  const char* GetTypeName() override;
+  const gin::WrapperInfo* wrapper_info() const override;
+  const char* GetHumanReadableName() const override;
 
 #if BUILDFLAG(USE_NSS_CERTS)
   void OnCertificateManagerModelCreated(
@@ -73,20 +83,27 @@ class App : public ElectronBrowserClient::Delegate,
 #endif
 
   base::FilePath GetAppPath() const;
+
+  // Asks the app's client certificate password handler for the password to
+  // unlock |token_name|. Returns false when no handler is set.
+  bool RequestClientCertPassword(
+      const std::string& hostname,
+      const std::string& token_name,
+      bool is_retry,
+      base::OnceCallback<void(const std::string&)> callback);
   void RenderProcessReady(content::RenderProcessHost* host);
   void RenderProcessExited(content::RenderProcessHost* host);
 
   static bool IsPackaged();
 
   App();
+  ~App() override;
 
   // disable copy
   App(const App&) = delete;
   App& operator=(const App&) = delete;
 
  private:
-  ~App() override;
-
   // BrowserObserver:
   void OnBeforeQuit(bool* prevent_default) override;
   void OnWillQuit(bool* prevent_default) override;
@@ -96,7 +113,7 @@ class App : public ElectronBrowserClient::Delegate,
   void OnOpenURL(const std::string& url) override;
   void OnActivate(bool has_visible_windows) override;
   void OnWillFinishLaunching() override;
-  void OnFinishLaunching(base::Value::Dict launch_info) override;
+  void OnFinishLaunching(base::DictValue launch_info) override;
   void OnAccessibilitySupportChanged() override;
   void OnPreMainMessageLoopRun() override;
   void OnPreCreateThreads() override;
@@ -107,15 +124,16 @@ class App : public ElectronBrowserClient::Delegate,
                                        const std::string& error) override;
   void OnContinueUserActivity(bool* prevent_default,
                               const std::string& type,
-                              base::Value::Dict user_info,
-                              base::Value::Dict details) override;
+                              base::DictValue user_info,
+                              base::DictValue details) override;
   void OnUserActivityWasContinued(const std::string& type,
-                                  base::Value::Dict user_info) override;
+                                  base::DictValue user_info) override;
   void OnUpdateUserActivityState(bool* prevent_default,
                                  const std::string& type,
-                                 base::Value::Dict user_info) override;
+                                 base::DictValue user_info) override;
   void OnNewWindowForTab() override;
   void OnDidBecomeActive() override;
+  void OnDidResignActive() override;
 #endif
 
   // content::ContentBrowserClient:
@@ -129,6 +147,8 @@ class App : public ElectronBrowserClient::Delegate,
       base::OnceCallback<void(content::CertificateRequestResultType)> callback)
       override;
   base::OnceClosure SelectClientCertificate(
+      content::BrowserContext* browser_context,
+      content::ChildProcessId process_id,
       content::WebContents* web_contents,
       net::SSLCertRequestInfo* cert_request_info,
       net::ClientCertIdentityList identities,
@@ -151,11 +171,11 @@ class App : public ElectronBrowserClient::Delegate,
 
   // content::GpuDataManagerObserver:
   void OnGpuInfoUpdate() override;
-  void OnGpuProcessCrashed() override;
 
   // content::BrowserChildProcessObserver:
   void BrowserChildProcessLaunchedAndConnected(
-      const content::ChildProcessData& data) override;
+      const content::ChildProcessData& data,
+      const base::Process& process) override;
   void BrowserChildProcessHostDisconnected(
       const content::ChildProcessData& data) override;
   void BrowserChildProcessCrashed(
@@ -164,22 +184,25 @@ class App : public ElectronBrowserClient::Delegate,
   void BrowserChildProcessKilled(
       const content::ChildProcessData& data,
       const content::ChildProcessTerminationInfo& info) override;
+  void BrowserChildProcessLaunchFailed(
+      const content::ChildProcessData& data,
+      const content::ChildProcessTerminationInfo& info) override;
 
  private:
-  void BrowserChildProcessCrashedOrKilled(
-      const content::ChildProcessData& data,
-      const content::ChildProcessTerminationInfo& info);
+  [[nodiscard]] static base::FilePath GetDefaultAppLogPath();
+
+  void EmitChildProcessGone(const content::ChildProcessData& data,
+                            const content::ChildProcessTerminationInfo& info);
 
   void SetAppPath(const base::FilePath& app_path);
   void ChildProcessLaunched(int process_type,
-                            int pid,
+                            content::ChildProcessId pid,
                             base::ProcessHandle handle,
                             const std::string& service_name = std::string(),
                             const std::string& name = std::string());
-  void ChildProcessDisconnected(int pid);
+  void ChildProcessDisconnected(content::ChildProcessId pid);
 
-  void SetAppLogsPath(gin_helper::ErrorThrower thrower,
-                      absl::optional<base::FilePath> custom_path);
+  void SetAppLogsPath(gin::Arguments* args);
 
   // Get/Set the pre-defined path in PathService.
   base::FilePath GetPath(gin_helper::ErrorThrower thrower,
@@ -189,22 +212,31 @@ class App : public ElectronBrowserClient::Delegate,
                const base::FilePath& path);
 
   void SetDesktopName(const std::string& desktop_name);
+  void SetActivationToken(const std::string& token);
   std::string GetLocale();
   std::string GetLocaleCountryCode();
   std::string GetSystemLocale(gin_helper::ErrorThrower thrower) const;
-  void OnSecondInstance(const base::CommandLine& cmd,
+  void OnSecondInstance(base::CommandLine cmd,
                         const base::FilePath& cwd,
-                        const std::vector<const uint8_t> additional_data);
+                        const std::vector<uint8_t> additional_data);
   bool HasSingleInstanceLock() const;
   bool RequestSingleInstanceLock(gin::Arguments* args);
   void ReleaseSingleInstanceLock();
   bool Relaunch(gin::Arguments* args);
+#if BUILDFLAG(IS_WIN)
+  bool CanDeElevate();
+#endif
   void DisableHardwareAcceleration(gin_helper::ErrorThrower thrower);
+  bool IsHardwareAccelerationEnabled();
   void DisableDomainBlockingFor3DAPIs(gin_helper::ErrorThrower thrower);
   bool IsAccessibilitySupportEnabled();
+  v8::Local<v8::Value> GetAccessibilitySupportFeatures();
+  void SetAccessibilitySupportFeatures(
+      gin_helper::ErrorThrower thrower,
+      const std::vector<std::string>& features);
   void SetAccessibilitySupportEnabled(gin_helper::ErrorThrower thrower,
                                       bool enabled);
-  Browser::LoginItemSettings GetLoginItemSettings(gin::Arguments* args);
+  v8::Local<v8::Value> GetLoginItemSettings(gin::Arguments* args);
 #if BUILDFLAG(USE_NSS_CERTS)
   void ImportCertificate(gin_helper::ErrorThrower thrower,
                          base::Value options,
@@ -220,16 +252,40 @@ class App : public ElectronBrowserClient::Delegate,
   void EnableSandbox(gin_helper::ErrorThrower thrower);
   void SetUserAgentFallback(const std::string& user_agent);
   std::string GetUserAgentFallback();
+  v8::Local<v8::Promise> SetProxy(gin::Arguments* args);
+  v8::Local<v8::Promise> ResolveProxy(gin::Arguments* args);
 
 #if BUILDFLAG(IS_MAC)
   void SetActivationPolicy(gin_helper::ErrorThrower thrower,
                            const std::string& policy);
+  void StartAppShimServer(gin::Arguments* args);
+  void StopAppShimServer();
+  void ConfigureWebAuthn(gin_helper::ErrorThrower thrower,
+                         gin::Arguments* args);
   bool MoveToApplicationsFolder(gin_helper::ErrorThrower, gin::Arguments* args);
   bool IsInApplicationsFolder();
   v8::Local<v8::Value> GetDockAPI(v8::Isolate* isolate);
-  bool IsRunningUnderRosettaTranslation() const;
-  v8::Global<v8::Value> dock_;
+  void DockSetMenu(electron::api::Menu* menu);
+  v8::Local<v8::Value> DockGetMenu(v8::Isolate* isolate);
+  v8::TracedReference<v8::Value> dock_;
+  cppgc::Member<electron::api::Menu> dock_menu_;
 #endif
+
+  v8::Local<v8::Value> GetCommandLine(v8::Isolate* isolate);
+  v8::TracedReference<v8::Value> command_line_;
+
+  // app.name, getName(), getVersion() and getAppPath() answer with a string
+  // that almost never changes, so hand the same V8 string back until it does.
+  v8::Local<v8::String> GetNameString(v8::Isolate* isolate);
+  v8::Local<v8::String> GetVersionString(v8::Isolate* isolate);
+  v8::Local<v8::Value> GetAppPathValue(v8::Isolate* isolate);
+  gin_helper::CachedString name_string_;
+  gin_helper::CachedString version_string_;
+  v8::TracedReference<v8::Value> app_path_value_;  // Reset by SetAppPath.
+
+  void SetClientCertRequestPasswordHandler(v8::Isolate* isolate,
+                                           v8::Local<v8::Value> handler);
+  v8::TracedReference<v8::Function> client_cert_password_handler_;
 
 #if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
   bool IsRunningUnderARM64Translation() const;
@@ -245,8 +301,20 @@ class App : public ElectronBrowserClient::Delegate,
   v8::Local<v8::Value> GetJumpListSettings();
 
   // Set or remove a custom Jump List for the application.
-  JumpListResult SetJumpList(v8::Local<v8::Value> val, gin::Arguments* args);
+  JumpListResult SetJumpList(v8::Isolate* isolate, v8::Local<v8::Value> val);
+
+  // Set the toast activator CLSID.
+  void SetToastActivatorCLSID(gin_helper::ErrorThrower thrower,
+                              const std::string& id);
+  // Get the toast activator CLSID.
+  v8::Local<v8::Value> GetToastActivatorCLSID(v8::Isolate* isolate);
 #endif  // BUILDFLAG(IS_WIN)
+
+  // Backing storage for the additional data passed to
+  // requestSingleInstanceLock(). ProcessSingleton stores this as a non-owning
+  // base::raw_span, so it must outlive `process_singleton_`. Declared before
+  // `process_singleton_` so it is destroyed after it.
+  std::vector<uint8_t> single_instance_additional_data_;
 
   std::unique_ptr<ProcessSingleton> process_singleton_;
 
@@ -259,13 +327,16 @@ class App : public ElectronBrowserClient::Delegate,
 
   base::FilePath app_path_;
 
-  using ProcessMetricMap =
-      std::map<int, std::unique_ptr<electron::ProcessMetric>>;
-  ProcessMetricMap app_metrics_;
+  // pid -> electron::ProcessMetric
+  base::flat_map<content::ChildProcessId,
+                 std::unique_ptr<electron::ProcessMetric>>
+      app_metrics_;
 
   bool disable_hw_acceleration_ = false;
   bool disable_domain_blocking_for_3DAPIs_ = false;
   bool watch_singleton_socket_on_ready_ = false;
+
+  std::unique_ptr<content::ScopedAccessibilityMode> scoped_accessibility_mode_;
 };
 
 }  // namespace api

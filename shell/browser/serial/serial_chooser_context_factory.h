@@ -5,9 +5,14 @@
 #ifndef ELECTRON_SHELL_BROWSER_SERIAL_SERIAL_CHOOSER_CONTEXT_FACTORY_H_
 #define ELECTRON_SHELL_BROWSER_SERIAL_SERIAL_CHOOSER_CONTEXT_FACTORY_H_
 
-#include "base/memory/singleton.h"
+#include <memory>
+
 #include "components/keyed_service/content/browser_context_keyed_service_factory.h"
-#include "shell/browser/serial/serial_chooser_context.h"
+
+namespace base {
+template <typename T>
+class NoDestructor;
+}  // namespace base
 
 namespace electron {
 
@@ -19,19 +24,19 @@ class SerialChooserContextFactory : public BrowserContextKeyedServiceFactory {
       content::BrowserContext* context);
   static SerialChooserContextFactory* GetInstance();
 
- private:
-  friend struct base::DefaultSingletonTraits<SerialChooserContextFactory>;
-
-  SerialChooserContextFactory();
-  ~SerialChooserContextFactory() override;
-
   // disable copy
   SerialChooserContextFactory(const SerialChooserContextFactory&) = delete;
   SerialChooserContextFactory& operator=(const SerialChooserContextFactory&) =
       delete;
 
+ private:
+  friend base::NoDestructor<SerialChooserContextFactory>;
+
+  SerialChooserContextFactory();
+  ~SerialChooserContextFactory() override;
+
   // BrowserContextKeyedServiceFactory methods:
-  KeyedService* BuildServiceInstanceFor(
+  std::unique_ptr<KeyedService> BuildServiceInstanceForBrowserContext(
       content::BrowserContext* context) const override;
   content::BrowserContext* GetBrowserContextToUse(
       content::BrowserContext* context) const override;

@@ -8,24 +8,42 @@
 #include <string>
 #include <utility>
 
+#include "base/clang_profiling_buildflags.h"
 #include "base/files/file_util.h"
-#include "base/no_destructor.h"
+#include "base/logging.h"
 #include "base/path_service.h"
 #include "base/run_loop.h"
+#include "base/strings/string_util.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/threading/thread_restrictions.h"
+#include "build/config/compiler/compiler_buildflags.h"
 #include "chrome/common/chrome_paths.h"
+#include "gin/arguments.h"
 #include "shell/browser/browser_observer.h"
 #include "shell/browser/electron_browser_main_parts.h"
-#include "shell/browser/login_handler.h"
 #include "shell/browser/native_window.h"
 #include "shell/browser/window_list.h"
 #include "shell/common/application_info.h"
-#include "shell/common/electron_paths.h"
-#include "shell/common/gin_helper/arguments.h"
+#include "shell/common/gin_converters/login_item_settings_converter.h"
+#include "shell/common/gin_helper/promise.h"
+#include "shell/common/node_bindings.h"
 #include "shell/common/thread_restrictions.h"
 
+#if BUILDFLAG(CLANG_PROFILING_INSIDE_SANDBOX) && BUILDFLAG(CLANG_PGO_PROFILING)
+#include "content/public/browser/profiling_utils.h"
+#endif
+
 namespace electron {
+
+LoginItemSettings::LoginItemSettings() = default;
+LoginItemSettings::~LoginItemSettings() = default;
+LoginItemSettings::LoginItemSettings(const LoginItemSettings& other) = default;
+
+#if BUILDFLAG(IS_WIN)
+LaunchItem::LaunchItem() = default;
+LaunchItem::~LaunchItem() = default;
+LaunchItem::LaunchItem(const LaunchItem& other) = default;
+#endif
 
 namespace {
 
@@ -43,17 +61,6 @@ void RunQuitClosure(base::OnceClosure quit) {
 
 }  // namespace
 
-#if BUILDFLAG(IS_WIN)
-Browser::LaunchItem::LaunchItem() = default;
-Browser::LaunchItem::~LaunchItem() = default;
-Browser::LaunchItem::LaunchItem(const LaunchItem& other) = default;
-#endif
-
-Browser::LoginItemSettings::LoginItemSettings() = default;
-Browser::LoginItemSettings::~LoginItemSettings() = default;
-Browser::LoginItemSettings::LoginItemSettings(const LoginItemSettings& other) =
-    default;
-
 Browser::Browser() {
   WindowList::AddObserver(this);
 }
@@ -62,9 +69,40 @@ Browser::~Browser() {
   WindowList::RemoveObserver(this);
 }
 
+void Browser::AddObserver(BrowserObserver* obs) {
+  observers_.AddObserver(obs);
+}
+
+void Browser::RemoveObserver(BrowserObserver* obs) {
+  observers_.RemoveObserver(obs);
+}
+
 // static
 Browser* Browser::Get() {
   return ElectronBrowserMainParts::Get()->browser();
+}
+
+// static
+bool Browser::IsValidProtocolScheme(const std::string& scheme) {
+  // RFC 3986 Section 3.1:
+  // scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )
+  if (scheme.empty()) {
+    LOG(ERROR) << "Protocol scheme must not be empty";
+    return false;
+  }
+  if (!base::IsAsciiAlpha(scheme[0])) {
+    LOG(ERROR) << "Protocol scheme must start with an ASCII letter";
+    return false;
+  }
+  for (size_t i = 1; i < scheme.size(); ++i) {
+    const char c = scheme[i];
+    if (!base::IsAsciiAlpha(c) && !base::IsAsciiDigit(c) && c != '+' &&
+        c != '-' && c != '.') {
+      LOG(ERROR) << "Protocol scheme contains invalid character: '" << c << "'";
+      return false;
+    }
+  }
+  return true;
 }
 
 #if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_LINUX)
@@ -96,9 +134,16 @@ void Browser::Quit() {
 void Browser::Exit(gin::Arguments* args) {
   int code = 0;
   args->GetNext(&code);
+  ExitWithCode(code);
+}
 
+void Browser::ExitWithCode(int code) {
   if (!ElectronBrowserMainParts::Get()->SetExitCode(code)) {
-    // Message loop is not ready, quit directly.
+    // Message loop is not ready, quit directly. Nothing below us gets torn
+    // down on this path, so at least undo Node's per-process initialization
+    // before exit() starts running static destructors underneath any threads
+    // Node has started.
+    NodeBindings::TearDownOncePerProcess();
     exit(code);
   } else {
     // Prepare to quit when all windows have been closed.
@@ -125,8 +170,22 @@ void Browser::Shutdown() {
   is_shutdown_ = true;
   is_quitting_ = true;
 
-  for (BrowserObserver& observer : observers_)
-    observer.OnQuit();
+  observers_.Notify(&BrowserObserver::OnQuit);
+
+#if BUILDFLAG(CLANG_PROFILING_INSIDE_SANDBOX) && BUILDFLAG(CLANG_PGO_PROFILING)
+  // In PGO-instrumented builds, sandboxed child processes write their
+  // profile counters through a file handle the browser gave them, and they
+  // only do so when asked or when they exit cleanly. Once the browser quits
+  // its message loop the sandbox job object kills any child still writing,
+  // which truncates the profraw and loses the renderer's counters. Mirror
+  // chrome/browser/lifetime/browser_shutdown.cc: ask every child to dump now
+  // and wait for all of them before continuing with shutdown.
+  if (base::SingleThreadTaskRunner::HasCurrentDefault()) {
+    base::RunLoop nested_run_loop(base::RunLoop::Type::kNestableTasksAllowed);
+    content::AskAllChildrenToDumpProfilingData(nested_run_loop.QuitClosure());
+    nested_run_loop.Run();
+  }
+#endif
 
   if (quit_main_message_loop_) {
     RunQuitClosure(std::move(quit_main_message_loop_));
@@ -146,6 +205,7 @@ std::string Browser::GetVersion() const {
 
 void Browser::SetVersion(const std::string& version) {
   OverriddenApplicationVersion() = version;
+  InvalidateApplicationUserAgent();
 }
 
 std::string Browser::GetName() const {
@@ -157,36 +217,28 @@ std::string Browser::GetName() const {
 
 void Browser::SetName(const std::string& name) {
   OverriddenApplicationName() = name;
-}
-
-int Browser::GetBadgeCount() {
-  return badge_count_;
+  InvalidateApplicationUserAgent();
 }
 
 bool Browser::OpenFile(const std::string& file_path) {
   bool prevent_default = false;
-  for (BrowserObserver& observer : observers_)
-    observer.OnOpenFile(&prevent_default, file_path);
-
+  observers_.Notify(&BrowserObserver::OnOpenFile, &prevent_default, file_path);
   return prevent_default;
 }
 
 void Browser::OpenURL(const std::string& url) {
-  for (BrowserObserver& observer : observers_)
-    observer.OnOpenURL(url);
+  observers_.Notify(&BrowserObserver::OnOpenURL, url);
 }
 
 void Browser::Activate(bool has_visible_windows) {
-  for (BrowserObserver& observer : observers_)
-    observer.OnActivate(has_visible_windows);
+  observers_.Notify(&BrowserObserver::OnActivate, has_visible_windows);
 }
 
 void Browser::WillFinishLaunching() {
-  for (BrowserObserver& observer : observers_)
-    observer.OnWillFinishLaunching();
+  observers_.Notify(&BrowserObserver::OnWillFinishLaunching);
 }
 
-void Browser::DidFinishLaunching(base::Value::Dict launch_info) {
+void Browser::DidFinishLaunching(base::DictValue launch_info) {
   // Make sure the userData directory is created.
   ScopedAllowBlockingForElectron allow_blocking;
   base::FilePath user_data;
@@ -198,9 +250,9 @@ void Browser::DidFinishLaunching(base::Value::Dict launch_info) {
   }
 
   is_ready_ = true;
-  if (ready_promise_) {
+  if (ready_promise_)
     ready_promise_->Resolve();
-  }
+
   for (BrowserObserver& observer : observers_)
     observer.OnFinishLaunching(launch_info.Clone());
 }
@@ -216,20 +268,15 @@ v8::Local<v8::Value> Browser::WhenReady(v8::Isolate* isolate) {
 }
 
 void Browser::OnAccessibilitySupportChanged() {
-  for (BrowserObserver& observer : observers_)
-    observer.OnAccessibilitySupportChanged();
+  observers_.Notify(&BrowserObserver::OnAccessibilitySupportChanged);
 }
 
 void Browser::PreMainMessageLoopRun() {
-  for (BrowserObserver& observer : observers_) {
-    observer.OnPreMainMessageLoopRun();
-  }
+  observers_.Notify(&BrowserObserver::OnPreMainMessageLoopRun);
 }
 
 void Browser::PreCreateThreads() {
-  for (BrowserObserver& observer : observers_) {
-    observer.OnPreCreateThreads();
-  }
+  observers_.Notify(&BrowserObserver::OnPreCreateThreads);
 }
 
 void Browser::SetMainMessageLoopQuitClosure(base::OnceClosure quit_closure) {
@@ -244,9 +291,7 @@ void Browser::NotifyAndShutdown() {
     return;
 
   bool prevent_default = false;
-  for (BrowserObserver& observer : observers_)
-    observer.OnWillQuit(&prevent_default);
-
+  observers_.Notify(&BrowserObserver::OnWillQuit, &prevent_default);
   if (prevent_default) {
     is_quitting_ = false;
     return;
@@ -257,9 +302,7 @@ void Browser::NotifyAndShutdown() {
 
 bool Browser::HandleBeforeQuit() {
   bool prevent_default = false;
-  for (BrowserObserver& observer : observers_)
-    observer.OnBeforeQuit(&prevent_default);
-
+  observers_.Notify(&BrowserObserver::OnBeforeQuit, &prevent_default);
   return !prevent_default;
 }
 
@@ -276,20 +319,21 @@ void Browser::OnWindowAllClosed() {
   } else if (is_quitting_) {
     NotifyAndShutdown();
   } else {
-    for (BrowserObserver& observer : observers_)
-      observer.OnWindowAllClosed();
+    observers_.Notify(&BrowserObserver::OnWindowAllClosed);
   }
 }
 
 #if BUILDFLAG(IS_MAC)
 void Browser::NewWindowForTab() {
-  for (BrowserObserver& observer : observers_)
-    observer.OnNewWindowForTab();
+  observers_.Notify(&BrowserObserver::OnNewWindowForTab);
 }
 
 void Browser::DidBecomeActive() {
-  for (BrowserObserver& observer : observers_)
-    observer.OnDidBecomeActive();
+  observers_.Notify(&BrowserObserver::OnDidBecomeActive);
+}
+
+void Browser::DidResignActive() {
+  observers_.Notify(&BrowserObserver::OnDidResignActive);
 }
 #endif
 

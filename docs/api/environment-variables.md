@@ -51,6 +51,18 @@ Unsupported options are:
 --http-parser
 ```
 
+If the [`nodeOptions` fuse](../tutorial/fuses.md#nodeoptions) is disabled, `NODE_OPTIONS` will be ignored.
+
+### `NODE_EXTRA_CA_CERTS`
+
+See [Node.js cli documentation](https://github.com/nodejs/node/blob/main/doc/api/cli.md#node_extra_ca_certsfile) for details.
+
+```sh
+export NODE_EXTRA_CA_CERTS=/path/to/cert.pem 
+```
+
+If the [`nodeOptions` fuse](../tutorial/fuses.md#nodeoptions) is disabled, `NODE_EXTRA_CA_CERTS` will be ignored.
+
 ### `GOOGLE_API_KEY`
 
 Geolocation support in Electron requires the use of Google Cloud Platform's
@@ -59,7 +71,7 @@ geolocation webservice. To enable this feature, acquire a
 and place the following code in your main process file, before opening any
 browser windows that will make geolocation requests:
 
-```javascript
+```js
 process.env.GOOGLE_API_KEY = 'YOUR_KEY_HERE'
 ```
 
@@ -92,6 +104,8 @@ you would when running the normal Node.js executable, with the exception of the 
 These flags are disabled owing to the fact that Electron uses BoringSSL instead of OpenSSL when building Node.js'
 `crypto` module, and so will not work as designed.
 
+If the [`runAsNode` fuse](../tutorial/fuses.md#runasnode) is disabled, `ELECTRON_RUN_AS_NODE` will be ignored.
+
 ### `ELECTRON_NO_ATTACH_CONSOLE` _Windows_
 
 Don't attach to the current console session.
@@ -121,21 +135,16 @@ debugging purposes.
 Prints Chromium's internal logging to the console.
 
 Setting this variable is the same as passing `--enable-logging`
-on the command line. For more info, see `--enable-logging` in [command-line
-switches](./command-line-switches.md#--enable-loggingfile).
+on the command line. For more info, see `--enable-logging` in
+[command-line switches](./command-line-switches.md#--enable-loggingfile).
 
 ### `ELECTRON_LOG_FILE`
 
 Sets the file destination for Chromium's internal logging.
 
 Setting this variable is the same as passing `--log-file`
-on the command line. For more info, see `--log-file` in [command-line
-switches](./command-line-switches.md#--log-filepath).
-
-### `ELECTRON_DEBUG_DRAG_REGIONS`
-
-Adds coloration to draggable regions on [`BrowserView`](./browser-view.md)s on macOS - draggable regions will be colored
-green and non-draggable regions will be colored red to aid debugging.
+on the command line. For more info, see `--log-file` in
+[command-line switches](./command-line-switches.md#--log-filepath).
 
 ### `ELECTRON_DEBUG_NOTIFICATIONS`
 
@@ -150,11 +159,65 @@ Notification activated (com.github.Electron:notification:EAF7B87C-A113-43D7-8E76
 Notification replied to (com.github.Electron:notification:EAF7B87C-A113-43D7-8E76-F88EC9D73D44)
 ```
 
+### `ELECTRON_DEBUG_MSIX_UPDATER`
+
+Adds extra logs to MSIX updater operations on Windows to aid in debugging. Extra logging will be displayed when MSIX update operations are initiated, including package updates, package registration, and restart registration. This helps diagnose issues with MSIX package updates and deployments.
+
+Sample output:
+
+```sh
+UpdateMsix called with URI: https://example.com/app.msix
+DoUpdateMsix: Starting
+Calling AddPackageByUriAsync... URI: https://example.com/app.msix
+Update options - deferRegistration: true, developerMode: false, forceShutdown: false, forceTargetShutdown: false, forceUpdateFromAnyVersion: false
+Waiting for deployment...
+Deployment finished.
+MSIX Deployment completed.
+```
+
+### `ELECTRON_DEBUG_DRAGGABLE_REGIONS` _Experimental_
+
+> [!WARNING]
+> This variable is a debugging aid, not part of Electron's formal API. It is
+> experimental and its behavior, output, or existence may change or be removed
+> in any release without warning.
+
+Visualizes and logs the [draggable regions](../tutorial/custom-window-interactions.md#custom-draggable-regions)
+of every window to aid in debugging custom title bars. Only takes effect when
+[`app.isPackaged`](./app.md#appispackaged-readonly) is `false`.
+
+When set, the region that Electron hit tests against for each `WebContents` (the
+union of every `app-region: drag` rectangle minus every `app-region: no-drag`
+rectangle, as computed by the renderer) is painted as translucent red rectangles
+floating above the web contents, with the parts that changed in the latest update
+tinted yellow. The overlay ignores mouse events and follows the web contents as it
+moves or resizes. It reflects the region the main process actually uses rather than
+the CSS in the page, so it can lag behind the page while regions are in flight
+from the renderer; the stamp in its corner shows which update it is painting.
+
+Extra logs are also written whenever the renderer sends a new set of regions,
+whenever the web contents changes size, and, every couple of seconds, a summary
+of the hit tests served against the region. Logging must be enabled, for example
+with [`ELECTRON_ENABLE_LOGGING`](#electron_enable_logging), for these to be
+displayed.
+
+Sample output:
+
+```sh
+[draggable-regions] webContents 1: debugging enabled
+[draggable-regions] webContents 1: update #1: renderer sent 5 region(s) (1 drag, 4 no-drag); hit-test region computed in 3.2 us: 6 rect(s), bounds 0,0 1200x40
+[draggable-regions] webContents 1: contents view bounds changed to 464,245 1280x720, 8.3 ms since previous bounds change; overlay still shows update #1
+[draggable-regions] webContents 1: update #2, 16.4 ms since previous update, 7.1 ms after last bounds change to 1280x720: renderer sent 5 region(s) (1 drag, 4 no-drag); hit-test region computed in 2.8 us: 6 rect(s), bounds 0,0 1280x40
+[draggable-regions] webContents 1: 143 hit test(s) in the last 2.0 s (37 inside a draggable region), total 41.5 us, avg 0.3 us, max 1.9 us
+```
+
 ### `ELECTRON_LOG_ASAR_READS`
 
 When Electron reads from an ASAR file, log the read offset and file path to
 the system `tmpdir`. The resulting file can be provided to the ASAR module
-to optimize file ordering.
+to optimize file ordering. This variable is read once when each process
+starts, so it must be set in the environment that launches Electron rather
+than from the app's own code.
 
 ### `ELECTRON_ENABLE_STACK_DUMPING`
 
@@ -178,13 +241,22 @@ the one downloaded by `npm install`. Usage:
 export ELECTRON_OVERRIDE_DIST_PATH=/Users/username/projects/electron/out/Testing
 ```
 
-## Set By Electron
+### `ELECTRON_INSTALL_PLATFORM`
 
-Electron sets some variables in your environment at runtime.
+Manually overrides platform used by `electron` package during an install.
+This can be useful if you are on one platform (e.g macOS) but want to
+download binaries for another platform (e.g Windows or Linux). Usage:
 
-### `ORIGINAL_XDG_CURRENT_DESKTOP`
+```sh
+ELECTRON_INSTALL_PLATFORM=darwin npm install
+```
 
-This variable is set to the value of `XDG_CURRENT_DESKTOP` that your application
-originally launched with.  Electron sometimes modifies the value of `XDG_CURRENT_DESKTOP`
-to affect other logic within Chromium so if you want access to the _original_ value
-you should look up this environment variable instead.
+### `ELECTRON_INSTALL_ARCH`
+
+Manually overrides architecture used by `electron` package during an install.
+This can be useful if you are on one arch (e.g `arm64`) but want to download
+binaries meant for another arch. Note that this will not work under Rosetta. Usage:
+
+```sh
+ELECTRON_INSTALL_ARCH=arm64 npm install
+```

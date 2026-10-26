@@ -4,24 +4,46 @@
 
 #include "shell/common/process_util.h"
 
-#include "gin/dictionary.h"
-#include "shell/common/gin_converters/callback_converter.h"
-#include "shell/common/node_includes.h"
+#include <string>
+#include <string_view>
+
+#include "base/command_line.h"
+#include "base/environment.h"
+#include "content/public/common/content_switches.h"
+#include "electron/fuses.h"
+#include "shell/common/electron_constants.h"
 
 namespace electron {
 
-void EmitWarning(node::Environment* env,
-                 const std::string& warning_msg,
-                 const std::string& warning_type) {
-  v8::HandleScope scope(env->isolate());
-  gin::Dictionary process(env->isolate(), env->process_object());
+std::string GetProcessType() {
+  auto* command_line = base::CommandLine::ForCurrentProcess();
+  return command_line->GetSwitchValueASCII(switches::kProcessType);
+}
 
-  base::RepeatingCallback<void(base::StringPiece, base::StringPiece,
-                               base::StringPiece)>
-      emit_warning;
-  process.Get("emitWarning", &emit_warning);
+bool IsBrowserProcess() {
+  static bool result = GetProcessType().empty();
+  return result;
+}
 
-  emit_warning.Run(warning_msg, warning_type, "");
+bool IsRendererProcess() {
+  static bool result = GetProcessType() == switches::kRendererProcess;
+  return result;
+}
+
+bool IsUtilityProcess() {
+  static bool result = GetProcessType() == switches::kUtilityProcess;
+  return result;
+}
+
+bool IsZygoteProcess() {
+  static bool result = GetProcessType() == switches::kZygoteProcess;
+  return result;
+}
+
+bool IsRunningAsNode() {
+  static bool result = fuses::IsRunAsNodeEnabled() &&
+                       base::Environment::Create()->HasVar(kRunAsNode);
+  return result;
 }
 
 }  // namespace electron

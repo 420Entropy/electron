@@ -1,7 +1,8 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
-const path = require('path');
 
-async function createWindow () {
+const path = require('node:path');
+
+async function createWindow() {
   const mainWindow = new BrowserWindow({
     show: false,
     webPreferences: {

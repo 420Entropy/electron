@@ -7,10 +7,10 @@
 
 #include <string>
 
-#include "base/compiler_specific.h"
+#include "base/memory/raw_ptr.h"
 #include "shell/browser/ui/electron_menu_model.h"
-#include "ui/base/glib/glib_signal.h"
-#include "ui/gfx/native_widget_types.h"
+#include "ui/base/glib/scoped_gsignal.h"
+#include "ui/gfx/native_ui_types.h"
 #include "ui/gfx/x/xproto.h"
 
 typedef struct _DbusmenuMenuitem DbusmenuMenuitem;
@@ -22,22 +22,20 @@ class Accelerator;
 
 namespace electron {
 
-class NativeWindowViews;
-
-// Controls the Mac style menu bar on Unity.
+// Controls a global menu bar exported over D-Bus via libdbusmenu.
 //
-// Unity has an Apple-like menu bar at the top of the screen that changes
-// depending on the active window. In the GTK port, we had a hidden GtkMenuBar
-// object in each GtkWindow which existed only to be scrapped by the
-// libdbusmenu-gtk code. Since we don't have GtkWindows anymore, we need to
-// interface directly with the lower level libdbusmenu-glib, which we
-// opportunistically dlopen() since not everyone is running Ubuntu.
+// Some Linux desktops support an Apple-like menu bar at the top of the screen
+// (or in a window decoration) that is populated from D-Bus. In the GTK port,
+// we had a hidden GtkMenuBar object in each GtkWindow which existed only to
+// be scrapped by the libdbusmenu-gtk code. Since we don't have GtkWindows
+// anymore, we need to interface directly with the lower level libdbusmenu-glib,
+// which we opportunistically dlopen() since not every distribution ships it.
 //
 // This class is like the chrome's corresponding one, but it generates the menu
 // from menu models instead, and it is also per-window specific.
 class GlobalMenuBarX11 {
  public:
-  explicit GlobalMenuBarX11(NativeWindowViews* window);
+  explicit GlobalMenuBarX11(gfx::AcceleratedWidget accelerated_widget);
   virtual ~GlobalMenuBarX11();
 
   // disable copy
@@ -65,17 +63,13 @@ class GlobalMenuBarX11 {
   void RegisterAccelerator(DbusmenuMenuitem* item,
                            const ui::Accelerator& accelerator);
 
-  CHROMEG_CALLBACK_1(GlobalMenuBarX11,
-                     void,
-                     OnItemActivated,
-                     DbusmenuMenuitem*,
-                     unsigned int);
-  CHROMEG_CALLBACK_0(GlobalMenuBarX11, void, OnSubMenuShow, DbusmenuMenuitem*);
+  void OnItemActivated(DbusmenuMenuitem* item, unsigned int timestamp);
+  void OnSubMenuShow(DbusmenuMenuitem* item);
 
-  NativeWindowViews* window_;
   x11::Window xwindow_;
 
-  DbusmenuServer* server_ = nullptr;
+  raw_ptr<DbusmenuServer> server_ = nullptr;
+  std::vector<ScopedGSignal> signals_;
 };
 
 }  // namespace electron

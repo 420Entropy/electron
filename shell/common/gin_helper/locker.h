@@ -5,9 +5,13 @@
 #ifndef ELECTRON_SHELL_COMMON_GIN_HELPER_LOCKER_H_
 #define ELECTRON_SHELL_COMMON_GIN_HELPER_LOCKER_H_
 
-#include <memory>
+#include <optional>
 
-#include "v8/include/v8.h"
+#include "v8/include/v8-locker.h"
+
+namespace v8 {
+class Isolate;
+}  // namespace v8
 
 namespace gin_helper {
 
@@ -21,19 +25,13 @@ class Locker {
   Locker(const Locker&) = delete;
   Locker& operator=(const Locker&) = delete;
 
-  // Returns whether current process is browser process, currently we detect it
-  // by checking whether current has used V8 Lock, but it might be a bad idea.
-  static inline bool IsBrowserProcess() { return g_is_browser_process; }
-
-  static void SetIsBrowserProcess(bool is_browser_process);
+  // prevent heap allocation
+  void* operator new(size_t size) = delete;
+  void operator delete(void*, size_t) = delete;
 
  private:
-  void* operator new(size_t size);
-  void operator delete(void*, size_t);
-
-  std::unique_ptr<v8::Locker> locker_;
-
-  static bool g_is_browser_process;
+  // Inline storage — avoids a heap allocation per C++ -> JS callback.
+  std::optional<v8::Locker> locker_;
 };
 
 }  // namespace gin_helper

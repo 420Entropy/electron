@@ -5,16 +5,16 @@
 #ifndef ELECTRON_SHELL_COMMON_NODE_BINDINGS_WIN_H_
 #define ELECTRON_SHELL_COMMON_NODE_BINDINGS_WIN_H_
 
-#include "base/compiler_specific.h"
 #include "shell/common/node_bindings.h"
 
 namespace electron {
 
 class NodeBindingsWin : public NodeBindings {
  public:
-  explicit NodeBindingsWin(BrowserEnvironment browser_env);
+  NodeBindingsWin(BrowserEnvironment browser_env, uv_loop_t* loop);
 
  private:
+  // NodeBindings
   void PollEvents() override;
 };
 

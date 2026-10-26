@@ -7,29 +7,32 @@ We don't use gin to create the V8 platform, because we need to inject Node
 things.
 
 diff --git a/gin/isolate_holder.cc b/gin/isolate_holder.cc
-index e8608bb868c82c9af5426cd6f8512ce6b18ff39f..6268851494a0bbc0b3e693782dae6171f6347657 100644
+index 9157a6b0208b0758df92b3323c0f379b0adc109f..edbb2bddac505f1602dd0749300f61ed287bc898 100644
 --- a/gin/isolate_holder.cc
 +++ b/gin/isolate_holder.cc
-@@ -136,9 +136,10 @@ void IsolateHolder::Initialize(ScriptMode mode,
-                                const intptr_t* reference_table,
-                                const std::string js_command_line_flags,
+@@ -163,11 +163,13 @@ void IsolateHolder::Initialize(ScriptMode mode,
+                                std::string js_command_line_flags,
+                                bool disallow_v8_feature_flag_overrides,
                                 v8::FatalErrorCallback fatal_error_callback,
 -                               v8::OOMErrorCallback oom_error_callback) {
 +                               v8::OOMErrorCallback oom_error_callback,
 +                               bool create_v8_platform) {
    CHECK(allocator);
--  V8Initializer::Initialize(mode, js_command_line_flags, oom_error_callback);
-+  V8Initializer::Initialize(mode, js_command_line_flags, oom_error_callback, create_v8_platform);
+   V8Initializer::Initialize(mode, js_command_line_flags,
+                             disallow_v8_feature_flag_overrides,
+-                            oom_error_callback);
++                            oom_error_callback,
++                            create_v8_platform);
    g_array_buffer_allocator = allocator;
    g_reference_table = reference_table;
    g_fatal_error_callback = fatal_error_callback;
 diff --git a/gin/public/isolate_holder.h b/gin/public/isolate_holder.h
-index 10caab6d9ef3345332c163a55dcef991248ab4ea..c9bc6e5dd7e1cf8d198afcd21cbb24970337a50f 100644
+index 3909e70dc1425c2cb02624f4b3017784a2ae6c9d..a57b92f02085d6392e6d9d0cc037df6b972f3c31 100644
 --- a/gin/public/isolate_holder.h
 +++ b/gin/public/isolate_holder.h
-@@ -109,7 +109,8 @@ class GIN_EXPORT IsolateHolder {
-                          const intptr_t* reference_table = nullptr,
-                          const std::string js_command_line_flags = {},
+@@ -120,7 +120,8 @@ class GIN_EXPORT IsolateHolder {
+                          std::string js_command_line_flags = {},
+                          bool disallow_v8_feature_flag_overrides = false,
                           v8::FatalErrorCallback fatal_error_callback = nullptr,
 -                         v8::OOMErrorCallback oom_error_callback = nullptr);
 +                         v8::OOMErrorCallback oom_error_callback = nullptr,
@@ -38,21 +41,21 @@ index 10caab6d9ef3345332c163a55dcef991248ab4ea..c9bc6e5dd7e1cf8d198afcd21cbb2497
    // Returns whether `Initialize` has already been invoked in the process.
    // Initialization is a one-way operation (i.e., this method cannot return
 diff --git a/gin/v8_initializer.cc b/gin/v8_initializer.cc
-index 213ae405fe5a0da600121b9c8868549402be55de..ae8116dae33d0e7340e526263de86a4b181f1a19 100644
+index 1726efa5883d75d1c81d69a56581a33746c2778e..8a55d77540b0dd4d51bb3798f5af3123e131a6fb 100644
 --- a/gin/v8_initializer.cc
 +++ b/gin/v8_initializer.cc
-@@ -391,7 +391,8 @@ void SetFlags(IsolateHolder::ScriptMode mode,
- // static
+@@ -511,7 +511,8 @@ void SetFeatureFlags() {
  void V8Initializer::Initialize(IsolateHolder::ScriptMode mode,
-                                const std::string js_command_line_flags,
+                                const std::string& js_command_line_flags,
+                                bool disallow_v8_feature_flag_overrides,
 -                               v8::OOMErrorCallback oom_error_callback) {
 +                               v8::OOMErrorCallback oom_error_callback,
 +                               bool create_v8_platform) {
    static bool v8_is_initialized = false;
    if (v8_is_initialized)
      return;
-@@ -401,7 +402,8 @@ void V8Initializer::Initialize(IsolateHolder::ScriptMode mode,
-   // See https://crbug.com/v8/11043
+@@ -526,7 +527,8 @@ void V8Initializer::Initialize(IsolateHolder::ScriptMode mode,
+   }
    SetFlags(mode, js_command_line_flags);
  
 -  v8::V8::InitializePlatform(V8Platform::Get());
@@ -62,15 +65,15 @@ index 213ae405fe5a0da600121b9c8868549402be55de..ae8116dae33d0e7340e526263de86a4b
    // Set this as early as possible in order to ensure OOM errors are reported
    // correctly.
 diff --git a/gin/v8_initializer.h b/gin/v8_initializer.h
-index d499cb43c4e12ca32912fce7078fcadff7509a87..dd9899c3e0dbadfc0074ffce87d51193e1c963cb 100644
+index 1341b77198431e1c426bff043bdb2bbcf202c8ca..ec64afd9dd91b292604ca834a91b9cfbd52eb853 100644
 --- a/gin/v8_initializer.h
 +++ b/gin/v8_initializer.h
-@@ -31,7 +31,8 @@ class GIN_EXPORT V8Initializer {
-   // This should be called by IsolateHolder::Initialize().
+@@ -32,7 +32,8 @@ class GIN_EXPORT V8Initializer {
    static void Initialize(IsolateHolder::ScriptMode mode,
-                          const std::string js_command_line_flags = {},
--                         v8::OOMErrorCallback oom_error_callback = nullptr);
-+                         v8::OOMErrorCallback oom_error_callback = nullptr,
+                          const std::string& js_command_line_flags,
+                          bool disallow_v8_feature_flag_overrides,
+-                         v8::OOMErrorCallback oom_error_callback);
++                         v8::OOMErrorCallback oom_error_callback,
 +                         bool create_v8_platform = true);
  
    // Get address and size information for currently loaded snapshot.

@@ -17,29 +17,51 @@ Notification objects created using this module do not appear unless their `show(
 method is called.
 
 ```js title='Main Process'
-const { Notification } = require("electron");
+const { Notification } = require('electron')
 
-const NOTIFICATION_TITLE = "Basic Notification";
-const NOTIFICATION_BODY = "Notification from the Main process";
+const NOTIFICATION_TITLE = 'Basic Notification'
+const NOTIFICATION_BODY = 'Notification from the Main process'
 
 new Notification({
   title: NOTIFICATION_TITLE,
-  body: NOTIFICATION_BODY,
-}).show();
+  body: NOTIFICATION_BODY
+}).show()
 ```
 
 Here's a full example that you can open with Electron Fiddle:
 
-```javascript fiddle='docs/fiddles/features/notifications/main'
-const { Notification } = require("electron");
+```fiddle docs/fiddles/features/notifications/main
+const { app, BrowserWindow, Notification } = require('electron/main')
 
-const NOTIFICATION_TITLE = "Basic Notification";
-const NOTIFICATION_BODY = "Notification from the Main process";
+function createWindow () {
+  const win = new BrowserWindow({
+    width: 800,
+    height: 600
+  })
 
-new Notification({
-  title: NOTIFICATION_TITLE,
-  body: NOTIFICATION_BODY,
-}).show();
+  win.loadFile('index.html')
+}
+
+const NOTIFICATION_TITLE = 'Basic Notification'
+const NOTIFICATION_BODY = 'Notification from the Main process'
+
+function showNotification () {
+  new Notification({ title: NOTIFICATION_TITLE, body: NOTIFICATION_BODY }).show()
+}
+
+app.whenReady().then(createWindow).then(showNotification)
+
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') {
+    app.quit()
+  }
+})
+
+app.on('activate', () => {
+  if (BrowserWindow.getAllWindows().length === 0) {
+    createWindow()
+  }
+})
 ```
 
 ### Show notifications in the renderer process
@@ -48,25 +70,22 @@ Notifications can be displayed directly from the renderer process with the
 [web Notifications API](https://developer.mozilla.org/en-US/docs/Web/API/Notifications_API/Using_the_Notifications_API).
 
 ```js title='Renderer Process'
-const NOTIFICATION_TITLE = "Title";
-const NOTIFICATION_BODY =
-  "Notification from the Renderer process. Click to log to console.";
-const CLICK_MESSAGE = "Notification clicked";
+const NOTIFICATION_TITLE = 'Title'
+const NOTIFICATION_BODY = 'Notification from the Renderer process. Click to log to console.'
+const CLICK_MESSAGE = 'Notification clicked'
 
-new Notification(NOTIFICATION_TITLE, { body: NOTIFICATION_BODY }).onclick =
-  () => console.log(CLICK_MESSAGE);
+new Notification(NOTIFICATION_TITLE, { body: NOTIFICATION_BODY }).onclick = () => console.log(CLICK_MESSAGE)
 ```
 
 Here's a full example that you can open with Electron Fiddle:
 
-```javascript fiddle='docs/fiddles/features/notifications/renderer'
-const NOTIFICATION_TITLE = "Title";
-const NOTIFICATION_BODY =
-  "Notification from the Renderer process. Click to log to console.";
-const CLICK_MESSAGE = "Notification clicked";
+```fiddle docs/fiddles/features/notifications/renderer|focus=renderer.js
+const NOTIFICATION_TITLE = 'Title'
+const NOTIFICATION_BODY = 'Notification from the Renderer process. Click to log to console.'
+const CLICK_MESSAGE = 'Notification clicked!'
 
-new Notification(NOTIFICATION_TITLE, { body: NOTIFICATION_BODY }).onclick =
-  () => console.log(CLICK_MESSAGE);
+new window.Notification(NOTIFICATION_TITLE, { body: NOTIFICATION_BODY })
+  .onclick = () => { document.getElementById('output').innerText = CLICK_MESSAGE }
 ```
 
 ## Platform considerations
@@ -121,8 +140,12 @@ notification away.
 
 ### macOS
 
-Notifications are straightforward on macOS, but you should be aware of
-[Apple's Human Interface guidelines regarding notifications][apple-notification-guidelines].
+For notifications on macOS, your application will need to be code-signed in order
+for notification events to emit correctly. This requirement stems from the underlying
+UNNotification API provided by Apple. Unsigned binaries will emit a `failed` event
+when notification APIs are called.
+
+Additionally, you should be aware of [Apple's Human Interface guidelines regarding notifications][apple-notification-guidelines].
 
 Note that notifications are limited to 256 bytes in size and will be truncated
 if you exceed that limit.
@@ -137,15 +160,14 @@ This module allows you to detect ahead of time whether or not the notification w
 ### Linux
 
 Notifications are sent using `libnotify`, which can show notifications on any
-desktop environment that follows [Desktop Notifications
-Specification][notification-spec], including Cinnamon, Enlightenment, Unity,
-GNOME, and KDE.
+desktop environment that follows [Desktop Notifications Specification][notification-spec],
+including Cinnamon, Enlightenment, Unity, GNOME, and KDE.
 
-[notification-spec]: https://developer-old.gnome.org/notification-spec/
+[notification-spec]: https://specifications.freedesktop.org/notification-spec/notification-spec-latest.html
 [app-user-model-id]: https://learn.microsoft.com/en-us/windows/win32/shell/appids
 [set-app-user-model-id]: ../api/app.md#appsetappusermodelidid-windows
 [squirrel-events]: https://github.com/electron/windows-installer/blob/main/README.md#handling-squirrel-events
 [toast-activator-clsid]: https://learn.microsoft.com/en-us/windows/win32/properties/props-system-appusermodel-toastactivatorclsid
-[apple-notification-guidelines]: https://developer.apple.com/macos/human-interface-guidelines/system-capabilities/notifications/
+[apple-notification-guidelines]: https://developer.apple.com/design/human-interface-guidelines/notifications
 [windows-notification-state]: https://github.com/felixrieseberg/windows-notification-state
 [macos-notification-state]: https://github.com/felixrieseberg/macos-notification-state

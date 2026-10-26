@@ -6,10 +6,11 @@
 
 #include <memory>
 
-#include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
+#include "shell/browser/ui/electron_menu_model.h"
 #include "shell/browser/ui/views/menu_bar.h"
 #include "shell/browser/ui/views/menu_model_adapter.h"
+#include "ui/base/mojom/menu_source_type.mojom.h"
 #include "ui/views/controls/button/menu_button.h"
 #include "ui/views/controls/menu/menu_item_view.h"
 #include "ui/views/controls/menu/menu_runner.h"
@@ -23,25 +24,26 @@ MenuDelegate::~MenuDelegate() = default;
 
 void MenuDelegate::RunMenu(ElectronMenuModel* model,
                            views::Button* button,
-                           ui::MenuSourceType source_type) {
+                           ui::mojom::MenuSourceType source_type) {
   gfx::Point screen_loc;
   views::View::ConvertPointToScreen(button, &screen_loc);
   // Subtract 1 from the height to make the popup flush with the button border.
   gfx::Rect bounds(screen_loc.x(), screen_loc.y(), button->width(),
                    button->height() - 1);
 
-  if (source_type == ui::MENU_SOURCE_KEYBOARD) {
+  if (source_type == ui::mojom::MenuSourceType::kKeyboard) {
     hold_first_switch_ = true;
   }
 
   id_ = button->GetID();
   adapter_ = std::make_unique<MenuModelAdapter>(model);
 
-  auto* item = new views::MenuItemView(this);
-  static_cast<MenuModelAdapter*>(adapter_.get())->BuildMenu(item);
+  auto item = std::make_unique<views::MenuItemView>(this);
+  static_cast<MenuModelAdapter*>(adapter_.get())->BuildMenu(item.get());
 
   menu_runner_ = std::make_unique<views::MenuRunner>(
-      item, views::MenuRunner::CONTEXT_MENU | views::MenuRunner::HAS_MNEMONICS);
+      std::move(item),
+      views::MenuRunner::CONTEXT_MENU | views::MenuRunner::HAS_MNEMONICS);
   menu_runner_->RunMenuAt(
       button->GetWidget()->GetTopLevelWidget(),
       static_cast<views::MenuButton*>(button)->button_controller(), bounds,
@@ -49,14 +51,12 @@ void MenuDelegate::RunMenu(ElectronMenuModel* model,
 }
 
 void MenuDelegate::ExecuteCommand(int id) {
-  for (Observer& obs : observers_)
-    obs.OnBeforeExecuteCommand();
+  observers_.Notify(&Observer::OnBeforeExecuteCommand);
   adapter_->ExecuteCommand(id);
 }
 
 void MenuDelegate::ExecuteCommand(int id, int mouse_event_flags) {
-  for (Observer& obs : observers_)
-    obs.OnBeforeExecuteCommand();
+  observers_.Notify(&Observer::OnBeforeExecuteCommand);
   adapter_->ExecuteCommand(id, mouse_event_flags);
 }
 
@@ -77,7 +77,7 @@ const gfx::FontList* MenuDelegate::GetLabelFontList(int id) const {
   return adapter_->GetLabelFontList(id);
 }
 
-absl::optional<SkColor> MenuDelegate::GetLabelColor(int id) const {
+std::optional<SkColor> MenuDelegate::GetLabelColor(int id) const {
   return adapter_->GetLabelColor(id);
 }
 
@@ -102,8 +102,7 @@ void MenuDelegate::WillHideMenu(views::MenuItemView* menu) {
 }
 
 void MenuDelegate::OnMenuClosed(views::MenuItemView* menu) {
-  for (Observer& obs : observers_)
-    obs.OnMenuClosed();
+  observers_.Notify(&Observer::OnMenuClosed);
 
   // Only switch to new menu when current menu is closed.
   if (button_to_open_)
@@ -134,12 +133,17 @@ views::MenuItemView* MenuDelegate::GetSiblingMenu(
     // Switching menu asynchronously to avoid crash.
     if (!switch_in_progress) {
       content::GetUIThreadTaskRunner({})->PostTask(
-          FROM_HERE, base::BindOnce(&views::MenuRunner::Cancel,
-                                    base::Unretained(menu_runner_.get())));
+          FROM_HERE, base::BindOnce(&MenuDelegate::CancelSelf,
+                                    weak_factory_.GetWeakPtr()));
     }
   }
 
   return nullptr;
+}
+
+void MenuDelegate::CancelSelf() {
+  if (menu_runner_)
+    menu_runner_->Cancel();
 }
 
 }  // namespace electron

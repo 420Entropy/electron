@@ -1,1 +1,1 @@
-fix_fallback_to_x11_capturer_on_wayland.patch
+fix_fall_back_to_the_x11_capturer_when_pipewire_fails_to_start.patch

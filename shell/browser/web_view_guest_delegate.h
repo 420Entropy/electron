@@ -7,8 +7,13 @@
 
 #include <memory>
 
+#include "base/memory/raw_ptr.h"
+#include "base/memory/weak_ptr.h"
 #include "content/public/browser/browser_plugin_guest_delegate.h"
 #include "shell/browser/web_contents_zoom_controller.h"
+#include "shell/browser/web_contents_zoom_observer.h"
+#include "third_party/blink/public/common/tokens/tokens.h"
+#include "v8/include/cppgc/persistent.h"
 
 namespace electron {
 
@@ -17,7 +22,7 @@ class WebContents;
 }
 
 class WebViewGuestDelegate : public content::BrowserPluginGuestDelegate,
-                             public WebContentsZoomController::Observer {
+                             private WebContentsZoomObserver {
  public:
   WebViewGuestDelegate(content::WebContents* embedder,
                        api::WebContents* api_web_contents);
@@ -29,7 +34,7 @@ class WebViewGuestDelegate : public content::BrowserPluginGuestDelegate,
 
   // Attach to the iframe.
   void AttachToIframe(content::WebContents* embedder_web_contents,
-                      int embedder_frame_id);
+                      blink::LocalFrameToken& embedder_frame_token);
   void WillDestroy();
 
  protected:
@@ -37,24 +42,28 @@ class WebViewGuestDelegate : public content::BrowserPluginGuestDelegate,
   content::WebContents* GetOwnerWebContents() final;
   std::unique_ptr<content::WebContents> CreateNewGuestWindow(
       const content::WebContents::CreateParams& create_params) final;
+  base::WeakPtr<content::BrowserPluginGuestDelegate> GetGuestDelegateWeakPtr()
+      final;
 
-  // WebContentsZoomController::Observer:
-  void OnZoomLevelChanged(content::WebContents* web_contents,
-                          double level,
-                          bool is_temporary) override;
-  void OnZoomControllerWebContentsDestroyed() override;
+  // WebContentsZoomObserver:
+  void OnZoomControllerDestroyed(
+      WebContentsZoomController* zoom_controller) override;
+  void OnZoomChanged(
+      const WebContentsZoomController::ZoomChangedEventData& data) override;
 
  private:
   void ResetZoomController();
 
   // The WebContents that attaches this guest view.
-  content::WebContents* embedder_web_contents_ = nullptr;
+  base::WeakPtr<content::WebContents> embedder_web_contents_;
 
   // The zoom controller of the embedder that is used
   // to subscribe for zoom changes.
-  WebContentsZoomController* embedder_zoom_controller_ = nullptr;
+  raw_ptr<WebContentsZoomController> embedder_zoom_controller_ = nullptr;
 
-  api::WebContents* api_web_contents_ = nullptr;
+  cppgc::WeakPersistent<api::WebContents> api_web_contents_;
+
+  base::WeakPtrFactory<WebViewGuestDelegate> weak_ptr_factory_{this};
 };
 
 }  // namespace electron

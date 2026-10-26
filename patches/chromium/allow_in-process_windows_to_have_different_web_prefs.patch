@@ -7,35 +7,11 @@ Allow earlier access to newly created WebContents so that we can change
 WebPreferences of in-process child windows, rather than relying on
 process-level command line switches, as before.
 
-diff --git a/third_party/blink/common/web_preferences/web_preferences.cc b/third_party/blink/common/web_preferences/web_preferences.cc
-index 0997787979ba293e78211783d8d9993af50ac1c8..2e25e32d0e46470bc4d1a2254fc6737d848791ef 100644
---- a/third_party/blink/common/web_preferences/web_preferences.cc
-+++ b/third_party/blink/common/web_preferences/web_preferences.cc
-@@ -144,6 +144,19 @@ WebPreferences::WebPreferences()
-       v8_cache_options(blink::mojom::V8CacheOptions::kDefault),
-       record_whole_document(false),
-       stylus_handwriting_enabled(false),
-+      // Begin Electron-specific WebPreferences.
-+      context_isolation(false),
-+      is_webview(false),
-+      hidden_page(false),
-+      offscreen(false),
-+      node_integration(false),
-+      node_integration_in_worker(false),
-+      node_integration_in_sub_frames(false),
-+      enable_spellcheck(false),
-+      enable_plugins(false),
-+      enable_websql(false),
-+      webview_tag(false),
-+      // End Electron-specific WebPreferences.
-       cookie_enabled(true),
-       accelerated_video_decode_enabled(false),
-       animation_policy(
 diff --git a/third_party/blink/common/web_preferences/web_preferences_mojom_traits.cc b/third_party/blink/common/web_preferences/web_preferences_mojom_traits.cc
-index d557c270b484c3152830b0678c90691c983538ad..de0a4e4ab43072d0a815724a772aa42006f63fd5 100644
+index 180ee8bd4c380b88b361fa8ad120a519503b2d0f..ba1964c6a2758c24e1bb4d254828131fbca6a4b1 100644
 --- a/third_party/blink/common/web_preferences/web_preferences_mojom_traits.cc
 +++ b/third_party/blink/common/web_preferences/web_preferences_mojom_traits.cc
-@@ -152,6 +152,19 @@ bool StructTraits<blink::mojom::WebPreferencesDataView,
+@@ -151,6 +151,17 @@ bool StructTraits<blink::mojom::WebPreferencesDataView,
    out->v8_cache_options = data.v8_cache_options();
    out->record_whole_document = data.record_whole_document();
    out->stylus_handwriting_enabled = data.stylus_handwriting_enabled();
@@ -43,63 +19,43 @@ index d557c270b484c3152830b0678c90691c983538ad..de0a4e4ab43072d0a815724a772aa420
 +  out->context_isolation = data.context_isolation();
 +  out->is_webview = data.is_webview();
 +  out->hidden_page = data.hidden_page();
-+  out->offscreen = data.offscreen();
 +  out->node_integration = data.node_integration();
 +  out->node_integration_in_worker = data.node_integration_in_worker();
 +  out->node_integration_in_sub_frames = data.node_integration_in_sub_frames();
 +  out->enable_spellcheck = data.enable_spellcheck();
 +  out->enable_plugins = data.enable_plugins();
-+  out->enable_websql = data.enable_websql();
 +  out->webview_tag = data.webview_tag();
 +  // End Electron-specific WebPreferences.
    out->cookie_enabled = data.cookie_enabled();
    out->accelerated_video_decode_enabled =
        data.accelerated_video_decode_enabled();
 diff --git a/third_party/blink/public/common/web_preferences/web_preferences.h b/third_party/blink/public/common/web_preferences/web_preferences.h
-index 2ab2f3af95aaa1b1ed8f0530c6e13b8d62ed9ded..72c03d606d5c5ef0e5a699bc9380d573631f5518 100644
+index 2d9ccfb50526d6f9eb37dedf901378f808ae3784..4bfbd80fe4536eb9a42797a923dcee89df49c1e7 100644
 --- a/third_party/blink/public/common/web_preferences/web_preferences.h
 +++ b/third_party/blink/public/common/web_preferences/web_preferences.h
-@@ -10,6 +10,7 @@
- #include <vector>
+@@ -500,6 +500,17 @@ struct BLINK_COMMON_EXPORT WebPreferences {
+   // trials and enterprise policy).
+   bool is_xslt_deprecation_banner_suppressed = false;
  
- #include "build/build_config.h"
-+#include "base/files/file_path.h"
- #include "net/nqe/effective_connection_type.h"
- #include "third_party/blink/public/common/common_export.h"
- #include "third_party/blink/public/mojom/css/preferred_color_scheme.mojom-shared.h"
-@@ -159,6 +160,19 @@ struct BLINK_COMMON_EXPORT WebPreferences {
-   // If true, stylus handwriting recognition to text input will be available in
-   // editable input fields which are non-password type.
-   bool stylus_handwriting_enabled;
 +  // Begin Electron-specific WebPreferences.
-+  bool context_isolation;
-+  bool is_webview;
-+  bool hidden_page;
-+  bool offscreen;
-+  bool node_integration;
-+  bool node_integration_in_worker;
-+  bool node_integration_in_sub_frames;
-+  bool enable_spellcheck;
-+  bool enable_plugins;
-+  bool enable_websql;
-+  bool webview_tag;
-+  // End Electron-specific WebPreferences.
- 
-   // This flags corresponds to a Page's Settings' setCookieEnabled state. It
-   // only controls whether or not the "document.cookie" field is properly
++  bool context_isolation = false;
++  bool is_webview = false;
++  bool hidden_page = false;
++  bool node_integration = false;
++  bool node_integration_in_worker = false;
++  bool node_integration_in_sub_frames = false;
++  bool enable_spellcheck = false;
++  bool enable_plugins = false;
++  bool webview_tag = false;
++
+   // We try to keep the default values the same as the default values in
+   // chrome, except for the cases where it would require lots of extra work for
+   // the embedder to use the same default value.
 diff --git a/third_party/blink/public/common/web_preferences/web_preferences_mojom_traits.h b/third_party/blink/public/common/web_preferences/web_preferences_mojom_traits.h
-index 0222f3671842c3a707e2dd9aeaec72a6f94afe7c..882556b4bdea1dc9cb418e0e9f3cc32966111a67 100644
+index ee4484a65e7cbdd844dd660ca55a7e0fb3eace13..facf6e5a11c082eb66a01f3e9f6e5c6420f0733c 100644
 --- a/third_party/blink/public/common/web_preferences/web_preferences_mojom_traits.h
 +++ b/third_party/blink/public/common/web_preferences/web_preferences_mojom_traits.h
-@@ -6,6 +6,7 @@
- #define THIRD_PARTY_BLINK_PUBLIC_COMMON_WEB_PREFERENCES_WEB_PREFERENCES_MOJOM_TRAITS_H_
- 
- #include "build/build_config.h"
-+#include "mojo/public/cpp/base/file_path_mojom_traits.h"
- #include "mojo/public/cpp/bindings/struct_traits.h"
- #include "net/nqe/effective_connection_type.h"
- #include "third_party/blink/public/common/common_export.h"
-@@ -439,6 +440,52 @@ struct BLINK_COMMON_EXPORT StructTraits<blink::mojom::WebPreferencesDataView,
+@@ -451,6 +451,44 @@ struct BLINK_COMMON_EXPORT StructTraits<blink::mojom::WebPreferencesDataView,
      return r.stylus_handwriting_enabled;
    }
  
@@ -114,10 +70,6 @@ index 0222f3671842c3a707e2dd9aeaec72a6f94afe7c..882556b4bdea1dc9cb418e0e9f3cc329
 +
 +  static bool hidden_page(const blink::web_pref::WebPreferences& r) {
 +    return r.hidden_page;
-+  }
-+
-+  static bool offscreen(const blink::web_pref::WebPreferences& r) {
-+    return r.offscreen;
 +  }
 +
 +  static bool node_integration(const blink::web_pref::WebPreferences& r) {
@@ -140,10 +92,6 @@ index 0222f3671842c3a707e2dd9aeaec72a6f94afe7c..882556b4bdea1dc9cb418e0e9f3cc329
 +    return r.enable_plugins;
 +  }
 +
-+  static bool enable_websql(const blink::web_pref::WebPreferences& r) {
-+    return r.enable_websql;
-+  }
-+
 +  static bool webview_tag(const blink::web_pref::WebPreferences& r) {
 +    return r.webview_tag;
 +  }
@@ -153,18 +101,10 @@ index 0222f3671842c3a707e2dd9aeaec72a6f94afe7c..882556b4bdea1dc9cb418e0e9f3cc329
      return r.cookie_enabled;
    }
 diff --git a/third_party/blink/public/mojom/webpreferences/web_preferences.mojom b/third_party/blink/public/mojom/webpreferences/web_preferences.mojom
-index 1e04b372e8a7839a05b2304ead80a04689cd850c..ead0401600b38d362aec21ee77b3c71f1d13649f 100644
+index 505832dd70e9089a98be31856e7a2bfb848aac17..9b387a64b27c11093b866c052a1641604067972c 100644
 --- a/third_party/blink/public/mojom/webpreferences/web_preferences.mojom
 +++ b/third_party/blink/public/mojom/webpreferences/web_preferences.mojom
-@@ -9,6 +9,7 @@ import "third_party/blink/public/mojom/css/preferred_contrast.mojom";
- import "third_party/blink/public/mojom/v8_cache_options.mojom";
- import "url/mojom/url.mojom";
- import "mojo/public/mojom/base/string16.mojom";
-+import "mojo/public/mojom/base/file_path.mojom";
- 
- enum PointerType {
-   kPointerNone                              = 1,             // 1 << 0
-@@ -218,6 +219,19 @@ struct WebPreferences {
+@@ -225,6 +225,17 @@ struct WebPreferences {
    // If true, stylus handwriting recognition to text input will be available in
    // editable input fields which are non-password type.
    bool stylus_handwriting_enabled;
@@ -172,13 +112,11 @@ index 1e04b372e8a7839a05b2304ead80a04689cd850c..ead0401600b38d362aec21ee77b3c71f
 +  bool context_isolation;
 +  bool is_webview;
 +  bool hidden_page;
-+  bool offscreen;
 +  bool node_integration;
 +  bool node_integration_in_worker;
 +  bool node_integration_in_sub_frames;
 +  bool enable_spellcheck;
 +  bool enable_plugins;
-+  bool enable_websql;
 +  bool webview_tag;
 +  // End Electron-specific WebPreferences.
  

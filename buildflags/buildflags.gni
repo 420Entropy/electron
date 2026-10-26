@@ -3,32 +3,25 @@
 # found in the LICENSE file.
 
 declare_args() {
-  enable_desktop_capturer = true
-
-  # Allow running Electron as a node binary.
-  enable_run_as_node = true
-
-  enable_osr = true
-
-  enable_views_api = true
-
   enable_pdf_viewer = true
-
-  enable_tts = true
-
-  enable_color_chooser = true
-
-  enable_picture_in_picture = true
-
-  # Provide a fake location provider for mocking
-  # the geolocation responses. Disable it if you
-  # need to test with chromium's location provider.
-  # Should not be enabled for release build.
-  enable_fake_location_provider = !is_official_build
 
   # Enable Chrome extensions support.
   enable_electron_extensions = true
 
   # Enable Spellchecker support
   enable_builtin_spellchecker = true
+
+  # Enable Prompt API support.
+  enable_prompt_api = true
+
+  # The version of Electron.
+  # Packagers and vendor builders should set this in gn args to avoid running
+  # the script that reads git tag.
+  override_electron_version = ""
+
+  # Define an extra item that will show in process.versions, the value must
+  # be in the format of "key:value".
+  # Packagers and vendor builders can set this in gn args to attach extra info
+  # about the build in the binary.
+  electron_vendor_version = ""
 }

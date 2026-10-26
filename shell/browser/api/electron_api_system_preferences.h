@@ -5,21 +5,28 @@
 #ifndef ELECTRON_SHELL_BROWSER_API_ELECTRON_API_SYSTEM_PREFERENCES_H_
 #define ELECTRON_SHELL_BROWSER_API_ELECTRON_API_SYSTEM_PREFERENCES_H_
 
-#include <memory>
 #include <string>
 
 #include "base/values.h"
-#include "gin/handle.h"
+#include "gin/weak_cell.h"
 #include "gin/wrappable.h"
 #include "shell/browser/event_emitter_mixin.h"
-#include "shell/common/gin_helper/error_thrower.h"
-#include "shell/common/gin_helper/promise.h"
+#include "shell/browser/microtasks_runner.h"
 
 #if BUILDFLAG(IS_WIN)
+#include "base/callback_list.h"
 #include "shell/browser/browser.h"
 #include "shell/browser/browser_observer.h"
-#include "ui/gfx/sys_color_change_listener.h"
 #endif
+#if BUILDFLAG(IS_LINUX)
+#include "base/memory/raw_ptr.h"
+#include "ui/native_theme/native_theme.h"
+#include "ui/native_theme/native_theme_observer.h"
+#endif
+
+namespace gin_helper {
+class ErrorThrower;
+}  // namespace gin_helper
 
 namespace electron::api {
 
@@ -31,59 +38,64 @@ enum class NotificationCenterKind {
 };
 #endif
 
-class SystemPreferences
+class SystemPreferences final
     : public gin::Wrappable<SystemPreferences>,
       public gin_helper::EventEmitterMixin<SystemPreferences>
 #if BUILDFLAG(IS_WIN)
     ,
-      public BrowserObserver,
-      public gfx::SysColorChangeListener
+      public BrowserObserver
+#elif BUILDFLAG(IS_LINUX)
+    ,
+      public ui::NativeThemeObserver
 #endif
 {
  public:
-  static gin::Handle<SystemPreferences> Create(v8::Isolate* isolate);
+  static SystemPreferences* Create(v8::Isolate* isolate);
 
   // gin::Wrappable
   static gin::WrapperInfo kWrapperInfo;
+  static const char* GetClassName() { return "SystemPreferences"; }
   gin::ObjectTemplateBuilder GetObjectTemplateBuilder(
       v8::Isolate* isolate) override;
-  const char* GetTypeName() override;
+  const gin::WrapperInfo* wrapper_info() const override;
+  const char* GetHumanReadableName() const override;
+  void Trace(cppgc::Visitor* visitor) const override;
 
-#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
+  void OnBeforeMicrotasksRunnerDispose();
+
   std::string GetAccentColor();
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
   std::string GetColor(gin_helper::ErrorThrower thrower,
                        const std::string& color);
   std::string GetMediaAccessStatus(gin_helper::ErrorThrower thrower,
                                    const std::string& media_type);
 #endif
 #if BUILDFLAG(IS_WIN)
-  bool IsAeroGlassEnabled();
-
   void InitializeWindow();
 
-  // gfx::SysColorChangeListener:
-  void OnSysColorChange() override;
+  // Called by `hwnd_subscription_`.
+  void OnWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);
 
   // BrowserObserver:
-  void OnFinishLaunching(base::Value::Dict launch_info) override;
+  void OnFinishLaunching(base::DictValue launch_info) override;
 
 #elif BUILDFLAG(IS_MAC)
   using NotificationCallback = base::RepeatingCallback<
       void(const std::string&, base::Value, const std::string&)>;
 
   void PostNotification(const std::string& name,
-                        base::Value::Dict user_info,
+                        base::DictValue user_info,
                         gin::Arguments* args);
   int SubscribeNotification(v8::Local<v8::Value> maybe_name,
                             const NotificationCallback& callback);
   void UnsubscribeNotification(int id);
   void PostLocalNotification(const std::string& name,
-                             base::Value::Dict user_info);
+                             base::DictValue user_info);
   int SubscribeLocalNotification(v8::Local<v8::Value> maybe_name,
                                  const NotificationCallback& callback);
   void UnsubscribeLocalNotification(int request_id);
   void PostWorkspaceNotification(const std::string& name,
-                                 base::Value::Dict user_info);
+                                 base::DictValue user_info);
   int SubscribeWorkspaceNotification(v8::Local<v8::Value> maybe_name,
                                      const NotificationCallback& callback);
   void UnsubscribeWorkspaceNotification(int request_id);
@@ -96,6 +108,7 @@ class SystemPreferences
                       gin::Arguments* args);
   void RemoveUserDefault(const std::string& name);
   bool IsSwipeTrackingFromScrollEventsEnabled();
+  bool AccessibilityDisplayShouldReduceTransparency();
 
   std::string GetSystemColor(gin_helper::ErrorThrower thrower,
                              const std::string& color);
@@ -112,19 +125,19 @@ class SystemPreferences
   // TODO(MarshallOfSound): Write tests for these methods once we
   // are running tests on a Mojave machine
   v8::Local<v8::Value> GetEffectiveAppearance(v8::Isolate* isolate);
-  v8::Local<v8::Value> GetAppLevelAppearance(v8::Isolate* isolate);
-  void SetAppLevelAppearance(gin::Arguments* args);
+
+#elif BUILDFLAG(IS_LINUX)
+  // ui::NativeThemeObserver:
+  void OnNativeThemeUpdated(ui::NativeTheme* theme) override;
 #endif
-  bool IsInvertedColorScheme();
-  bool IsHighContrastColorScheme();
   v8::Local<v8::Value> GetAnimationSettings(v8::Isolate* isolate);
 
   // disable copy
   SystemPreferences(const SystemPreferences&) = delete;
   SystemPreferences& operator=(const SystemPreferences&) = delete;
 
- protected:
-  SystemPreferences();
+  // Public for cppgc::MakeGarbageCollected.
+  explicit SystemPreferences(v8::Isolate* isolate);
   ~SystemPreferences() override;
 
 #if BUILDFLAG(IS_MAC)
@@ -132,37 +145,30 @@ class SystemPreferences
                               const NotificationCallback& callback,
                               NotificationCenterKind kind);
   void DoUnsubscribeNotification(int request_id, NotificationCenterKind kind);
+  void ClearNotificationSubscriptions();
 #endif
 
  private:
+  void Dispose();
+
 #if BUILDFLAG(IS_WIN)
-  // Static callback invoked when a message comes in to our messaging window.
-  static LRESULT CALLBACK WndProcStatic(HWND hwnd,
-                                        UINT message,
-                                        WPARAM wparam,
-                                        LPARAM lparam);
-
-  LRESULT CALLBACK WndProc(HWND hwnd,
-                           UINT message,
-                           WPARAM wparam,
-                           LPARAM lparam);
-
-  // The window class of |window_|.
-  ATOM atom_;
-
-  // The handle of the module that contains the window procedure of |window_|.
-  HMODULE instance_;
-
-  // The window used for processing events.
-  HWND window_;
+  void OnSystemAccentColorChanged();
+  void OnAccentColorChanged();
 
   std::string current_color_;
 
-  bool inverted_color_scheme_ = false;
+  // Color/high contrast mode change observer.
+  base::CallbackListSubscription hwnd_subscription_;
+  base::CallbackListSubscription accent_color_subscription_;
+#endif
+#if BUILDFLAG(IS_LINUX)
+  void OnNativeThemeUpdatedOnUI();
 
-  bool high_contrast_color_scheme_ = false;
-
-  std::unique_ptr<gfx::ScopedSysColorChangeListener> color_change_listener_;
+  raw_ptr<ui::NativeTheme> ui_theme_;
+  std::string current_accent_color_;
+#endif
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_LINUX)
+  gin::WeakCellFactory<SystemPreferences> weak_factory_{this};
 #endif
 };
 

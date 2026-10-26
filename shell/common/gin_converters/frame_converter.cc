@@ -4,18 +4,24 @@
 
 #include "shell/common/gin_converters/frame_converter.h"
 
+#include <cstdint>
+
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_process_host.h"
 #include "shell/browser/api/electron_api_web_frame_main.h"
 #include "shell/common/gin_helper/accessor.h"
+#include "shell/common/gin_helper/handle.h"
+#include "shell/common/node_util.h"
+#include "v8/include/v8-primitive.h"
 
 namespace gin {
 
-namespace {
-
-v8::Persistent<v8::ObjectTemplate> rfh_templ;
-
-}  // namespace
+// static
+v8::Local<v8::Value> Converter<content::FrameTreeNodeId>::ToV8(
+    v8::Isolate* isolate,
+    const content::FrameTreeNodeId& val) {
+  return v8::Number::New(isolate, val.value());
+}
 
 // static
 v8::Local<v8::Value> Converter<content::RenderFrameHost*>::ToV8(
@@ -23,7 +29,11 @@ v8::Local<v8::Value> Converter<content::RenderFrameHost*>::ToV8(
     content::RenderFrameHost* val) {
   if (!val)
     return v8::Null(isolate);
-  return electron::api::WebFrameMain::From(isolate, val).ToV8();
+  v8::Local<v8::Value> value;
+  if (!TryConvertToV8(isolate, electron::api::WebFrameMain::From(isolate, val),
+                      &value))
+    return v8::Null(isolate);
+  return value;
 }
 
 // static
@@ -48,25 +58,17 @@ Converter<gin_helper::AccessorValue<content::RenderFrameHost*>>::ToV8(
   if (!rfh)
     return v8::Null(isolate);
 
-  const int process_id = rfh->GetProcess()->GetID();
-  const int routing_id = rfh->GetRoutingID();
+  // The two ids are packed into a BigInt rather than stored in the internal
+  // fields of an object because building such an object requires an
+  // ObjectTemplate and caching via gin::PerContextData which is not
+  // necessary here as the token never reaches JS, it is only the payload
+  // of the native data property installed by gin_helper::Dictionary::SetGetter.
+  const uint64_t token = (static_cast<uint64_t>(static_cast<uint32_t>(
+                              rfh->GetProcess()->GetID().GetUnsafeValue()))
+                          << 32) |
+                         static_cast<uint32_t>(rfh->GetRoutingID());
 
-  if (rfh_templ.IsEmpty()) {
-    v8::EscapableHandleScope inner(isolate);
-    v8::Local<v8::ObjectTemplate> local = v8::ObjectTemplate::New(isolate);
-    local->SetInternalFieldCount(2);
-    rfh_templ.Reset(isolate, inner.Escape(local));
-  }
-
-  v8::Local<v8::Object> rfh_obj =
-      v8::Local<v8::ObjectTemplate>::New(isolate, rfh_templ)
-          ->NewInstance(isolate->GetCurrentContext())
-          .ToLocalChecked();
-
-  rfh_obj->SetInternalField(0, v8::Number::New(isolate, process_id));
-  rfh_obj->SetInternalField(1, v8::Number::New(isolate, routing_id));
-
-  return rfh_obj;
+  return v8::BigInt::NewFromUnsigned(isolate, token);
 }
 
 // static
@@ -74,26 +76,32 @@ bool Converter<gin_helper::AccessorValue<content::RenderFrameHost*>>::FromV8(
     v8::Isolate* isolate,
     v8::Local<v8::Value> val,
     gin_helper::AccessorValue<content::RenderFrameHost*>* out) {
-  v8::Local<v8::Object> rfh_obj;
-  if (!ConvertFromV8(isolate, val, &rfh_obj))
+  if (!val->IsBigInt())
     return false;
 
-  if (rfh_obj->InternalFieldCount() != 2)
+  bool lossless = false;
+  const uint64_t token = val.As<v8::BigInt>()->Uint64Value(&lossless);
+  if (!lossless)
     return false;
 
-  v8::Local<v8::Value> process_id_wrapper = rfh_obj->GetInternalField(0);
-  v8::Local<v8::Value> routing_id_wrapper = rfh_obj->GetInternalField(1);
-
-  if (process_id_wrapper.IsEmpty() || !process_id_wrapper->IsNumber() ||
-      routing_id_wrapper.IsEmpty() || !routing_id_wrapper->IsNumber())
-    return false;
-
-  const int process_id = process_id_wrapper.As<v8::Number>()->Value();
-  const int routing_id = routing_id_wrapper.As<v8::Number>()->Value();
+  // Both ids are signed (e.g. MSG_ROUTING_NONE), so go back
+  // through uint32_t to undo the packing before reinterpreting the sign bit.
+  const int process_id =
+      static_cast<int32_t>(static_cast<uint32_t>(token >> 32));
+  const int routing_id = static_cast<int32_t>(static_cast<uint32_t>(token));
 
   auto* rfh = content::RenderFrameHost::FromID(process_id, routing_id);
-  if (!rfh)
-    return false;
+
+  if (!rfh) {
+    // Lazily evaluated property accessed after RFH has been destroyed.
+    // Continue to return nullptr, but emit warning to inform developers
+    // what occurred.
+    electron::util::EmitWarning(
+        isolate,
+        "Frame property was accessed after it navigated or was destroyed. "
+        "Avoid asynchronous tasks prior to indexing.",
+        "electron");
+  }
 
   out->Value = rfh;
   return true;

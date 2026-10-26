@@ -1,0 +1,331 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Calvin Watford <watfordcalvin@gmail.com>
+Date: Mon, 9 Dec 2024 16:58:15 -0700
+Subject: feat: Corner Smoothing CSS rule and Blink painting
+
+This patch implements the `-electron-corner-smoothing` CSS rule by
+making three primary changes to Blink:
+
+1. Adds the `-electron-corner-smoothing` CSS rule:
+    * Metadata in `blink/renderer/core/css/css_properties.json5`
+    * Parsing in `blink/renderer/core/css/properties/longhands/longhands_custom.cc`
+    * Other required definitions for all CSS rules (`css_property_id.mojom`, `css_property_equality.cc`)
+
+2. Modifies how Blink paints rounded rectangles:
+    * Augments `blink::ContouredRect` to add smoothness.
+    * Modifies graphics to handle smooth `ContouredRect`s, delegating to
+      `//electron/shell/renderer/electron_smooth_round_rect`.
+
+3. Adds a renderer feature:
+    * Controls whether the CSS rule is available.
+
+diff --git a/third_party/blink/public/mojom/use_counter/metrics/css_property_id.mojom b/third_party/blink/public/mojom/use_counter/metrics/css_property_id.mojom
+index 9c0c049d53f074da0f2efcaa9fdd08e9f79e951d..bfcfbe33af22df669a9956c91c3d5f45bdb1862d 100644
+--- a/third_party/blink/public/mojom/use_counter/metrics/css_property_id.mojom
++++ b/third_party/blink/public/mojom/use_counter/metrics/css_property_id.mojom
+@@ -53,7 +53,7 @@ enum CSSSampleId {
+     kInternalOverflowInline = 0,
+     kInternalOverscrollContainer = 0,
+     kInternalUnbounded = 0,
+-
++    kElectronCornerSmoothing = 0,
+     // This CSSSampleId represents page load for CSS histograms. It is recorded once
+     // per page visit for each CSS histogram being logged on the blink side and the
+     // browser side.
+diff --git a/third_party/blink/renderer/build/scripts/core/css/css_properties.py b/third_party/blink/renderer/build/scripts/core/css/css_properties.py
+index 5e751bb0e254b6cd67b05c6bd2e677c074717099..c567a09c696413371ed732cc2f81d9b9d33d27b7 100755
+--- a/third_party/blink/renderer/build/scripts/core/css/css_properties.py
++++ b/third_party/blink/renderer/build/scripts/core/css/css_properties.py
+@@ -417,7 +417,7 @@ class CSSProperties(object):
+                 name_without_leading_dash = name_without_leading_dash[1:]
+             internal_visited_order = 1
+             if name_without_leading_dash.startswith(
+-                'internal-visited-'
++                'internal-'
+             ) or name_without_leading_dash.startswith(
+                 'internal-forced-visited-'
+             ):
+diff --git a/third_party/blink/renderer/core/css/css_properties.json5 b/third_party/blink/renderer/core/css/css_properties.json5
+index 40d1f0c081980b9a8b11ba01b444edb158dde5ef..8ecf42f338df7f808c8b0f371286284fac647aaa 100644
+--- a/third_party/blink/renderer/core/css/css_properties.json5
++++ b/third_party/blink/renderer/core/css/css_properties.json5
+@@ -10397,6 +10397,27 @@
+       property_methods: ["ParseShorthand", "CSSValueFromComputedStyleInternal"],
+     },
+ 
++    {
++      name: "-electron-corner-smoothing",
++      property_methods: ["ParseSingleValue", "CSSValueFromComputedStyleInternal"],
++      interpolable: true,
++      field_group: "*",
++      field_template: "external",
++      // To keep this patch small, Length is used instead of a more descriptive
++      // custom type.
++      // - `system-ui` = `Length::Auto()`
++      // - percent     = `Length::Percent`
++      type_name: "Length",
++      default_value: "Length::None()",
++      keywords: ["system-ui"],
++      percentages_depend_on_used_value: false,
++      converter: "ConvertCornerSmoothing",
++      runtime_flag: "ElectronCSSCornerSmoothing",
++      valid_for_permission_element: true,
++      valid_for_page_context: true,
++      invalidate: ["border-radius", "paint", "corner-shape"],
++    },
++
+     // Visited properties.
+     {
+       name: "-internal-visited-color",
+diff --git a/third_party/blink/renderer/core/css/css_property_equality.cc b/third_party/blink/renderer/core/css/css_property_equality.cc
+index c7b431dc31495b06f7320992e6044be4fcde93f4..a8929e4d0c4154d8af69238c252c293e94049c88 100644
+--- a/third_party/blink/renderer/core/css/css_property_equality.cc
++++ b/third_party/blink/renderer/core/css/css_property_equality.cc
+@@ -444,6 +444,9 @@ bool CSSPropertyEquality::PropertiesEqual(const PropertyHandle& property,
+       return ValueEquals(a.DominantBaseline(), b.DominantBaseline());
+     case CSSPropertyID::kDynamicRangeLimit:
+       return ValueEquals(a.GetDynamicRangeLimit(), b.GetDynamicRangeLimit());
++    case CSSPropertyID::kElectronCornerSmoothing:
++      return ValueEquals(a.ElectronCornerSmoothing(),
++                         b.ElectronCornerSmoothing());
+     case CSSPropertyID::kEmptyCells:
+       return ValueEquals(a.EmptyCells(), b.EmptyCells());
+     case CSSPropertyID::kFill:
+diff --git a/third_party/blink/renderer/core/css/properties/longhands/longhands_custom.cc b/third_party/blink/renderer/core/css/properties/longhands/longhands_custom.cc
+index af06c8edfad9f6c4dcb098f7f00be14edcc5bba2..b4968491945d9f4d7f26b41ae3be4fe982c36543 100644
+--- a/third_party/blink/renderer/core/css/properties/longhands/longhands_custom.cc
++++ b/third_party/blink/renderer/core/css/properties/longhands/longhands_custom.cc
+@@ -12993,5 +12993,36 @@ const CSSValue* InternalEmptyLineHeight::ParseSingleValue(
+                                          CSSValueID::kNone>(stream);
+ }
+ 
++const CSSValue* ElectronCornerSmoothing::ParseSingleValue(
++    CSSParserTokenStream& stream,
++    const CSSParserContext& context,
++    CSSParserLocalContext& local_context) const {
++  // Try to parse `system-ui` keyword first.
++  if (auto* ident =
++          css_parsing_utils::ConsumeIdent<CSSValueID::kSystemUi>(stream)) {
++    return ident;
++  }
++  // Try to parse as percent.
++  return css_parsing_utils::ConsumePercent(
++      stream, context, local_context, CSSPrimitiveValue::ValueRange::kNonNegative);
++}
++
++const CSSValue* ElectronCornerSmoothing::CSSValueFromComputedStyleInternal(
++    const ComputedStyle& style,
++    const LayoutObject*,
++    bool allow_visited_style,
++    CSSValuePhase value_phase) const {
++  const Length& length = style.ElectronCornerSmoothing();
++  switch (length.GetType()) {
++    case Length::kAuto:
++      return CSSIdentifierValue::Create(CSSValueID::kSystemUi);
++    case Length::kPercent:
++      return CSSNumericLiteralValue::Create(
++          length.Percent(), CSSPrimitiveValue::UnitType::kPercentage);
++    default:
++      return CSSIdentifierValue::Create(CSSValueID::kNone);
++  }
++}
++
+ }  // namespace css_longhand
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/core/css/resolver/style_builder_converter.cc b/third_party/blink/renderer/core/css/resolver/style_builder_converter.cc
+index aa6daa9b29e98a8b4f9e68cb0a4f9753f9824bac..37d172f1b4b2fdaf294e5edf32861afb48fa4246 100644
+--- a/third_party/blink/renderer/core/css/resolver/style_builder_converter.cc
++++ b/third_party/blink/renderer/core/css/resolver/style_builder_converter.cc
+@@ -4275,6 +4275,15 @@ PositionTryFallback StyleBuilderConverter::ConvertSinglePositionTryFallback(
+   return PositionTryFallback(scoped_name, tactic_list);
+ }
+ 
++Length StyleBuilderConverter::ConvertCornerSmoothing(StyleResolverState& state,
++                                                     const CSSValue& value) {
++  auto* ident = DynamicTo<CSSIdentifierValue>(value);
++  if (ident && ident->GetValueID() == CSSValueID::kSystemUi) {
++    return Length::Auto();
++  }
++  return ConvertLength(state, value);
++}
++
+ TextFit StyleBuilderConverter::ConvertTextFit(StyleResolverState& state,
+                                               const CSSValue& value) {
+   const auto& list = To<CSSValueList>(value);
+diff --git a/third_party/blink/renderer/core/css/resolver/style_builder_converter.h b/third_party/blink/renderer/core/css/resolver/style_builder_converter.h
+index 3ffc4fc86d7af9f8a0d2b12109759164f24eae0a..9e680f0ff181f08ecac15d469e92ef4e6fecc3e9 100644
+--- a/third_party/blink/renderer/core/css/resolver/style_builder_converter.h
++++ b/third_party/blink/renderer/core/css/resolver/style_builder_converter.h
+@@ -477,6 +477,7 @@ class StyleBuilderConverter {
+       StyleResolverState&,
+       const CSSValue&,
+       bool allow_any_keyword_in_position_area = false);
++  static Length ConvertCornerSmoothing(StyleResolverState&, const CSSValue&);
+   static TextFit ConvertTextFit(StyleResolverState&, const CSSValue&);
+   static TextOverflowData ConvertTextOverflow(StyleResolverState&,
+                                               const CSSValue&);
+diff --git a/third_party/blink/renderer/core/paint/contoured_border_geometry.cc b/third_party/blink/renderer/core/paint/contoured_border_geometry.cc
+index b721dd3809c0b6c89574a515bac32d397a1bfb09..750a3603bd18680228220b831709d3271e96afa8 100644
+--- a/third_party/blink/renderer/core/paint/contoured_border_geometry.cc
++++ b/third_party/blink/renderer/core/paint/contoured_border_geometry.cc
+@@ -53,6 +53,24 @@ float EffectiveCurvature(Superellipse superellipse, const gfx::SizeF& radius) {
+                           : superellipse.Exponent();
+ }
+ 
++float SmoothnessFromLength(const Length& length) {
++  // `none` = 0%
++  if (length.IsNone()) {
++    return 0.0f;
++  }
++
++  // `system-ui` keyword, represented internally as "auto" length
++  if (length.HasAuto()) {
++#if BUILDFLAG(IS_MAC)
++    return 0.6f;
++#else
++    return 0.0f;
++#endif  // BUILDFLAG(IS_MAC)
++  }
++
++  return length.Percent() / 100.0f;
++}
++
+ gfx::QuadF ComputeHullQuad(const ContouredRect::Corner& corner) {
+   const gfx::PointF half_corner = corner.HalfCorner();
+   const gfx::PointF perpendicular_line =
+@@ -164,7 +182,8 @@ ContouredRect ComputeContouredBorderFromStyle(
+       EffectiveCurvature(style.CornerTopLeftShape(), radii.TopLeft()),
+       EffectiveCurvature(style.CornerTopRightShape(), radii.TopRight()),
+       EffectiveCurvature(style.CornerBottomRightShape(), radii.BottomRight()),
+-      EffectiveCurvature(style.CornerBottomLeftShape(), radii.BottomLeft()));
++      EffectiveCurvature(style.CornerBottomLeftShape(), radii.BottomLeft()),
++      SmoothnessFromLength(style.ElectronCornerSmoothing()));
+   if (curvature.IsRound()) {
+     return result;
+   }
+diff --git a/third_party/blink/renderer/platform/BUILD.gn b/third_party/blink/renderer/platform/BUILD.gn
+index 817d8653da0dd6307d1663385aa698253092e774..8bc20d06c5f4fa7c734178f7ed937071285298e5 100644
+--- a/third_party/blink/renderer/platform/BUILD.gn
++++ b/third_party/blink/renderer/platform/BUILD.gn
+@@ -1745,6 +1745,8 @@ component("platform") {
+     "widget/widget_base.h",
+     "widget/widget_base_client.h",
+     "windows_keyboard_codes.h",
++    "//electron/shell/renderer/electron_smooth_round_rect.h",
++    "//electron/shell/renderer/electron_smooth_round_rect.cc",
+   ]
+ 
+   sources -= blink_platform_avx_files
+diff --git a/third_party/blink/renderer/platform/geometry/contoured_rect.h b/third_party/blink/renderer/platform/geometry/contoured_rect.h
+index 17c97038dc0fdb97021ee4b1aa3c8a4ca459fb2b..71d697d738f6aee8cbbb700f1e6ad9acca980b7b 100644
+--- a/third_party/blink/renderer/platform/geometry/contoured_rect.h
++++ b/third_party/blink/renderer/platform/geometry/contoured_rect.h
+@@ -52,19 +52,29 @@ class PLATFORM_EXPORT ContouredRect {
+     constexpr CornerCurvature(float top_left,
+                               float top_right,
+                               float bottom_right,
+-                              float bottom_left)
++                              float bottom_left,
++                              float smoothness)
+         : top_left_(top_left),
+           top_right_(top_right),
+           bottom_right_(bottom_right),
+-          bottom_left_(bottom_left) {
++          bottom_left_(bottom_left),
++          smoothness_(smoothness) {
+       DCHECK_GE(top_left, 0);
+       DCHECK_GE(top_right, 0);
+       DCHECK_GE(bottom_right, 0);
+       DCHECK_GE(bottom_left, 0);
++      DCHECK_GE(smoothness, 0);
+     }
++    constexpr CornerCurvature(float top_left,
++                              float top_right,
++                              float bottom_right,
++                              float bottom_left)
++        : CornerCurvature(top_left, top_right, bottom_right, bottom_left, 0) {}
++
++    constexpr bool IsSmooth() const { return smoothness_ > 0.0f; }
+ 
+     constexpr bool IsRound() const {
+-      return (top_left_ == kRound) && IsUniform();
++      return (top_left_ == kRound) && IsUniform() && !IsSmooth();
+     }
+ 
+     constexpr bool IsConvex() const {
+@@ -86,6 +96,7 @@ class PLATFORM_EXPORT ContouredRect {
+     constexpr float TopRight() const { return top_right_; }
+     constexpr float BottomRight() const { return bottom_right_; }
+     constexpr float BottomLeft() const { return bottom_left_; }
++    constexpr float Smoothness() const { return smoothness_; }
+ 
+     constexpr bool operator==(const CornerCurvature&) const = default;
+ 
+@@ -96,6 +107,7 @@ class PLATFORM_EXPORT ContouredRect {
+     float top_right_ = kRound;
+     float bottom_right_ = kRound;
+     float bottom_left_ = kRound;
++    float smoothness_ = 0.0f;
+   };
+ 
+   // A Corner is a axis-aligned quad, with the points ordered (start, outer,
+diff --git a/third_party/blink/renderer/platform/geometry/path_builder.cc b/third_party/blink/renderer/platform/geometry/path_builder.cc
+index 9d125de843259dae40e6b08eaf65ea3650435295..428219fb35d7a967dcaee91aa1c3628e8021e106 100644
+--- a/third_party/blink/renderer/platform/geometry/path_builder.cc
++++ b/third_party/blink/renderer/platform/geometry/path_builder.cc
+@@ -10,6 +10,7 @@
+ #include <utility>
+ 
+ #include "base/numerics/angle_conversions.h"
++#include "electron/shell/renderer/electron_smooth_round_rect.h"
+ #include "third_party/blink/renderer/platform/geometry/contoured_rect.h"
+ #include "third_party/blink/renderer/platform/geometry/path.h"
+ #include "third_party/blink/renderer/platform/geometry/path_types.h"
+@@ -375,6 +376,32 @@ PathBuilder& PathBuilder::AddContouredRect(
+     AddRoundedRect(target_rect);
+     return *this;
+   }
++
++  // TODO(clavin): decompose `electron::DrawSmoothRoundRect` into corners
++  if (contoured_rect.GetCornerCurvature().IsSmooth()) {
++    const gfx::RectF& box = contoured_rect.Rect();
++
++    // Constrain the radii (on a copy) to ensure they do not exceed the box.
++    FloatRoundedRect round_rect_copy = contoured_rect.AsRoundedRect();
++    round_rect_copy.ConstrainRadii();
++    const FloatRoundedRect::Radii& radii = round_rect_copy.GetRadii();
++    float smoothness = std::clamp(
++        contoured_rect.GetCornerCurvature().Smoothness(), 0.0f, 1.0f);
++
++    // Since the Electron implementation of DrawSmoothRoundRect uses one radius
++    // for both dimensions, we need to use the minimum of the two supplied.
++    auto min_radius = [](const gfx::SizeF& radius) -> float {
++      return std::min(radius.width(), radius.height());
++    };
++
++    builder_.addPath(electron::DrawSmoothRoundRect(
++        box.x(), box.y(), box.width(), box.height(), smoothness,
++        min_radius(radii.TopLeft()), min_radius(radii.TopRight()),
++        min_radius(radii.BottomRight()), min_radius(radii.BottomLeft())));
++
++    return *this;
++  }
++
+   const FloatRoundedRect& origin_rect = contoured_rect.GetOriginRect();
+ 
+   auto draw_as_single_path = [&]() {
+diff --git a/third_party/blink/renderer/platform/runtime_enabled_features.json5 b/third_party/blink/renderer/platform/runtime_enabled_features.json5
+index f4aac923866bdfe12187d630d804f3e3e6042929..e54930c610e8f6a5939f7e3fa8d26dcecba59360 100644
+--- a/third_party/blink/renderer/platform/runtime_enabled_features.json5
++++ b/third_party/blink/renderer/platform/runtime_enabled_features.json5
+@@ -237,6 +237,10 @@
+   },
+ 
+   data: [
++    {
++      name: "ElectronCSSCornerSmoothing",
++      status: "stable",
++    },
+     {
+       // This flag changes about:blank to dark in dark mode on user action.
+       name: "AboutBlankPageRespectsDarkModeOnUserAction",

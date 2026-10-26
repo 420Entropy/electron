@@ -5,10 +5,12 @@
 #ifndef ELECTRON_SHELL_BROWSER_UI_VIEWS_MENU_MODEL_ADAPTER_H_
 #define ELECTRON_SHELL_BROWSER_UI_VIEWS_MENU_MODEL_ADAPTER_H_
 
-#include "shell/browser/ui/electron_menu_model.h"
+#include "base/memory/raw_ptr.h"
 #include "ui/views/controls/menu/menu_model_adapter.h"
 
 namespace electron {
+
+class ElectronMenuModel;
 
 class MenuModelAdapter : public views::MenuModelAdapter {
  public:
@@ -20,10 +22,11 @@ class MenuModelAdapter : public views::MenuModelAdapter {
   MenuModelAdapter& operator=(const MenuModelAdapter&) = delete;
 
  protected:
+  // views::MenuModelAdapter
   bool GetAccelerator(int id, ui::Accelerator* accelerator) const override;
 
  private:
-  ElectronMenuModel* menu_model_;
+  raw_ptr<ElectronMenuModel> menu_model_;
 };
 
 }  // namespace electron

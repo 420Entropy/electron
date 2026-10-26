@@ -8,16 +8,16 @@
 // which runs in browserify environment instead of Node environment, all native
 // modules must be passed from outside, all included files must be plain JS.
 
+import type { SrcAttribute } from '@electron/internal/renderer/web-view/web-view-attributes';
 import { WEB_VIEW_ATTRIBUTES, WEB_VIEW_ERROR_MESSAGES } from '@electron/internal/renderer/web-view/web-view-constants';
 import { WebViewImpl, WebViewImplHooks, setupMethods } from '@electron/internal/renderer/web-view/web-view-impl';
-import type { SrcAttribute } from '@electron/internal/renderer/web-view/web-view-attributes';
 
 const internals = new WeakMap<HTMLElement, WebViewImpl>();
 
 // Return a WebViewElement class that is defined in this context.
 const defineWebViewElement = (hooks: WebViewImplHooks) => {
   return class WebViewElement extends HTMLElement {
-    static get observedAttributes () {
+    static get observedAttributes() {
       return [
         WEB_VIEW_ATTRIBUTES.PARTITION,
         WEB_VIEW_ATTRIBUTES.SRC,
@@ -35,12 +35,12 @@ const defineWebViewElement = (hooks: WebViewImplHooks) => {
       ];
     }
 
-    constructor () {
+    constructor() {
       super();
       internals.set(this, new WebViewImpl(this, hooks));
     }
 
-    getWebContentsId () {
+    getWebContentsId() {
       const internal = internals.get(this);
       if (!internal || !internal.guestInstanceId) {
         throw new Error(WEB_VIEW_ERROR_MESSAGES.NOT_ATTACHED);
@@ -48,7 +48,7 @@ const defineWebViewElement = (hooks: WebViewImplHooks) => {
       return internal.guestInstanceId;
     }
 
-    connectedCallback () {
+    connectedCallback() {
       const internal = internals.get(this);
       if (!internal) {
         return;
@@ -62,14 +62,14 @@ const defineWebViewElement = (hooks: WebViewImplHooks) => {
       }
     }
 
-    attributeChangedCallback (name: string, oldValue: any, newValue: any) {
+    attributeChangedCallback(name: string, oldValue: any, newValue: any) {
       const internal = internals.get(this);
       if (internal) {
         internal.handleWebviewAttributeMutation(name, oldValue, newValue);
       }
     }
 
-    disconnectedCallback () {
+    disconnectedCallback() {
       const internal = internals.get(this);
       if (!internal) {
         return;
@@ -86,9 +86,7 @@ const defineWebViewElement = (hooks: WebViewImplHooks) => {
 
 // Register <webview> custom element.
 const registerWebViewElement = (hooks: WebViewImplHooks) => {
-  // I wish eslint wasn't so stupid, but it is
-  // eslint-disable-next-line
-  const WebViewElement = defineWebViewElement(hooks) as unknown as typeof ElectronInternal.WebViewElement
+  const WebViewElement = defineWebViewElement(hooks) as unknown as typeof ElectronInternal.WebViewElement;
 
   setupMethods(WebViewElement, hooks);
 

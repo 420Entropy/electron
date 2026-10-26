@@ -7,7 +7,7 @@
 
 #include <vector>
 
-#include "base/lazy_instance.h"
+#include "base/memory/raw_ptr.h"
 #include "base/observer_list.h"
 
 namespace electron {
@@ -49,13 +49,12 @@ class WindowList {
   WindowList();
   ~WindowList();
 
-  // A vector of the windows in this list, in the order they were added.
-  WindowVector windows_;
-
   // A list of observers which will be notified of every window addition and
   // removal across all WindowLists.
-  static base::LazyInstance<base::ObserverList<WindowListObserver>>::Leaky
-      observers_;
+  [[nodiscard]] static base::ObserverList<WindowListObserver>& GetObservers();
+
+  // A vector of the windows in this list, in the order they were added.
+  std::vector<raw_ptr<NativeWindow>> windows_;
 
   static WindowList* instance_;
 };

@@ -6,10 +6,10 @@ Subject: allow new privileges in unsandboxed child processes
 This allows unsandboxed child process to launch setuid processes on Linux.
 
 diff --git a/content/browser/child_process_launcher_helper_linux.cc b/content/browser/child_process_launcher_helper_linux.cc
-index 1b4f9c8e3b79abcab08b9bfb80109d7f032d9d5f..6d8aa39ab75edcba3e34134566c9fcbe56a7ec57 100644
+index 230b4d7c7b5c74fe374e7e26bd4df4be2faaf7fa..7e89870ddaab9a71e863fabff8069888a4ce7ba8 100644
 --- a/content/browser/child_process_launcher_helper_linux.cc
 +++ b/content/browser/child_process_launcher_helper_linux.cc
-@@ -62,6 +62,15 @@ bool ChildProcessLauncherHelper::BeforeLaunchOnLauncherThread(
+@@ -66,6 +66,15 @@ bool ChildProcessLauncherHelper::BeforeLaunchOnLauncherThread(
        options->fds_to_remap.emplace_back(sandbox_fd, GetSandboxFD());
      }
  
@@ -24,4 +24,4 @@ index 1b4f9c8e3b79abcab08b9bfb80109d7f032d9d5f..6d8aa39ab75edcba3e34134566c9fcbe
 +
      options->environment = delegate_->GetEnvironment();
    } else {
-     DCHECK(GetZygoteForLaunch());
+     CHECK(GetZygoteForLaunch(), base::NotFatalUntil::M159);

@@ -11,6 +11,17 @@
 #include "mojo/public/cpp/bindings/connector.h"
 #include "mojo/public/cpp/bindings/message.h"
 #include "shell/browser/event_emitter_mixin.h"
+#include "shell/common/gc_plugin.h"
+#include "shell/common/gin_helper/constructible.h"
+#include "third_party/blink/public/common/messaging/message_port_descriptor.h"
+
+namespace gin {
+class Arguments;
+}  // namespace gin
+
+namespace gin_helper {
+class ErrorThrower;
+}  // namespace gin_helper
 
 namespace v8 {
 template <class T>
@@ -19,22 +30,23 @@ class Value;
 class Isolate;
 }  // namespace v8
 
-namespace gin {
-class Arguments;
-template <typename T>
-class Handle;
-}  // namespace gin
-
 namespace electron {
 
-// There is only a single instance of this class
-// for the lifetime of a Utility Process which
-// also means that GC lifecycle is ignored by this class.
-class ParentPort : public gin::Wrappable<ParentPort>,
-                   public mojo::MessageReceiver {
+// There is only a single instance of this class for the lifetime of a Utility
+// Process. It is allocated on the V8 cppgc heap and kept alive for the entire
+// process lifetime by a leaked cppgc::Persistent root, so it is never
+// garbage collected.
+class ParentPort final : public gin::Wrappable<ParentPort>,
+                         public gin_helper::EventEmitterMixin<ParentPort>,
+                         public gin_helper::Constructible<ParentPort>,
+                         private mojo::MessageReceiver {
  public:
   static ParentPort* GetInstance();
-  static gin::Handle<ParentPort> Create(v8::Isolate* isolate);
+  static ParentPort* Create(v8::Isolate* isolate);
+  // gin_helper::Constructible; not constructible from JavaScript.
+  static v8::Local<v8::Value> New(gin_helper::ErrorThrower thrower);
+  static void FillObjectTemplate(v8::Isolate*, v8::Local<v8::ObjectTemplate>);
+  static const char* GetClassName() { return "ParentPort"; }
 
   ParentPort(const ParentPort&) = delete;
   ParentPort& operator=(const ParentPort&) = delete;
@@ -45,13 +57,13 @@ class ParentPort : public gin::Wrappable<ParentPort>,
 
   // gin::Wrappable
   static gin::WrapperInfo kWrapperInfo;
-  gin::ObjectTemplateBuilder GetObjectTemplateBuilder(
-      v8::Isolate* isolate) override;
-  const char* GetTypeName() override;
+  const gin::WrapperInfo* wrapper_info() const override;
+  const char* GetHumanReadableName() const override;
+
+  void Close();
 
  private:
-  void PostMessage(v8::Local<v8::Value> message_value);
-  void Close();
+  void PostMessage(gin::Arguments* args);
   void Start();
   void Pause();
 
@@ -59,6 +71,9 @@ class ParentPort : public gin::Wrappable<ParentPort>,
   bool Accept(mojo::Message* mojo_message) override;
 
   bool connector_closed_ = false;
+  GC_PLUGIN_IGNORE(
+      "Context tracking of the connector is not needed in the utility "
+      "process.")
   std::unique_ptr<mojo::Connector> connector_;
   blink::MessagePortDescriptor port_;
 };

@@ -7,6 +7,7 @@
 #include <algorithm>
 
 #include "base/mac/mac_util.h"
+#include "base/task/single_thread_task_runner.h"
 #include "components/remote_cocoa/app_shim/native_widget_ns_window_bridge.h"
 #include "shell/browser/browser.h"
 #include "shell/browser/native_window_mac.h"
@@ -18,8 +19,6 @@
 #include "ui/views/widget/native_widget_mac.h"
 
 using TitleBarStyle = electron::NativeWindowMac::TitleBarStyle;
-using FullScreenTransitionState =
-    electron::NativeWindow::FullScreenTransitionState;
 
 @implementation ElectronNSWindowDelegate
 
@@ -44,6 +43,14 @@ using FullScreenTransitionState =
 #pragma mark - NSWindowDelegate
 
 - (void)windowDidChangeOcclusionState:(NSNotification*)notification {
+  // Chromium's WebContentsOcclusionCheckerMac posts synthetic occlusion
+  // notifications tagged with its class name in userInfo. These reflect the
+  // checker's manual frame-intersection heuristic, not an actual macOS
+  // occlusion state change, so the real occlusionState hasn't changed and
+  // emitting show/hide in response would be spurious.
+  if (notification.userInfo[@"WebContentsOcclusionCheckerMac"] != nil)
+    return;
+
   // notification.object is the window that changed its state.
   // It's safe to use self.window instead if you don't assign one delegate to
   // many windows
@@ -51,10 +58,22 @@ using FullScreenTransitionState =
 
   // check occlusion binary flag
   if (window.occlusionState & NSWindowOcclusionStateVisible) {
-    // The app is visible
+    // There's a macOS bug where if a child window is minimized, and then both
+    // windows are restored via activation of the parent window, the child
+    // window is not properly deminiaturized. This causes traffic light bugs
+    // like the close and miniaturize buttons having no effect. We need to call
+    // deminiaturize on the child window to fix this. Unfortunately, this also
+    // hits ANOTHER bug where even after calling deminiaturize,
+    // windowDidDeminiaturize is not posted on the child window if it was
+    // incidentally restored by the parent, so we need to manually reset
+    // is_minimized_ here.
+    if (shell_->parent() && is_minimized_) {
+      shell_->Restore();
+      is_minimized_ = false;
+    }
+
     shell_->NotifyWindowShow();
   } else {
-    // The app is not visible
     shell_->NotifyWindowHide();
   }
 }
@@ -64,7 +83,7 @@ using FullScreenTransitionState =
 - (NSRect)windowWillUseStandardFrame:(NSWindow*)window
                         defaultFrame:(NSRect)frame {
   if (!shell_->zoom_to_page_width()) {
-    if (shell_->GetAspectRatio() > 0.0)
+    if (shell_->aspect_ratio() > 0.0)
       shell_->set_default_frame_for_zoom(frame);
     return frame;
   }
@@ -92,7 +111,7 @@ using FullScreenTransitionState =
   // Set the width. Don't touch y or height.
   frame.size.width = zoomed_width;
 
-  if (shell_->GetAspectRatio() > 0.0)
+  if (shell_->aspect_ratio() > 0.0)
     shell_->set_default_frame_for_zoom(frame);
 
   return frame;
@@ -109,6 +128,9 @@ using FullScreenTransitionState =
 }
 
 - (void)windowDidBecomeKey:(NSNotification*)notification {
+  // Let the views host know the window is key, otherwise Widget::IsActive()
+  // stays false and focusing a View waits for an activation that never comes.
+  [super windowDidBecomeKey:notification];
   shell_->NotifyWindowIsKeyChanged(true);
   shell_->RedrawTrafficLights();
 }
@@ -121,64 +143,62 @@ using FullScreenTransitionState =
   if ([NSApp isActive] && ([NSApp keyWindow] == [notification object]))
     return;
 
+  [super windowDidResignKey:notification];
   shell_->NotifyWindowIsKeyChanged(false);
   shell_->RedrawTrafficLights();
 }
 
 - (NSSize)windowWillResize:(NSWindow*)sender toSize:(NSSize)frameSize {
   NSSize newSize = frameSize;
-  double aspectRatio = shell_->GetAspectRatio();
   NSWindow* window = shell_->GetNativeWindow().GetNativeNSWindow();
 
-  if (aspectRatio > 0.0) {
-    gfx::Size windowSize = shell_->GetSize();
-    gfx::Size contentSize = shell_->GetContentSize();
-    gfx::Size extraSize = shell_->GetAspectRatioExtraSize();
+  if (const double aspectRatio = shell_->aspect_ratio(); aspectRatio > 0.0) {
+    const gfx::Size windowSize = shell_->GetSize();
+    const gfx::Size contentSize = shell_->GetContentSize();
+    const gfx::Size extraSize = shell_->aspect_ratio_extra_size();
 
     double titleBarHeight = windowSize.height() - contentSize.height();
     double extraWidthPlusFrame =
         windowSize.width() - contentSize.width() + extraSize.width();
     double extraHeightPlusFrame = titleBarHeight + extraSize.height();
 
-    newSize.width =
-        roundf((frameSize.height - extraHeightPlusFrame) * aspectRatio +
-               extraWidthPlusFrame);
-    newSize.height =
-        roundf((newSize.width - extraWidthPlusFrame) / aspectRatio +
-               extraHeightPlusFrame);
+    auto widthForHeight = [&](double h) {
+      return (h - extraHeightPlusFrame) * aspectRatio + extraWidthPlusFrame;
+    };
+    auto heightForWidth = [&](double w) {
+      return (w - extraWidthPlusFrame) / aspectRatio + extraHeightPlusFrame;
+    };
+
+    newSize.width = roundf(widthForHeight(frameSize.height));
+    newSize.height = roundf(heightForWidth(newSize.width));
 
     // Clamp to minimum width/height while ensuring aspect ratio remains.
     NSSize minSize = [window minSize];
     NSSize zeroSize =
         shell_->has_frame() ? NSMakeSize(0, titleBarHeight) : NSZeroSize;
     if (!NSEqualSizes(minSize, zeroSize)) {
-      double minWidthForAspectRatio =
-          (minSize.height - titleBarHeight) * aspectRatio;
       bool atMinHeight =
           minSize.height > zeroSize.height && newSize.height <= minSize.height;
-      newSize.width = atMinHeight ? minWidthForAspectRatio
+      newSize.width = atMinHeight ? widthForHeight(minSize.height)
                                   : std::max(newSize.width, minSize.width);
 
-      double minHeightForAspectRatio = minSize.width / aspectRatio;
       bool atMinWidth =
           minSize.width > zeroSize.width && newSize.width <= minSize.width;
-      newSize.height = atMinWidth ? minHeightForAspectRatio
+      newSize.height = atMinWidth ? heightForWidth(minSize.width)
                                   : std::max(newSize.height, minSize.height);
     }
 
     // Clamp to maximum width/height while ensuring aspect ratio remains.
     NSSize maxSize = [window maxSize];
     if (!NSEqualSizes(maxSize, NSMakeSize(FLT_MAX, FLT_MAX))) {
-      double maxWidthForAspectRatio = maxSize.height * aspectRatio;
       bool atMaxHeight =
           maxSize.height < FLT_MAX && newSize.height >= maxSize.height;
-      newSize.width = atMaxHeight ? maxWidthForAspectRatio
+      newSize.width = atMaxHeight ? widthForHeight(maxSize.height)
                                   : std::min(newSize.width, maxSize.width);
 
-      double maxHeightForAspectRatio = maxSize.width / aspectRatio;
       bool atMaxWidth =
           maxSize.width < FLT_MAX && newSize.width >= maxSize.width;
-      newSize.height = atMaxWidth ? maxHeightForAspectRatio
+      newSize.height = atMaxWidth ? heightForWidth(maxSize.width)
                                   : std::min(newSize.height, maxSize.height);
     }
   }
@@ -210,6 +230,12 @@ using FullScreenTransitionState =
   [super windowDidResize:notification];
   shell_->NotifyWindowResize();
   shell_->RedrawTrafficLights();
+  // When reduce motion is enabled windowDidResize is only called once after
+  // a resize and windowDidEndLiveResize is not called. So we need to call
+  // handleZoomEnd here as well.
+  if (NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion) {
+    [self handleZoomEnd];
+  }
 }
 
 - (void)windowWillMove:(NSNotification*)notification {
@@ -239,16 +265,32 @@ using FullScreenTransitionState =
   level_ = [window level];
   shell_->SetWindowLevel(NSNormalWindowLevel);
   shell_->UpdateWindowOriginalFrame();
+  shell_->DetachChildren();
+  // Hide the traffic light buttons container before miniaturize so that
+  // when the window is restored, macOS does not render the buttons at
+  // their default position during the deminiaturize animation.
+  shell_->HideTrafficLights();
 }
 
 - (void)windowDidMiniaturize:(NSNotification*)notification {
   [super windowDidMiniaturize:notification];
+  is_minimized_ = true;
+
+  shell_->set_wants_to_be_visible(false);
   shell_->NotifyWindowMinimize();
 }
 
 - (void)windowDidDeminiaturize:(NSNotification*)notification {
   [super windowDidDeminiaturize:notification];
+  is_minimized_ = false;
+
+  shell_->set_wants_to_be_visible(true);
+  shell_->AttachChildren();
   shell_->SetWindowLevel(level_);
+  // Reposition traffic light buttons and make them visible again.
+  // They were hidden in windowWillMiniaturize to prevent a flash at
+  // the default (0,0) position during the restore animation.
+  shell_->RestoreTrafficLights();
   shell_->NotifyWindowRestore();
 }
 
@@ -257,9 +299,7 @@ using FullScreenTransitionState =
   return YES;
 }
 
-- (void)windowDidEndLiveResize:(NSNotification*)notification {
-  resizingHorizontally_.reset();
-  shell_->NotifyWindowResized();
+- (void)handleZoomEnd {
   if (is_zooming_) {
     if (shell_->IsMaximized())
       shell_->NotifyWindowMaximize();
@@ -269,20 +309,30 @@ using FullScreenTransitionState =
   }
 }
 
+- (void)windowDidEndLiveResize:(NSNotification*)notification {
+  resizingHorizontally_.reset();
+  shell_->NotifyWindowResized();
+  [self handleZoomEnd];
+}
+
 - (void)windowWillEnterFullScreen:(NSNotification*)notification {
   // Store resizable mask so it can be restored after exiting fullscreen.
   is_resizable_ = shell_->HasStyleMask(NSWindowStyleMaskResizable);
+  // Store borderless mask so it can be restored after exiting fullscreen.
+  is_borderless_ = !shell_->HasStyleMask(NSWindowStyleMaskTitled);
 
-  shell_->set_fullscreen_transition_state(FullScreenTransitionState::ENTERING);
+  shell_->set_is_transitioning_fullscreen(true);
 
   shell_->NotifyWindowWillEnterFullScreen();
 
   // Set resizable to true before entering fullscreen.
   shell_->SetResizable(true);
+  // Set borderless to false before entering fullscreen.
+  shell_->SetBorderless(false);
 }
 
 - (void)windowDidEnterFullScreen:(NSNotification*)notification {
-  shell_->set_fullscreen_transition_state(FullScreenTransitionState::NONE);
+  shell_->set_is_transitioning_fullscreen(false);
 
   shell_->NotifyWindowEnterFullScreen();
 
@@ -292,16 +342,29 @@ using FullScreenTransitionState =
   shell_->HandlePendingFullscreenTransitions();
 }
 
+- (void)windowDidFailToEnterFullScreen:(NSWindow*)window {
+  shell_->set_is_transitioning_fullscreen(false);
+
+  shell_->SetResizable(is_resizable_);
+  shell_->NotifyWindowDidFailToEnterFullScreen();
+
+  if (shell_->HandleDeferredClose())
+    return;
+
+  shell_->HandlePendingFullscreenTransitions();
+}
+
 - (void)windowWillExitFullScreen:(NSNotification*)notification {
-  shell_->set_fullscreen_transition_state(FullScreenTransitionState::EXITING);
+  shell_->set_is_transitioning_fullscreen(true);
 
   shell_->NotifyWindowWillLeaveFullScreen();
 }
 
 - (void)windowDidExitFullScreen:(NSNotification*)notification {
-  shell_->set_fullscreen_transition_state(FullScreenTransitionState::NONE);
+  shell_->set_is_transitioning_fullscreen(false);
 
   shell_->SetResizable(is_resizable_);
+  shell_->SetBorderless(is_borderless_);
   shell_->NotifyWindowLeaveFullScreen();
 
   if (shell_->HandleDeferredClose())
@@ -322,9 +385,9 @@ using FullScreenTransitionState =
     NSWindow* window = shell_->GetNativeWindow().GetNativeNSWindow();
     NSWindow* sheetParent = [window sheetParent];
     base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
-        FROM_HERE, base::BindOnce(base::RetainBlock(^{
+        FROM_HERE, base::BindOnce(^{
           [sheetParent endSheet:window];
-        })));
+        }));
   }
 
   // Clears the delegate when window is going to be closed, since EL Capitan it
@@ -334,6 +397,19 @@ using FullScreenTransitionState =
       shell_->GetNativeWindow());
   auto* bridged_view = bridge_host->GetInProcessNSWindowBridge();
   bridged_view->OnWindowWillClose();
+
+  // Native widget and its compositor have been destroyed upon close. We need
+  // to detach contents view in order to prevent reusing its layer without
+  // compositor in the `WebContentsViewMac::CreateViewForWidget`, leading to
+  // `DCHECK` failure in `BrowserCompositorMac::SetParentUiLayer`.
+  auto* contents_view =
+      static_cast<views::WidgetDelegate*>(shell_)->GetContentsView();
+  if (contents_view) {
+    auto* parent = contents_view->parent();
+    if (parent) {
+      parent->RemoveChildView(contents_view);
+    }
+  }
 }
 
 - (BOOL)windowShouldClose:(id)window {

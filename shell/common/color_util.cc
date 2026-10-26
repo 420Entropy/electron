@@ -4,15 +4,16 @@
 
 #include "shell/common/color_util.h"
 
-#include <cmath>
-#include <utility>
-#include <vector>
+#include <algorithm>
 
-#include "base/cxx17_backports.h"
-#include "base/strings/string_util.h"
-#include "base/strings/stringprintf.h"
 #include "content/public/common/color_parser.h"
-#include "ui/gfx/color_utils.h"
+#include "third_party/abseil-cpp/absl/strings/str_format.h"
+
+#if BUILDFLAG(IS_WIN)
+#include <windows.h>
+
+#include "skia/ext/skia_utils_win.h"
+#endif
 
 namespace {
 
@@ -32,7 +33,7 @@ bool IsHexFormatWithAlpha(const std::string& str) {
 
 namespace electron {
 
-SkColor ParseCSSColor(const std::string& color_string) {
+std::optional<SkColor> ParseCSSColor(const std::string& color_string) {
   // ParseCssColorString expects RGBA and we historically use ARGB
   // so we need to convert before passing to ParseCssColorString.
   std::string converted_color_str;
@@ -46,18 +47,18 @@ SkColor ParseCSSColor(const std::string& color_string) {
 
   SkColor color;
   if (!content::ParseCssColorString(converted_color_str, &color))
-    color = SK_ColorWHITE;
+    return std::nullopt;
 
   return color;
 }
 
 std::string ToRGBHex(SkColor color) {
-  return base::StringPrintf("#%02X%02X%02X", SkColorGetR(color),
-                            SkColorGetG(color), SkColorGetB(color));
+  return absl::StrFormat("#%02X%02X%02X", SkColorGetR(color),
+                         SkColorGetG(color), SkColorGetB(color));
 }
 
 std::string ToRGBAHex(SkColor color, bool include_hash) {
-  std::string color_str = base::StringPrintf(
+  std::string color_str = absl::StrFormat(
       "%02X%02X%02X%02X", SkColorGetR(color), SkColorGetG(color),
       SkColorGetB(color), SkColorGetA(color));
   if (include_hash) {
@@ -65,5 +66,11 @@ std::string ToRGBAHex(SkColor color, bool include_hash) {
   }
   return color_str;
 }
+
+#if BUILDFLAG(IS_WIN)
+SkColor GetSysSkColor(int which) {
+  return skia::COLORREFToSkColor(GetSysColor(which));
+}
+#endif
 
 }  // namespace electron

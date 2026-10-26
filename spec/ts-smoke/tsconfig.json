@@ -6,15 +6,14 @@
           "dom"
       ],
       "typeRoots" : ["../../node_modules/@types"],
-      "noImplicitAny": true,
-      "noImplicitThis": true,
-      "strictNullChecks": false,
+      "strict": true,
       "noEmit": true,
       "forceConsistentCasingInFileNames": true
   },
   "files": [
     "electron/main.ts",
     "electron/renderer.ts",
+    "electron/utility.ts",
     "../../electron.d.ts"
   ]
 }

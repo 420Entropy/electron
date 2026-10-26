@@ -4,9 +4,13 @@
 
 #include "shell/browser/net/node_stream_loader.h"
 
+#include <algorithm>
+#include <string_view>
 #include <utility>
 
+#include "base/numerics/safe_conversions.h"
 #include "mojo/public/cpp/system/string_data_source.h"
+#include "services/network/public/cpp/loading_params.h"
 #include "shell/common/gin_converters/callback_converter.h"
 #include "shell/common/node_includes.h"
 
@@ -30,6 +34,12 @@ NodeStreamLoader::NodeStreamLoader(
 }
 
 NodeStreamLoader::~NodeStreamLoader() {
+  // The "removeListener" and "destroy" calls below run user JS which may
+  // invoke the handlers we are unsubscribing. Invalidate weak pointers first
+  // so those handlers, which are bound weakly, become no-ops instead of
+  // re-entering NotifyComplete() on a partially destroyed object.
+  weak_factory_.InvalidateWeakPtrs();
+
   v8::Isolate::Scope isolate_scope(isolate_);
   v8::HandleScope handle_scope(isolate_);
 
@@ -42,16 +52,26 @@ NodeStreamLoader::~NodeStreamLoader() {
   }
 
   // Destroy the stream if not already ended
-  if (!ended_) {
+  if (!destroyed_) {
     node::MakeCallback(isolate_, emitter_.Get(isolate_), "destroy", 0, nullptr,
                        {0, 0});
   }
 }
 
 void NodeStreamLoader::Start(network::mojom::URLResponseHeadPtr head) {
+  // A declared Content-Length larger than mojo's 64 KB default grows the pipe
+  // (up to the network service's default); it never shrinks it, since the
+  // header may describe an encoded upstream body rather than this stream.
+  constexpr int64_t kMojoDefaultPipeSize = 64 * 1024;
+  const uint32_t pipe_size =
+      head->content_length > kMojoDefaultPipeSize
+          ? base::saturated_cast<uint32_t>(
+                std::min<int64_t>(head->content_length,
+                                  network::GetDataPipeDefaultAllocationSize()))
+          : 0;
   mojo::ScopedDataPipeProducerHandle producer;
   mojo::ScopedDataPipeConsumerHandle consumer;
-  MojoResult rv = mojo::CreateDataPipe(nullptr, producer, consumer);
+  MojoResult rv = mojo::CreateDataPipe(pipe_size, producer, consumer);
   if (rv != MOJO_RESULT_OK) {
     NotifyComplete(net::ERR_INSUFFICIENT_RESOURCES);
     return;
@@ -59,35 +79,59 @@ void NodeStreamLoader::Start(network::mojom::URLResponseHeadPtr head) {
 
   producer_ = std::make_unique<mojo::DataPipeProducer>(std::move(producer));
   client_->OnReceiveResponse(std::move(head), std::move(consumer),
-                             absl::nullopt);
+                             std::nullopt);
 
+  // Subscribing runs the emitter's "on" method, which may invoke the handler
+  // synchronously and delete |this|, so check |weak| between each call.
   auto weak = weak_factory_.GetWeakPtr();
-  On("end",
-     base::BindRepeating(&NodeStreamLoader::NotifyComplete, weak, net::OK));
-  On("error", base::BindRepeating(&NodeStreamLoader::NotifyComplete, weak,
-                                  net::ERR_FAILED));
+  On("end", base::BindRepeating(&NodeStreamLoader::NotifyEnd, weak));
+  if (!weak)
+    return;
+  On("error", base::BindRepeating(&NodeStreamLoader::NotifyError, weak));
+  if (!weak)
+    return;
   On("readable", base::BindRepeating(&NodeStreamLoader::NotifyReadable, weak));
 }
 
+void NodeStreamLoader::NotifyEnd() {
+  destroyed_ = true;
+  NotifyComplete(net::OK);
+}
+
+void NodeStreamLoader::NotifyError() {
+  destroyed_ = true;
+  NotifyComplete(net::ERR_FAILED);
+}
+
 void NodeStreamLoader::NotifyReadable() {
-  if (!readable_)
-    ReadMore();
-  else if (is_reading_)
-    has_read_waiting_ = true;
+  if (readable_) {
+    // 'readable' was emitted from within stream.read(), so remember to read
+    // again once the in-progress read completes.
+    if (is_reading_)
+      has_read_waiting_ = true;
+    return;
+  }
+
+  // `readable_` must be set before ReadMore(): it clears the flag itself when
+  // read() comes up empty, and a re-entrant 'readable' emitted from within
+  // read() needs to see `true` so that it records `has_read_waiting_`.
   readable_ = true;
+
+  // ReadMore() may delete `this`, so it must be the last thing we do.
+  ReadMore();
 }
 
 void NodeStreamLoader::NotifyComplete(int result) {
   // Wait until write finishes or fails.
   if (is_reading_ || is_writing_) {
-    ended_ = true;
+    pending_result_ = true;
     result_ = result;
     return;
   }
 
   network::URLLoaderCompletionStatus status(result);
   status.completion_time = base::TimeTicks::Now();
-  status.decoded_body_length = bytes_written_;
+  status.decoded_body_length = base::ByteSize(bytes_written_);
   client_->OnComplete(status);
   delete this;
 }
@@ -120,7 +164,7 @@ void NodeStreamLoader::ReadMore() {
     }
 
     readable_ = false;
-    if (ended_) {
+    if (pending_result_) {
       NotifyComplete(result_);
     }
     return;
@@ -135,8 +179,8 @@ void NodeStreamLoader::ReadMore() {
   is_reading_ = false;
   is_writing_ = true;
   producer_->Write(std::make_unique<mojo::StringDataSource>(
-                       base::StringPiece(node::Buffer::Data(buffer),
-                                         node::Buffer::Length(buffer)),
+                       std::string_view{node::Buffer::Data(buffer),
+                                        node::Buffer::Length(buffer)},
                        mojo::StringDataSource::AsyncWritingMode::
                            STRING_STAYS_VALID_UNTIL_COMPLETION),
                    base::BindOnce(&NodeStreamLoader::DidWrite, weak));
@@ -145,7 +189,7 @@ void NodeStreamLoader::ReadMore() {
 void NodeStreamLoader::DidWrite(MojoResult result) {
   is_writing_ = false;
   // We were told to end streaming.
-  if (ended_) {
+  if (pending_result_) {
     NotifyComplete(result_);
     return;
   }
@@ -163,7 +207,7 @@ void NodeStreamLoader::On(const char* event, EventCallback callback) {
   // emitter.on(event, callback)
   v8::Local<v8::Value> args[] = {
       gin::StringToV8(isolate_, event),
-      gin_helper::CallbackToV8Leaked(isolate_, std::move(callback)),
+      gin_helper::CallbackToV8Leaked(isolate_, callback),
   };
   handlers_[event].Reset(isolate_, args[1]);
   node::MakeCallback(isolate_, emitter_.Get(isolate_), "on",

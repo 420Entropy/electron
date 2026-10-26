@@ -5,37 +5,41 @@
 #ifndef ELECTRON_SHELL_BROWSER_USB_USB_CHOOSER_CONTROLLER_H_
 #define ELECTRON_SHELL_BROWSER_USB_USB_CHOOSER_CONTROLLER_H_
 
-#include <string>
-#include <unordered_map>
-#include <utility>
 #include <vector>
 
-#include "base/memory/raw_ptr.h"
-#include "base/memory/ref_counted.h"
 #include "base/memory/weak_ptr.h"
 #include "base/scoped_observation.h"
-#include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_contents_observer.h"
-#include "services/device/public/mojom/usb_device.mojom.h"
-#include "shell/browser/api/electron_api_session.h"
-#include "shell/browser/usb/electron_usb_delegate.h"
+#include "services/device/public/mojom/usb_device.mojom-forward.h"
 #include "shell/browser/usb/usb_chooser_context.h"
 #include "third_party/blink/public/mojom/usb/web_usb_service.mojom.h"
 #include "url/origin.h"
 
 namespace content {
 class RenderFrameHost;
-}
+class WebContents;
+}  // namespace content
+
+namespace gin {
+class Arguments;
+template <typename T>
+class WeakCell;
+}  // namespace gin
 
 namespace electron {
+class ElectronUsbDelegate;
+
+namespace api {
+class Session;
+}
 
 // UsbChooserController creates a chooser for WebUSB.
-class UsbChooserController final : public UsbChooserContext::DeviceObserver,
-                                   public content::WebContentsObserver {
+class UsbChooserController final : private UsbChooserContext::DeviceObserver,
+                                   private content::WebContentsObserver {
  public:
   UsbChooserController(
       content::RenderFrameHost* render_frame_host,
-      std::vector<device::mojom::UsbDeviceFilterPtr> device_filters,
+      blink::mojom::WebUsbRequestDeviceOptionsPtr options,
       blink::mojom::WebUsbService::GetPermissionCallback callback,
       content::WebContents* web_contents,
       base::WeakPtr<ElectronUsbDelegate> usb_delegate);
@@ -55,13 +59,13 @@ class UsbChooserController final : public UsbChooserContext::DeviceObserver,
   void RenderFrameDeleted(content::RenderFrameHost* render_frame_host) override;
 
  private:
-  api::Session* GetSession();
+  gin::WeakCell<api::Session>* GetSession();
   void GotUsbDeviceList(std::vector<device::mojom::UsbDeviceInfoPtr> devices);
   bool DisplayDevice(const device::mojom::UsbDeviceInfo& device) const;
   void RunCallback(device::mojom::UsbDeviceInfoPtr device_info);
   void OnDeviceChosen(gin::Arguments* args);
 
-  std::vector<device::mojom::UsbDeviceFilterPtr> filters_;
+  blink::mojom::WebUsbRequestDeviceOptionsPtr options_;
   blink::mojom::WebUsbService::GetPermissionCallback callback_;
   url::Origin origin_;
 
@@ -70,6 +74,9 @@ class UsbChooserController final : public UsbChooserContext::DeviceObserver,
       observation_{this};
 
   base::WeakPtr<ElectronUsbDelegate> usb_delegate_;
+
+  // Filtered list of devices that passed DisplayDevice()
+  std::vector<device::mojom::UsbDeviceInfoPtr> devices_;
 
   content::GlobalRenderFrameHostId render_frame_host_id_;
 

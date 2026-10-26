@@ -5,52 +5,57 @@
 #ifndef ELECTRON_SHELL_BROWSER_API_ELECTRON_API_POWER_SAVE_BLOCKER_H_
 #define ELECTRON_SHELL_BROWSER_API_ELECTRON_API_POWER_SAVE_BLOCKER_H_
 
-#include <map>
-
-#include "gin/handle.h"
-#include "gin/object_template_builder.h"
+#include "base/containers/flat_map.h"
 #include "gin/wrappable.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "services/device/public/mojom/wake_lock.mojom.h"
+#include "shell/common/gc_plugin.h"
+
+namespace gin {
+class ObjectTemplateBuilder;
+}  // namespace gin
 
 namespace electron::api {
 
-class PowerSaveBlocker : public gin::Wrappable<PowerSaveBlocker> {
+class PowerSaveBlocker final : public gin::Wrappable<PowerSaveBlocker> {
  public:
-  static gin::Handle<PowerSaveBlocker> Create(v8::Isolate* isolate);
+  static PowerSaveBlocker* Create(v8::Isolate* isolate);
 
   // gin::Wrappable
+  static const gin::WrapperInfo kWrapperInfo;
+  const gin::WrapperInfo* wrapper_info() const override;
+  const char* GetHumanReadableName() const override;
   gin::ObjectTemplateBuilder GetObjectTemplateBuilder(
       v8::Isolate* isolate) override;
 
-  static gin::WrapperInfo kWrapperInfo;
+  // Make public for cppgc::MakeGarbageCollected.
+  explicit PowerSaveBlocker(v8::Isolate* isolate);
+  ~PowerSaveBlocker() override;
 
   // disable copy
   PowerSaveBlocker(const PowerSaveBlocker&) = delete;
   PowerSaveBlocker& operator=(const PowerSaveBlocker&) = delete;
 
- protected:
-  explicit PowerSaveBlocker(v8::Isolate* isolate);
-  ~PowerSaveBlocker() override;
-
  private:
   void UpdatePowerSaveBlocker();
   int Start(device::mojom::WakeLockType type);
   bool Stop(int id);
-  bool IsStarted(int id);
+  bool IsStarted(int id) const;
 
   device::mojom::WakeLock* GetWakeLock();
 
   // Current wake lock level.
-  device::mojom::WakeLockType current_lock_type_;
+  device::mojom::WakeLockType current_lock_type_ =
+      device::mojom::WakeLockType::kPreventAppSuspension;
 
   // Whether the wake lock is currently active.
   bool is_wake_lock_active_ = false;
 
   // Map from id to the corresponding blocker type for each request.
-  using WakeLockTypeMap = std::map<int, device::mojom::WakeLockType>;
-  WakeLockTypeMap wake_lock_types_;
+  base::flat_map<int, device::mojom::WakeLockType> wake_lock_types_;
 
+  GC_PLUGIN_IGNORE(
+      "Context tracking of remote is not needed in the browser process.")
   mojo::Remote<device::mojom::WakeLock> wake_lock_;
 };
 

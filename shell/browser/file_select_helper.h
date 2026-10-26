@@ -5,17 +5,13 @@
 #ifndef ELECTRON_SHELL_BROWSER_FILE_SELECT_HELPER_H_
 #define ELECTRON_SHELL_BROWSER_FILE_SELECT_HELPER_H_
 
-#include <map>
 #include <memory>
 #include <string>
 #include <vector>
 
-#include "base/compiler_specific.h"
-#include "base/scoped_observation.h"
+#include "base/memory/raw_ptr.h"
 #include "build/build_config.h"
 #include "content/public/browser/browser_thread.h"
-#include "content/public/browser/render_widget_host.h"
-#include "content/public/browser/render_widget_host_observer.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "net/base/directory_lister.h"
 #include "third_party/blink/public/mojom/choosers/file_chooser.mojom.h"
@@ -41,8 +37,7 @@ class FileSelectHelper : public base::RefCountedThreadSafe<
                              FileSelectHelper,
                              content::BrowserThread::DeleteOnUIThread>,
                          public ui::SelectFileDialog::Listener,
-                         public content::WebContentsObserver,
-                         public content::RenderWidgetHostObserver,
+                         private content::WebContentsObserver,
                          private net::DirectoryLister::DirectoryListerDelegate {
  public:
   // disable copy
@@ -85,22 +80,10 @@ class FileSelectHelper : public base::RefCountedThreadSafe<
   void RunFileChooserEnd();
 
   // SelectFileDialog::Listener overrides.
-  void FileSelected(const base::FilePath& path,
-                    int index,
-                    void* params) override;
-  void FileSelectedWithExtraInfo(const ui::SelectedFileInfo& file,
-                                 int index,
-                                 void* params) override;
-  void MultiFilesSelected(const std::vector<base::FilePath>& files,
-                          void* params) override;
-  void MultiFilesSelectedWithExtraInfo(
-      const std::vector<ui::SelectedFileInfo>& files,
-      void* params) override;
-  void FileSelectionCanceled(void* params) override;
-
-  // content::RenderWidgetHostObserver overrides.
-  void RenderWidgetHostDestroyed(
-      content::RenderWidgetHost* widget_host) override;
+  void FileSelected(const ui::SelectedFileInfo& file, int index) override;
+  void MultiFilesSelected(
+      const std::vector<ui::SelectedFileInfo>& files) override;
+  void FileSelectionCanceled() override;
 
   // content::WebContentsObserver overrides.
   void RenderFrameHostChanged(content::RenderFrameHost* old_host,
@@ -172,9 +155,6 @@ class FileSelectHelper : public base::RefCountedThreadSafe<
   // if the file chooser operation shouldn't proceed.
   bool AbortIfWebContentsDestroyed();
 
-  void SetFileSelectListenerForTesting(
-      scoped_refptr<content::FileSelectListener> listener);
-
   // Helper method to get allowed extensions for select file dialog from
   // the specified accept types as defined in the spec:
   //   http://whatwg.org/html/number-state.html#attr-input-accept
@@ -183,18 +163,10 @@ class FileSelectHelper : public base::RefCountedThreadSafe<
   static std::unique_ptr<ui::SelectFileDialog::FileTypeInfo>
   GetFileTypesFromAcceptType(const std::vector<std::u16string>& accept_types);
 
-  // Check the accept type is valid. It is expected to be all lower case with
-  // no whitespace.
-  static bool IsAcceptTypeValid(const std::string& accept_type);
-
-  // Get a sanitized filename suitable for use as a default filename.
-  static base::FilePath GetSanitizedFileName(
-      const base::FilePath& suggested_path);
-
   // The RenderFrameHost and WebContents for the page showing a file dialog
   // (may only be one such dialog).
-  content::RenderFrameHost* render_frame_host_;
-  content::WebContents* web_contents_;
+  raw_ptr<content::RenderFrameHost> render_frame_host_;
+  raw_ptr<content::WebContents> web_contents_;
 
   // |listener_| receives the result of the FileSelectHelper.
   scoped_refptr<content::FileSelectListener> listener_;
@@ -205,10 +177,12 @@ class FileSelectHelper : public base::RefCountedThreadSafe<
 
   // The type of file dialog last shown. This is SELECT_NONE if an
   // instance is created through the public EnumerateDirectory().
-  ui::SelectFileDialog::Type dialog_type_;
+  ui::SelectFileDialog::Type dialog_type_ =
+      ui::SelectFileDialog::SELECT_OPEN_FILE;
 
   // The mode of file dialog last shown.
-  blink::mojom::FileChooserParams::Mode dialog_mode_;
+  blink::mojom::FileChooserParams::Mode dialog_mode_ =
+      blink::mojom::FileChooserParams::Mode::kOpen;
 
   // The enumeration root directory for EnumerateDirectory() and
   // RunFileChooser with kUploadFolder.
@@ -219,10 +193,6 @@ class FileSelectHelper : public base::RefCountedThreadSafe<
   // more than one going on at a time.
   struct ActiveDirectoryEnumeration;
   std::unique_ptr<ActiveDirectoryEnumeration> directory_enumeration_;
-
-  base::ScopedObservation<content::RenderWidgetHost,
-                          content::RenderWidgetHostObserver>
-      observation_{this};
 
   // Temporary files only used on OSX. This class is responsible for deleting
   // these files when they are no longer needed.

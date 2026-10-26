@@ -5,16 +5,16 @@
 #ifndef ELECTRON_SHELL_COMMON_NODE_BINDINGS_LINUX_H_
 #define ELECTRON_SHELL_COMMON_NODE_BINDINGS_LINUX_H_
 
-#include "base/compiler_specific.h"
 #include "shell/common/node_bindings.h"
 
 namespace electron {
 
 class NodeBindingsLinux : public NodeBindings {
  public:
-  explicit NodeBindingsLinux(BrowserEnvironment browser_env);
+  NodeBindingsLinux(BrowserEnvironment browser_env, uv_loop_t* loop);
 
  private:
+  // NodeBindings
   void PollEvents() override;
 
   // Epoll to poll for uv's backend fd.

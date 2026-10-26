@@ -2,18 +2,24 @@
 // Use of this source code is governed by the MIT license that can be
 // found in the LICENSE file.
 
-#include <cstdlib>
-#include <memory>
+#include <sysexits.h>
 
-#include "base/allocator/early_zone_registration_mac.h"
-#include "electron/buildflags/buildflags.h"
+#include <cstdlib>
+#include <iostream>
+#include <memory>
+#include <string>
+#include <string_view>
+
+#include "base/compiler_specific.h"
+#include "base/strings/cstring_view.h"
 #include "electron/fuses.h"
+#include "electron/mas.h"
 #include "shell/app/electron_library_main.h"
 #include "shell/app/uv_stdio_fix.h"
+#include "shell/common/electron_constants.h"
 
 #if defined(HELPER_EXECUTABLE) && !IS_MAS_BUILD()
 #include <mach-o/dyld.h>
-#include <cstdio>
 
 #include "sandbox/mac/seatbelt_exec.h"  // nogncheck
 #endif
@@ -28,21 +34,33 @@ void abort_report_np(const char* fmt, ...);
 
 namespace {
 
-[[maybe_unused]] bool IsEnvSet(const char* name) {
-  char* indicator = getenv(name);
-  return indicator && indicator[0] != '\0';
+[[nodiscard]] bool IsEnvSet(const base::cstring_view name) {
+  const char* const indicator = getenv(name.c_str());
+  return indicator && *indicator;
 }
 
-#if defined(HELPER_EXECUTABLE) && !IS_MAS_BUILD()
-[[noreturn]] void FatalError(const char* format, ...) {
-  va_list valist;
-  va_start(valist, format);
-  char message[4096];
-  if (vsnprintf(message, sizeof(message), format, valist) >= 0) {
-    fputs(message, stderr);
-    abort_report_np("%s", message);
+#if defined(HELPER_EXECUTABLE)
+// Helper apps only ever host child processes, which are always launched with
+// --type. Started bare (for example by child_process.fork() while the
+// runAsNode fuse is disabled) a helper would otherwise boot a second browser
+// process out of the helper bundle, whose own children then fail to launch.
+[[nodiscard]] bool HasProcessType(int argc, char* argv[]) {
+  constexpr std::string_view kProcessType = "--type=";
+  for (int i = 1; i < argc; ++i) {
+    // SAFETY: the OS guarantees that argv holds argc entries.
+    if (std::string_view(UNSAFE_BUFFERS(argv[i])).starts_with(kProcessType))
+      return true;
   }
-  va_end(valist);
+  return false;
+}
+#endif
+
+#if defined(HELPER_EXECUTABLE) && !IS_MAS_BUILD()
+[[noreturn]] void FatalError(const std::string errmsg) {
+  if (!errmsg.empty()) {
+    std::cerr << errmsg;
+    abort_report_np("%s", errmsg.c_str());
+  }
   abort();
 }
 #endif
@@ -50,19 +68,24 @@ namespace {
 }  // namespace
 
 int main(int argc, char* argv[]) {
-  partition_alloc::EarlyMallocZoneRegistration();
   FixStdioStreams();
 
-#if BUILDFLAG(ENABLE_RUN_AS_NODE)
-  if (electron::fuses::IsRunAsNodeEnabled() &&
-      IsEnvSet("ELECTRON_RUN_AS_NODE")) {
+  if (electron::fuses::IsRunAsNodeEnabled() && IsEnvSet(electron::kRunAsNode)) {
     return ElectronInitializeICUandStartNode(argc, argv);
+  }
+
+#if defined(HELPER_EXECUTABLE)
+  if (!HasProcessType(argc, argv)) {
+    std::cerr << "This is a helper executable and cannot be launched directly; "
+                 "it requires a --type argument from the browser process."
+              << std::endl;
+    return EX_USAGE;
   }
 #endif
 
 #if defined(HELPER_EXECUTABLE) && !IS_MAS_BUILD()
   uint32_t exec_path_size = 0;
-  int rv = _NSGetExecutablePath(NULL, &exec_path_size);
+  int rv = _NSGetExecutablePath(nullptr, &exec_path_size);
   if (rv != -1) {
     FatalError("_NSGetExecutablePath: get length failed.");
   }

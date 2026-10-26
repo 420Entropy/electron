@@ -8,11 +8,16 @@
 
 #include "base/functional/callback_helpers.h"
 #include "content/public/browser/device_service.h"
+#include "gin/converter.h"
 #include "gin/dictionary.h"
-#include "gin/function_template.h"
+#include "gin/object_template_builder.h"
 #include "services/device/public/mojom/wake_lock_provider.mojom.h"
 #include "services/service_manager/public/cpp/connector.h"
+#include "shell/browser/javascript_environment.h"
+#include "shell/common/gin_helper/wrappable_pointer_tags.h"
 #include "shell/common/node_includes.h"
+#include "v8/include/cppgc/allocation.h"
+#include "v8/include/v8-cppgc.h"
 
 namespace gin {
 
@@ -38,12 +43,34 @@ struct Converter<device::mojom::WakeLockType> {
 
 namespace electron::api {
 
-gin::WrapperInfo PowerSaveBlocker::kWrapperInfo = {gin::kEmbedderNativeGin};
+const gin::WrapperInfo PowerSaveBlocker::kWrapperInfo =
+    electron::MakeWrapperInfo(electron::kElectronPowerSaveBlocker);
 
-PowerSaveBlocker::PowerSaveBlocker(v8::Isolate* isolate)
-    : current_lock_type_(device::mojom::WakeLockType::kPreventAppSuspension) {}
+PowerSaveBlocker::PowerSaveBlocker(v8::Isolate* isolate) {}
 
 PowerSaveBlocker::~PowerSaveBlocker() = default;
+
+// static
+PowerSaveBlocker* PowerSaveBlocker::Create(v8::Isolate* isolate) {
+  return cppgc::MakeGarbageCollected<PowerSaveBlocker>(
+      isolate->GetCppHeap()->GetAllocationHandle(), isolate);
+}
+
+const gin::WrapperInfo* PowerSaveBlocker::wrapper_info() const {
+  return &kWrapperInfo;
+}
+
+const char* PowerSaveBlocker::GetHumanReadableName() const {
+  return "Electron / PowerSaveBlocker";
+}
+
+gin::ObjectTemplateBuilder PowerSaveBlocker::GetObjectTemplateBuilder(
+    v8::Isolate* isolate) {
+  return gin::Wrappable<PowerSaveBlocker>::GetObjectTemplateBuilder(isolate)
+      .SetMethod("start", &PowerSaveBlocker::Start)
+      .SetMethod("stop", &PowerSaveBlocker::Stop)
+      .SetMethod("isStarted", &PowerSaveBlocker::IsStarted);
+}
 
 void PowerSaveBlocker::UpdatePowerSaveBlocker() {
   if (wake_lock_types_.empty()) {
@@ -62,6 +89,7 @@ void PowerSaveBlocker::UpdatePowerSaveBlocker() {
   // Only the highest-precedence blocker type takes effect.
   device::mojom::WakeLockType new_lock_type =
       device::mojom::WakeLockType::kPreventAppSuspension;
+
   for (const auto& element : wake_lock_types_) {
     if (element.second == device::mojom::WakeLockType::kPreventDisplaySleep) {
       new_lock_type = device::mojom::WakeLockType::kPreventDisplaySleep;
@@ -106,21 +134,8 @@ bool PowerSaveBlocker::Stop(int id) {
   return success;
 }
 
-bool PowerSaveBlocker::IsStarted(int id) {
-  return wake_lock_types_.find(id) != wake_lock_types_.end();
-}
-
-// static
-gin::Handle<PowerSaveBlocker> PowerSaveBlocker::Create(v8::Isolate* isolate) {
-  return gin::CreateHandle(isolate, new PowerSaveBlocker(isolate));
-}
-
-gin::ObjectTemplateBuilder PowerSaveBlocker::GetObjectTemplateBuilder(
-    v8::Isolate* isolate) {
-  return gin::Wrappable<PowerSaveBlocker>::GetObjectTemplateBuilder(isolate)
-      .SetMethod("start", &PowerSaveBlocker::Start)
-      .SetMethod("stop", &PowerSaveBlocker::Stop)
-      .SetMethod("isStarted", &PowerSaveBlocker::IsStarted);
+bool PowerSaveBlocker::IsStarted(int id) const {
+  return wake_lock_types_.contains(id);
 }
 
 }  // namespace electron::api
@@ -131,8 +146,8 @@ void Initialize(v8::Local<v8::Object> exports,
                 v8::Local<v8::Value> unused,
                 v8::Local<v8::Context> context,
                 void* priv) {
-  v8::Isolate* isolate = context->GetIsolate();
-  gin::Dictionary dict(isolate, exports);
+  v8::Isolate* const isolate = electron::JavascriptEnvironment::GetIsolate();
+  gin::Dictionary dict{isolate, exports};
   dict.Set("powerSaveBlocker",
            electron::api::PowerSaveBlocker::Create(isolate));
 }

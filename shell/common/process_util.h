@@ -7,15 +7,19 @@
 
 #include <string>
 
-namespace node {
-class Environment;
-}
-
 namespace electron {
 
-void EmitWarning(node::Environment* env,
-                 const std::string& warning_msg,
-                 const std::string& warning_type);
+std::string GetProcessType();
+
+bool IsBrowserProcess();
+bool IsRendererProcess();
+bool IsUtilityProcess();
+bool IsZygoteProcess();
+
+// True when this process is the ELECTRON_RUN_AS_NODE entry point (e.g. a
+// child_process.fork()ed Node process). Such a process has no --type switch,
+// so IsBrowserProcess() is also true for it; use this to tell the two apart.
+bool IsRunningAsNode();
 
 }  // namespace electron
 

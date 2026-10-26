@@ -1,1 +1,1 @@
-nonExistingFunc(); // eslint-disable-line
+nonExistingFunc();

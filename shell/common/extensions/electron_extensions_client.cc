@@ -7,15 +7,15 @@
 #include <memory>
 #include <string>
 
-#include "base/lazy_instance.h"
-#include "base/logging.h"
+#include "base/no_destructor.h"
+#include "base/notimplemented.h"
 #include "components/version_info/version_info.h"
-#include "content/public/common/user_agent.h"
 #include "extensions/common/core_extensions_api_provider.h"
 #include "extensions/common/extension_urls.h"
 #include "extensions/common/features/simple_feature.h"
 #include "extensions/common/permissions/permission_message_provider.h"
 #include "extensions/common/url_pattern_set.h"
+#include "shell/common/application_info.h"
 #include "shell/common/extensions/electron_extensions_api_provider.h"
 
 using extensions::ExtensionsClient;
@@ -39,29 +39,25 @@ class ElectronPermissionMessageProvider
       const ElectronPermissionMessageProvider&) = delete;
 
   // PermissionMessageProvider implementation.
-  extensions::PermissionMessages GetPermissionMessages(
+  [[nodiscard]] extensions::PermissionMessages GetPermissionMessages(
       const extensions::PermissionIDSet& permissions) const override {
     return extensions::PermissionMessages();
   }
 
-  bool IsPrivilegeIncrease(
+  [[nodiscard]] bool IsPrivilegeIncrease(
       const extensions::PermissionSet& granted_permissions,
       const extensions::PermissionSet& requested_permissions,
       extensions::Manifest::Type extension_type) const override {
     // Ensure we implement this before shipping.
-    CHECK(false);
-    return false;
+    NOTREACHED();
   }
 
-  extensions::PermissionIDSet GetAllPermissionIDs(
+  [[nodiscard]] extensions::PermissionIDSet GetAllPermissionIDs(
       const extensions::PermissionSet& permissions,
       extensions::Manifest::Type extension_type) const override {
-    return extensions::PermissionIDSet();
+    return {};
   }
 };
-
-base::LazyInstance<ElectronPermissionMessageProvider>::DestructorAtExit
-    g_permission_message_provider = LAZY_INSTANCE_INITIALIZER;
 
 }  // namespace
 
@@ -85,12 +81,13 @@ void ElectronExtensionsClient::InitializeWebStoreUrls(
 const extensions::PermissionMessageProvider&
 ElectronExtensionsClient::GetPermissionMessageProvider() const {
   NOTIMPLEMENTED();
-  return g_permission_message_provider.Get();
+
+  static base::NoDestructor<ElectronPermissionMessageProvider> instance;
+  return *instance;
 }
 
 const std::string ElectronExtensionsClient::GetProductName() {
-  // TODO(samuelmaddock):
-  return "app_shell";
+  return GetApplicationName();
 }
 
 void ElectronExtensionsClient::FilterHostPermissions(
@@ -115,7 +112,7 @@ extensions::URLPatternSet
 ElectronExtensionsClient::GetPermittedChromeSchemeHosts(
     const extensions::Extension* extension,
     const extensions::APIPermissionSet& api_permissions) const {
-  return extensions::URLPatternSet();
+  return {};
 }
 
 bool ElectronExtensionsClient::IsScriptableURL(const GURL& url,

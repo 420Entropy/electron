@@ -6,21 +6,19 @@
 
 #include <utility>
 
-#include "content/public/browser/browser_context.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_process_host.h"
 #include "mojo/public/cpp/bindings/self_owned_receiver.h"
 #include "shell/browser/api/electron_api_session.h"
-#include "shell/browser/electron_browser_context.h"
+#include "shell/common/gin_converters/frame_converter.h"
 #include "shell/common/gin_converters/gurl_converter.h"
 #include "v8/include/v8.h"
 
 NetworkHintsHandlerImpl::NetworkHintsHandlerImpl(
     content::RenderFrameHost* frame_host)
-    : network_hints::SimpleNetworkHintsHandlerImpl(
-          frame_host->GetProcess()->GetID(),
-          frame_host->GetRoutingID()),
+    : network_hints::SimpleNetworkHintsHandlerImpl(frame_host->GetGlobalId()),
+      render_frame_host_id_(frame_host->GetGlobalId()),
       browser_context_(frame_host->GetProcess()->GetBrowserContext()) {}
 
 NetworkHintsHandlerImpl::~NetworkHintsHandlerImpl() = default;
@@ -32,9 +30,12 @@ void NetworkHintsHandlerImpl::Preconnect(const url::SchemeHostPort& url,
   if (!browser_context_) {
     return;
   }
-  auto* session = electron::api::Session::FromBrowserContext(browser_context_);
-  if (session) {
-    session->Emit("preconnect", url.GetURL(), allow_credentials);
+  gin::WeakCell<electron::api::Session>* session =
+      electron::api::Session::FromBrowserContext(browser_context_);
+  if (session && session->Get()) {
+    session->Get()->Emit(
+        "preconnect", url.GetURL(), allow_credentials,
+        content::RenderFrameHost::FromID(render_frame_host_id_));
   }
 }
 

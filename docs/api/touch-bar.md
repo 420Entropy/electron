@@ -1,5 +1,9 @@
 # TouchBar
 
+> [!WARNING]
+> Electron's built-in classes cannot be subclassed in user code.
+> For more information, see [the FAQ](../faq.md#class-inheritance-does-not-work-with-electron-built-in-modules).
+
 ## Class: TouchBar
 
 > Create TouchBar layouts for native macOS applications
@@ -15,12 +19,9 @@ Process: [Main](../glossary.md#main-process)
 Creates a new touch bar with the specified items. Use
 `BrowserWindow.setTouchBar` to add the `TouchBar` to a window.
 
-**Note:** The TouchBar API is currently experimental and may change or be
-removed in future Electron releases.
-
-**Tip:** If you don't have a MacBook with Touch Bar, you can use
-[Touch Bar Simulator](https://github.com/sindresorhus/touch-bar-simulator)
-to test Touch Bar usage in your app.
+> [!NOTE]
+> The TouchBar API is currently experimental and may change or be
+> removed in future Electron releases.
 
 ### Static Properties
 
@@ -79,7 +80,7 @@ immediately updates the escape item in the touch bar.
 Below is an example of a simple slot machine touch bar game with a button
 and some labels.
 
-```javascript
+```js
 const { app, BrowserWindow, TouchBar } = require('electron')
 
 const { TouchBarLabel, TouchBarButton, TouchBarSpacer } = TouchBar
@@ -87,12 +88,12 @@ const { TouchBarLabel, TouchBarButton, TouchBarSpacer } = TouchBar
 let spinning = false
 
 // Reel labels
-const reel1 = new TouchBarLabel()
-const reel2 = new TouchBarLabel()
-const reel3 = new TouchBarLabel()
+const reel1 = new TouchBarLabel({ label: '' })
+const reel2 = new TouchBarLabel({ label: '' })
+const reel3 = new TouchBarLabel({ label: '' })
 
 // Spin result label
-const result = new TouchBarLabel()
+const result = new TouchBarLabel({ label: '' })
 
 // Spin button
 const spin = new TouchBarButton({
@@ -114,7 +115,7 @@ const spin = new TouchBarButton({
     const spinReels = () => {
       updateReels()
 
-      if ((Date.now() - startTime) >= spinLength) {
+      if (Date.now() - startTime >= spinLength) {
         finishSpin()
       } else {
         // Slow down a bit on each spin

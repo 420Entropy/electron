@@ -16,12 +16,12 @@
 // in the gin_helper namespace.
 namespace gin {
 
-// Support absl::optional as an argument.
+// Support std::optional as an argument.
 template <typename T>
 bool GetNextArgument(Arguments* args,
                      const InvokerOptions& invoker_options,
                      bool is_first,
-                     absl::optional<T>* result) {
+                     std::optional<T>* result) {
   T converted;
   // Use gin::Arguments::GetNext which always advances |next| counter.
   if (args->GetNext(&converted))
@@ -45,13 +45,13 @@ v8::Local<v8::FunctionTemplate> CreateConstructorFunctionTemplate(
     base::RepeatingCallback<Sig> callback,
     InvokerOptions invoker_options = {}) {
   typedef internal::CallbackHolder<Sig> HolderT;
-  HolderT* holder =
-      new HolderT(isolate, std::move(callback), std::move(invoker_options));
+  HolderT* holder = cppgc::MakeGarbageCollected<HolderT>(
+      isolate->GetCppHeap()->GetAllocationHandle(), std::move(callback),
+      std::move(invoker_options));
 
-  v8::Local<v8::FunctionTemplate> tmpl = v8::FunctionTemplate::New(
-      isolate, &internal::Dispatcher<Sig>::DispatchToCallback,
-      ConvertToV8<v8::Local<v8::External>>(isolate,
-                                           holder->GetHandle(isolate)));
+  v8::Local<v8::FunctionTemplate> tmpl = v8::FunctionTemplate::New(isolate);
+  tmpl->SetCallHandler(&internal::Dispatcher<Sig>::DispatchToCallback,
+                       holder->GetHandle(isolate));
   return tmpl;
 }
 

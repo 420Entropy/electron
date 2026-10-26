@@ -7,17 +7,23 @@ Process: [Main](../glossary.md#main-process)
 An example of implementing a protocol that has the same effect as the
 `file://` protocol:
 
-```javascript
+```js
 const { app, protocol, net } = require('electron')
 
+const path = require('node:path')
+const url = require('node:url')
+
 app.whenReady().then(() => {
-  protocol.handle('atom', (request) =>
-    net.fetch('file://' + request.url.slice('atom://'.length)))
+  protocol.handle('atom', (request) => {
+    const filePath = request.url.slice('atom://'.length)
+    return net.fetch(url.pathToFileURL(path.join(__dirname, filePath)).toString())
+  })
 })
 ```
 
-**Note:** All methods unless specified can only be used after the `ready` event
-of the `app` module gets emitted.
+> [!NOTE]
+> All methods unless specified can only be used after the `ready` event
+> of the `app` module gets emitted.
 
 ## Using `protocol` with a custom `partition` or `session`
 
@@ -31,23 +37,33 @@ a different session and your custom protocol will not work if you just use
 To have your custom protocol work in combination with a custom session, you need
 to register it to that session explicitly.
 
-```javascript
-const { session, app, protocol } = require('electron')
-const path = require('path')
-const url = require('url')
+```js
+const { app, BrowserWindow, net, protocol, session } = require('electron')
+
+const path = require('node:path')
+const url = require('node:url')
 
 app.whenReady().then(() => {
   const partition = 'persist:example'
   const ses = session.fromPartition(partition)
 
   ses.protocol.handle('atom', (request) => {
-    const path = request.url.slice('atom://'.length)
-    return net.fetch(url.pathToFileURL(path.join(__dirname, path)))
+    const filePath = request.url.slice('atom://'.length)
+    return net.fetch(url.pathToFileURL(path.resolve(__dirname, filePath)).toString())
   })
 
-  mainWindow = new BrowserWindow({ webPreferences: { partition } })
+  const mainWindow = new BrowserWindow({ webPreferences: { partition } })
 })
 ```
+
+## Protocol names
+
+[RFC 3986](https://www.rfc-editor.org/rfc/rfc3986#section-3.1) defines what a valid
+protocol name is:
+
+> Scheme names consist of a sequence of characters beginning with a letter and followed
+> by any combination of letters, digits, plus ("+"), period ("."), or hyphen ("-").
+> Although schemes are case-insensitive, the canonical form is lowercase […].
 
 ## Methods
 
@@ -57,26 +73,26 @@ The `protocol` module has the following methods:
 
 * `customSchemes` [CustomScheme[]](structures/custom-scheme.md)
 
-**Note:** This method can only be used before the `ready` event of the `app`
-module gets emitted and can be called only once.
+> [!NOTE]
+> This method can only be used before the `ready` event of the `app`
+> module gets emitted and can be called only once.
 
 Registers the `scheme` as standard, secure, bypasses content security policy for
-resources, allows registering ServiceWorker, supports fetch API, and streaming
-video/audio. Specify a privilege with the value of `true` to enable the capability.
+resources, allows registering ServiceWorker, supports fetch API, streaming
+video/audio, and V8 code cache. Specify a privilege with the value of `true` to
+enable the capability.
 
 An example of registering a privileged scheme, that bypasses Content Security
 Policy:
 
-```javascript
+```js
 const { protocol } = require('electron')
-protocol.registerSchemesAsPrivileged([
-  { scheme: 'foo', privileges: { bypassCSP: true } }
-])
+
+protocol.registerSchemesAsPrivileged([{ scheme: 'foo', privileges: { bypassCSP: true } }])
 ```
 
-A standard scheme adheres to what RFC 3986 calls [generic URI
-syntax](https://tools.ietf.org/html/rfc3986#section-3). For example `http` and
-`https` are standard schemes, while `file` is not.
+A standard scheme adheres to what RFC 3986 calls [generic URI syntax](https://tools.ietf.org/html/rfc3986#section-3).
+For example `http` and `https` are standard schemes, while `file` is not.
 
 Registering a scheme as standard allows relative and absolute resources to
 be resolved correctly when served. Otherwise the scheme will behave like the
@@ -110,20 +126,27 @@ expect streaming responses.
 
 * `scheme` string - scheme to handle, for example `https` or `my-app`. This is
   the bit before the `:` in a URL.
-* `handler` Function<[GlobalResponse](https://nodejs.org/api/globals.html#response) | Promise<GlobalResponse>>
+* `handler` Function\<[GlobalResponse](https://nodejs.org/api/globals.html#response) | Promise\<GlobalResponse\>\>
   * `request` [GlobalRequest](https://nodejs.org/api/globals.html#request)
 
 Register a protocol handler for `scheme`. Requests made to URLs with this
 scheme will delegate to this handler to determine what response should be sent.
+
+In addition to the standard `Request` fields, `request.initiatorOrigin` is set to the
+origin that issued the request (for example `https://example.com`, or `null`
+for an opaque origin) when web content made it; it is absent for requests the
+browser started itself. Unlike `request.referrer` it is not controlled by the
+requesting page, so prefer it when deciding whether to serve a request.
 
 Either a `Response` or a `Promise<Response>` can be returned.
 
 Example:
 
 ```js
-import { app, protocol } from 'electron'
-import { join } from 'path'
-import { pathToFileURL } from 'url'
+const { app, net, protocol } = require('electron')
+
+const path = require('node:path')
+const { pathToFileURL } = require('node:url')
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -131,7 +154,7 @@ protocol.registerSchemesAsPrivileged([
     privileges: {
       standard: true,
       secure: true,
-      supportsFetchAPI: true
+      supportFetchAPI: true
     }
   }
 ])
@@ -145,9 +168,19 @@ app.whenReady().then(() => {
           headers: { 'content-type': 'text/html' }
         })
       }
-      // NB, this does not check for paths that escape the bundle, e.g.
+      // NB, this checks for paths that escape the bundle, e.g.
       // app://bundle/../../secret_file.txt
-      return net.fetch(pathToFileURL(join(__dirname, pathname)))
+      const pathToServe = path.resolve(__dirname, pathname)
+      const relativePath = path.relative(__dirname, pathToServe)
+      const isSafe = relativePath && !relativePath.startsWith('..') && !path.isAbsolute(relativePath)
+      if (!isSafe) {
+        return new Response('bad', {
+          status: 400,
+          headers: { 'content-type': 'text/html' }
+        })
+      }
+
+      return net.fetch(pathToFileURL(pathToServe).toString())
     } else if (host === 'api') {
       return net.fetch('https://api.my-server.com/' + pathname, {
         method: req.method,
@@ -165,15 +198,83 @@ See the MDN docs for [`Request`](https://developer.mozilla.org/en-US/docs/Web/AP
 
 * `scheme` string - scheme for which to remove the handler.
 
-Removes a protocol handler registered with `protocol.handle`.
+Removes a protocol handler registered with `protocol.handle` or a source
+registered with `protocol.registerSource`.
+
+### `protocol.registerSource(scheme, source)` _Experimental_
+
+* `scheme` string - a custom scheme registered with `protocol.registerSchemesAsPrivileged`.
+* `source` [ProtocolSource](structures/protocol-source.md)
+
+Serves `scheme` from directories on disk without a JavaScript handler. Each
+request is matched against `routes` (a route with a `host` wins over one
+without, then the longest `path` prefix wins), the rest of the URL's path is
+resolved inside that route's `root`, and the file is streamed to the requester
+the way `file:` URLs are, including from `asar` archives, with `Content-Type`
+taken from the file extension. A path that resolves outside `root`, a missing
+file, a request that matches no route, or a method other than `GET`/`HEAD`
+fails with `net::ERR_FILE_NOT_FOUND`. A URL whose path ends in `/` serves the
+route's `index` file.
+
+Use this instead of `protocol.handle` when a scheme only serves an app's own
+bundled files: no request touches the main thread, so pages and their
+subresources load at the same speed whether or not the main process is busy.
+
+```js
+const { app, protocol } = require('electron')
+const path = require('node:path')
+
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'app', privileges: { standard: true, secure: true, supportFetchAPI: true } }
+])
+
+app.whenReady().then(() => {
+  protocol.registerSource('app', {
+    routes: [
+      {
+        match: { host: 'bundle', path: '/assets/' },
+        source: { type: 'directory', root: path.join(process.resourcesPath, 'assets') }
+      },
+      {
+        match: { host: 'bundle' },
+        source: {
+          type: 'directory',
+          root: path.join(app.getAppPath(), 'dist'),
+          headers: { 'Cross-Origin-Opener-Policy': 'same-origin' }
+        }
+      }
+    ]
+  })
+})
+```
+
+A scheme has either a handler or a source; `protocol.unhandle` removes either,
+and `protocol.isProtocolHandled` reports both. `webRequest` listeners apply to
+these requests as to any other.
+
+### `protocol.getSource(scheme)` _Experimental_
+
+* `scheme` string
+
+Returns [`ProtocolSource | null`](structures/protocol-source.md) - The source
+registered for `scheme` with `protocol.registerSource`, or `null`.
 
 ### `protocol.isProtocolHandled(scheme)`
 
 * `scheme` string
 
-Returns `boolean` - Whether `scheme` is already handled.
+Returns `boolean` - Whether `scheme` already has a handler or a source.
 
 ### `protocol.registerFileProtocol(scheme, handler)` _Deprecated_
+
+<!--
+```YAML history
+deprecated:
+  - pr-url: https://github.com/electron/electron/pull/36674
+    description: "`protocol.register*Protocol` and `protocol.intercept*Protocol` methods have been replaced with `protocol.handle`"
+    breaking-changes-header: deprecated-protocolunregisterinterceptbufferstringstreamfilehttpprotocol-and-protocolisprotocolregisteredintercepted
+```
+-->
 
 * `scheme` string
 * `handler` Function
@@ -196,6 +297,15 @@ from protocols that follow the "generic URI syntax" like `file:`.
 
 ### `protocol.registerBufferProtocol(scheme, handler)` _Deprecated_
 
+<!--
+```YAML history
+deprecated:
+  - pr-url: https://github.com/electron/electron/pull/36674
+    description: "`protocol.register*Protocol` and `protocol.intercept*Protocol` methods have been replaced with `protocol.handle`"
+    breaking-changes-header: deprecated-protocolunregisterinterceptbufferstringstreamfilehttpprotocol-and-protocolisprotocolregisteredintercepted
+```
+-->
+
 * `scheme` string
 * `handler` Function
   * `request` [ProtocolRequest](structures/protocol-request.md)
@@ -212,13 +322,22 @@ property.
 
 Example:
 
-```javascript
+```js
 protocol.registerBufferProtocol('atom', (request, callback) => {
   callback({ mimeType: 'text/html', data: Buffer.from('<h5>Response</h5>') })
 })
 ```
 
 ### `protocol.registerStringProtocol(scheme, handler)` _Deprecated_
+
+<!--
+```YAML history
+deprecated:
+  - pr-url: https://github.com/electron/electron/pull/36674
+    description: "`protocol.register*Protocol` and `protocol.intercept*Protocol` methods have been replaced with `protocol.handle`"
+    breaking-changes-header: deprecated-protocolunregisterinterceptbufferstringstreamfilehttpprotocol-and-protocolisprotocolregisteredintercepted
+```
+-->
 
 * `scheme` string
 * `handler` Function
@@ -236,6 +355,15 @@ property.
 
 ### `protocol.registerHttpProtocol(scheme, handler)` _Deprecated_
 
+<!--
+```YAML history
+deprecated:
+  - pr-url: https://github.com/electron/electron/pull/36674
+    description: "`protocol.register*Protocol` and `protocol.intercept*Protocol` methods have been replaced with `protocol.handle`"
+    breaking-changes-header: deprecated-protocolunregisterinterceptbufferstringstreamfilehttpprotocol-and-protocolisprotocolregisteredintercepted
+```
+-->
+
 * `scheme` string
 * `handler` Function
   * `request` [ProtocolRequest](structures/protocol-request.md)
@@ -250,6 +378,15 @@ The usage is the same with `registerFileProtocol`, except that the `callback`
 should be called with an object that has the `url` property.
 
 ### `protocol.registerStreamProtocol(scheme, handler)` _Deprecated_
+
+<!--
+```YAML history
+deprecated:
+  - pr-url: https://github.com/electron/electron/pull/36674
+    description: "`protocol.register*Protocol` and `protocol.intercept*Protocol` methods have been replaced with `protocol.handle`"
+    breaking-changes-header: deprecated-protocolunregisterinterceptbufferstringstreamfilehttpprotocol-and-protocolisprotocolregisteredintercepted
+```
+-->
 
 * `scheme` string
 * `handler` Function
@@ -267,11 +404,12 @@ has the `data` property.
 
 Example:
 
-```javascript
+```js
 const { protocol } = require('electron')
-const { PassThrough } = require('stream')
 
-function createStream (text) {
+const { PassThrough } = require('node:stream')
+
+function createStream(text) {
   const rv = new PassThrough() // PassThrough is also a Readable stream
   rv.push(text)
   rv.push(null)
@@ -292,13 +430,22 @@ protocol.registerStreamProtocol('atom', (request, callback) => {
 It is possible to pass any object that implements the readable stream API (emits
 `data`/`end`/`error` events). For example, here's how a file could be returned:
 
-```javascript
+```js
 protocol.registerStreamProtocol('atom', (request, callback) => {
   callback(fs.createReadStream('index.html'))
 })
 ```
 
 ### `protocol.unregisterProtocol(scheme)` _Deprecated_
+
+<!--
+```YAML history
+deprecated:
+  - pr-url: https://github.com/electron/electron/pull/36674
+    description: "`protocol.register*Protocol` and `protocol.intercept*Protocol` methods have been replaced with `protocol.handle`"
+    breaking-changes-header: deprecated-protocolunregisterinterceptbufferstringstreamfilehttpprotocol-and-protocolisprotocolregisteredintercepted
+```
+-->
 
 * `scheme` string
 
@@ -308,11 +455,29 @@ Unregisters the custom protocol of `scheme`.
 
 ### `protocol.isProtocolRegistered(scheme)` _Deprecated_
 
+<!--
+```YAML history
+deprecated:
+  - pr-url: https://github.com/electron/electron/pull/36674
+    description: "`protocol.register*Protocol` and `protocol.intercept*Protocol` methods have been replaced with `protocol.handle`"
+    breaking-changes-header: deprecated-protocolunregisterinterceptbufferstringstreamfilehttpprotocol-and-protocolisprotocolregisteredintercepted
+```
+-->
+
 * `scheme` string
 
 Returns `boolean` - Whether `scheme` is already registered.
 
 ### `protocol.interceptFileProtocol(scheme, handler)` _Deprecated_
+
+<!--
+```YAML history
+deprecated:
+  - pr-url: https://github.com/electron/electron/pull/36674
+    description: "`protocol.register*Protocol` and `protocol.intercept*Protocol` methods have been replaced with `protocol.handle`"
+    breaking-changes-header: deprecated-protocolunregisterinterceptbufferstringstreamfilehttpprotocol-and-protocolisprotocolregisteredintercepted
+```
+-->
 
 * `scheme` string
 * `handler` Function
@@ -327,6 +492,15 @@ which sends a file as a response.
 
 ### `protocol.interceptStringProtocol(scheme, handler)` _Deprecated_
 
+<!--
+```YAML history
+deprecated:
+  - pr-url: https://github.com/electron/electron/pull/36674
+    description: "`protocol.register*Protocol` and `protocol.intercept*Protocol` methods have been replaced with `protocol.handle`"
+    breaking-changes-header: deprecated-protocolunregisterinterceptbufferstringstreamfilehttpprotocol-and-protocolisprotocolregisteredintercepted
+```
+-->
+
 * `scheme` string
 * `handler` Function
   * `request` [ProtocolRequest](structures/protocol-request.md)
@@ -339,6 +513,15 @@ Intercepts `scheme` protocol and uses `handler` as the protocol's new handler
 which sends a `string` as a response.
 
 ### `protocol.interceptBufferProtocol(scheme, handler)` _Deprecated_
+
+<!--
+```YAML history
+deprecated:
+  - pr-url: https://github.com/electron/electron/pull/36674
+    description: "`protocol.register*Protocol` and `protocol.intercept*Protocol` methods have been replaced with `protocol.handle`"
+    breaking-changes-header: deprecated-protocolunregisterinterceptbufferstringstreamfilehttpprotocol-and-protocolisprotocolregisteredintercepted
+```
+-->
 
 * `scheme` string
 * `handler` Function
@@ -353,6 +536,15 @@ which sends a `Buffer` as a response.
 
 ### `protocol.interceptHttpProtocol(scheme, handler)` _Deprecated_
 
+<!--
+```YAML history
+deprecated:
+  - pr-url: https://github.com/electron/electron/pull/36674
+    description: "`protocol.register*Protocol` and `protocol.intercept*Protocol` methods have been replaced with `protocol.handle`"
+    breaking-changes-header: deprecated-protocolunregisterinterceptbufferstringstreamfilehttpprotocol-and-protocolisprotocolregisteredintercepted
+```
+-->
+
 * `scheme` string
 * `handler` Function
   * `request` [ProtocolRequest](structures/protocol-request.md)
@@ -365,6 +557,15 @@ Intercepts `scheme` protocol and uses `handler` as the protocol's new handler
 which sends a new HTTP request as a response.
 
 ### `protocol.interceptStreamProtocol(scheme, handler)` _Deprecated_
+
+<!--
+```YAML history
+deprecated:
+  - pr-url: https://github.com/electron/electron/pull/36674
+    description: "`protocol.register*Protocol` and `protocol.intercept*Protocol` methods have been replaced with `protocol.handle`"
+    breaking-changes-header: deprecated-protocolunregisterinterceptbufferstringstreamfilehttpprotocol-and-protocolisprotocolregisteredintercepted
+```
+-->
 
 * `scheme` string
 * `handler` Function
@@ -379,6 +580,15 @@ protocol handler.
 
 ### `protocol.uninterceptProtocol(scheme)` _Deprecated_
 
+<!--
+```YAML history
+deprecated:
+  - pr-url: https://github.com/electron/electron/pull/36674
+    description: "`protocol.register*Protocol` and `protocol.intercept*Protocol` methods have been replaced with `protocol.handle`"
+    breaking-changes-header: deprecated-protocolunregisterinterceptbufferstringstreamfilehttpprotocol-and-protocolisprotocolregisteredintercepted
+```
+-->
+
 * `scheme` string
 
 Returns `boolean` - Whether the protocol was successfully unintercepted
@@ -386,6 +596,15 @@ Returns `boolean` - Whether the protocol was successfully unintercepted
 Remove the interceptor installed for `scheme` and restore its original handler.
 
 ### `protocol.isProtocolIntercepted(scheme)` _Deprecated_
+
+<!--
+```YAML history
+deprecated:
+  - pr-url: https://github.com/electron/electron/pull/36674
+    description: "`protocol.register*Protocol` and `protocol.intercept*Protocol` methods have been replaced with `protocol.handle`"
+    breaking-changes-header: deprecated-protocolunregisterinterceptbufferstringstreamfilehttpprotocol-and-protocolisprotocolregisteredintercepted
+```
+-->
 
 * `scheme` string
 

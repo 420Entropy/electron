@@ -21,9 +21,9 @@
 
 namespace electron {
 
-class AutofillAgent : public content::RenderFrameObserver,
-                      public blink::WebAutofillClient,
-                      public mojom::ElectronAutofillAgent {
+class AutofillAgent : private content::RenderFrameObserver,
+                      private blink::WebAutofillClient,
+                      private mojom::ElectronAutofillAgent {
  public:
   explicit AutofillAgent(content::RenderFrame* frame,
                          blink::AssociatedInterfaceRegistry* registry);
@@ -40,7 +40,7 @@ class AutofillAgent : public content::RenderFrameObserver,
   // content::RenderFrameObserver:
   void OnDestruct() override;
 
-  void DidChangeScrollOffset() override;
+  void DidChangeScrollOffset(blink::mojom::ScrollType) override;
   void FocusedElementChanged(const blink::WebElement&) override;
   void DidCompleteFocusChangeInFrame() override;
   void DidReceiveLeftMouseDownOrGestureTapInNode(
@@ -62,10 +62,10 @@ class AutofillAgent : public content::RenderFrameObserver,
 
   // blink::WebAutofillClient:
   void TextFieldDidEndEditing(const blink::WebInputElement&) override;
-  void TextFieldDidChange(const blink::WebFormControlElement&) override;
-  void TextFieldDidChangeImpl(const blink::WebFormControlElement&);
-  void TextFieldDidReceiveKeyDown(const blink::WebInputElement&,
-                                  const blink::WebKeyboardEvent&) override;
+  void TextFieldValueChanged(const blink::WebFormControlElement&) override;
+  void TextFieldValueChangedImpl(const blink::WebFormControlElement&);
+  bool DidReceiveKeyDown(const blink::WebElement&,
+                         const blink::WebKeyboardEvent&) override;
   void OpenTextDataListChooser(const blink::WebInputElement&) override;
   void DataListOptionsChanged(const blink::WebInputElement&) override;
 

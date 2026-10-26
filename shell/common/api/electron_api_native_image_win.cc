@@ -14,8 +14,8 @@
 #include "shell/common/gin_helper/promise.h"
 #include "shell/common/skia_util.h"
 #include "third_party/skia/include/core/SkBitmap.h"
-#include "ui/gfx/icon_util.h"
 #include "ui/gfx/image/image_skia.h"
+#include "ui/gfx/win/icon_util.h"
 
 namespace electron::api {
 
@@ -37,8 +37,7 @@ v8::Local<v8::Promise> NativeImage::CreateThumbnailFromPath(
 
   // create an IShellItem
   Microsoft::WRL::ComPtr<IShellItem> pItem;
-  std::wstring image_path = path.value();
-  hr = SHCreateItemFromParsingName(image_path.c_str(), nullptr,
+  hr = SHCreateItemFromParsingName(path.value().c_str(), nullptr,
                                    IID_PPV_ARGS(&pItem));
 
   if (FAILED(hr)) {
@@ -62,7 +61,7 @@ v8::Local<v8::Promise> NativeImage::CreateThumbnailFromPath(
   hr = pThumbnailCache->GetThumbnail(
       pItem.Get(), size.width(),
       WTS_FLAGS::WTS_SCALETOREQUESTEDSIZE | WTS_FLAGS::WTS_SCALEUP, &pThumbnail,
-      NULL, NULL);
+      nullptr, nullptr);
 
   if (FAILED(hr)) {
     promise.RejectWithErrorMessage(
@@ -71,7 +70,7 @@ v8::Local<v8::Promise> NativeImage::CreateThumbnailFromPath(
   }
 
   // Init HBITMAP
-  HBITMAP hBitmap = NULL;
+  HBITMAP hBitmap = nullptr;
   hr = pThumbnail->GetSharedBitmap(&hBitmap);
   if (FAILED(hr)) {
     promise.RejectWithErrorMessage("Failed to extract bitmap from thumbnail");
@@ -90,7 +89,7 @@ v8::Local<v8::Promise> NativeImage::CreateThumbnailFromPath(
   icon_info.hbmMask = hBitmap;
   icon_info.hbmColor = hBitmap;
 
-  base::win::ScopedHICON icon(CreateIconIndirect(&icon_info));
+  base::win::ScopedGDIObject<HICON> icon(CreateIconIndirect(&icon_info));
   SkBitmap skbitmap = IconUtil::CreateSkBitmapFromHICON(icon.get());
   gfx::ImageSkia image_skia =
       gfx::ImageSkia::CreateFromBitmap(skbitmap, 1.0 /*scale factor*/);

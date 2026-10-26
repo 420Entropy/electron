@@ -5,48 +5,60 @@
 #ifndef ELECTRON_SHELL_BROWSER_WEB_CONTENTS_ZOOM_CONTROLLER_H_
 #define ELECTRON_SHELL_BROWSER_WEB_CONTENTS_ZOOM_CONTROLLER_H_
 
+#include <optional>
+
+#include "base/callback_list.h"
+#include "base/memory/raw_ptr.h"
 #include "base/observer_list.h"
-#include "base/observer_list_types.h"
 #include "content/public/browser/host_zoom_map.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "content/public/browser/web_contents_user_data.h"
 
 namespace electron {
 
+class WebContentsZoomObserver;
+
 // Manages the zoom changes of WebContents.
 class WebContentsZoomController
-    : public content::WebContentsObserver,
+    : private content::WebContentsObserver,
       public content::WebContentsUserData<WebContentsZoomController> {
  public:
-  class Observer : public base::CheckedObserver {
-   public:
-    virtual void OnZoomLevelChanged(content::WebContents* web_contents,
-                                    double level,
-                                    bool is_temporary) {}
-    virtual void OnZoomControllerWebContentsDestroyed() {}
-
-   protected:
-    ~Observer() override {}
-  };
-
   // Defines how zoom changes are handled.
-  enum class ZoomMode {
+  enum ZoomMode {
     // Results in default zoom behavior, i.e. zoom changes are handled
     // automatically and on a per-origin basis, meaning that other tabs
     // navigated to the same origin will also zoom.
-    kDefault,
+    ZOOM_MODE_DEFAULT,
     // Results in zoom changes being handled automatically, but on a per-tab
     // basis. Tabs in this zoom mode will not be affected by zoom changes in
     // other tabs, and vice versa.
-    kIsolated,
+    ZOOM_MODE_ISOLATED,
     // Overrides the automatic handling of zoom changes. The |onZoomChange|
     // event will still be dispatched, but the page will not actually be zoomed.
     // These zoom changes can be handled manually by listening for the
     // |onZoomChange| event. Zooming in this mode is also on a per-tab basis.
-    kManual,
+    ZOOM_MODE_MANUAL,
     // Disables all zooming in this tab. The tab will revert to the default
     // zoom level, and all attempted zoom changes will be ignored.
-    kDisabled,
+    ZOOM_MODE_DISABLED,
+  };
+
+  struct ZoomChangedEventData {
+    ZoomChangedEventData(content::WebContents* web_contents,
+                         double old_zoom_level,
+                         double new_zoom_level,
+                         bool temporary,
+                         WebContentsZoomController::ZoomMode zoom_mode)
+        : web_contents(web_contents),
+          old_zoom_level(old_zoom_level),
+          new_zoom_level(new_zoom_level),
+          temporary(temporary),
+          zoom_mode(zoom_mode) {}
+    raw_ptr<content::WebContents> web_contents;
+    double old_zoom_level;
+    double new_zoom_level;
+    bool temporary;
+    WebContentsZoomController::ZoomMode zoom_mode;
   };
 
   explicit WebContentsZoomController(content::WebContents* web_contents);
@@ -57,25 +69,43 @@ class WebContentsZoomController
   WebContentsZoomController& operator=(const WebContentsZoomController&) =
       delete;
 
-  void AddObserver(Observer* observer);
-  void RemoveObserver(Observer* observer);
+  void AddObserver(WebContentsZoomObserver* observer);
+  void RemoveObserver(WebContentsZoomObserver* observer);
 
   void SetEmbedderZoomController(WebContentsZoomController* controller);
 
-  // Methods for managing zoom levels.
-  void SetZoomLevel(double level);
-  double GetZoomLevel();
+  // Gets the current zoom level by querying HostZoomMap (if not in manual zoom
+  // mode) or from the ZoomController local value otherwise.
+  double GetZoomLevel() const;
+
+  // Sets the zoom level through HostZoomMap.
+  // Returns true on success.
+  bool SetZoomLevel(double zoom_level);
+
   void SetDefaultZoomFactor(double factor);
-  double GetDefaultZoomFactor();
+  double default_zoom_factor() { return default_zoom_factor_; }
+
+  // Sets the temporary zoom level through HostZoomMap.
   void SetTemporaryZoomLevel(double level);
   bool UsesTemporaryZoomLevel();
 
   // Sets the zoom mode, which defines zoom behavior (see enum ZoomMode).
   void SetZoomMode(ZoomMode zoom_mode);
 
-  void ResetZoomModeOnNavigationIfNeeded(const GURL& url);
-
   ZoomMode zoom_mode() const { return zoom_mode_; }
+
+  // Lightweight setter for the zoom mode without going through SetZoomMode(),
+  // which manipulates HostZoomMap and requires an initialized RenderFrameHost.
+  // Used during initialization before the first navigation commits.
+  void set_zoom_mode(ZoomMode mode) { zoom_mode_ = mode; }
+
+  // Lightweight setter for the tracked zoom level without going through
+  // HostZoomMap. Used during initialization when RFH is not yet available.
+  void set_zoom_level(double level) { zoom_level_ = level; }
+
+  // When true, the zoom mode persists across cross-document navigations
+  // instead of resetting to ZOOM_MODE_DEFAULT.
+  void SetPersistZoomMode(bool persist) { persist_zoom_mode_ = persist; }
 
   // Convenience method to get default zoom level. Implemented here for
   // inlining.
@@ -84,9 +114,16 @@ class WebContentsZoomController
         ->GetDefaultZoomLevel();
   }
 
+  // Applies zoom updates for a navigation. Safe to call before the zoom
+  // controller's own DidFinishNavigation fires — a guard prevents
+  // double-execution so WebContents can call this before emitting
+  // did-navigate to ensure JS handlers see the correct zoom values.
+  void ProcessNavigationZoom(content::NavigationHandle* navigation_handle);
+
  protected:
-  // content::WebContentsObserver:
-  void DidFinishNavigation(content::NavigationHandle* handle) override;
+  // content::WebContentsObserver overrides:
+  void DidFinishNavigation(
+      content::NavigationHandle* navigation_handle) override;
   void WebContentsDestroyed() override;
   void RenderFrameHostChanged(content::RenderFrameHost* old_host,
                               content::RenderFrameHost* new_host) override;
@@ -94,28 +131,47 @@ class WebContentsZoomController
  private:
   friend class content::WebContentsUserData<WebContentsZoomController>;
 
-  // Called after a navigation has committed to set default zoom factor.
+  void ResetZoomModeOnNavigationIfNeeded(const GURL& url);
   void SetZoomFactorOnNavigationIfNeeded(const GURL& url);
+  void OnZoomLevelChanged(const content::HostZoomMap::ZoomLevelChange& change);
+
+  // Updates the zoom icon and zoom percentage based on current values and
+  // notifies the observer if changes have occurred. |host| may be empty,
+  // meaning the change should apply to ~all sites. If it is not empty, the
+  // change only affects sites with the given host.
+  void UpdateState(const std::string& host);
 
   // The current zoom mode.
-  ZoomMode zoom_mode_ = ZoomMode::kDefault;
+  ZoomMode zoom_mode_ = ZOOM_MODE_DEFAULT;
 
-  // Current zoom level.
-  double zoom_level_ = 1.0;
+  // Whether to persist zoom mode across navigations.
+  bool persist_zoom_mode_ = false;
 
-  // kZoomFactor.
-  double default_zoom_factor_ = 0;
+  // ID of the last navigation whose zoom was already processed.
+  // Prevents ProcessNavigationZoom from running twice for the same
+  // navigation regardless of observer call order.
+  int64_t last_processed_navigation_id_ = -1;
 
-  const double kPageZoomEpsilon = 0.001;
+  // The current zoom level.
+  double zoom_level_;
+
+  // The current default zoom factor.
+  double default_zoom_factor_;
 
   int old_process_id_ = -1;
   int old_view_id_ = -1;
 
-  WebContentsZoomController* embedder_zoom_controller_ = nullptr;
+  std::optional<ZoomChangedEventData> event_data_;
 
-  base::ObserverList<Observer> observers_;
+  raw_ptr<WebContentsZoomController> embedder_zoom_controller_ = nullptr;
 
-  content::HostZoomMap* host_zoom_map_;
+  // Observer receiving notifications on state changes.
+  base::ObserverList<WebContentsZoomObserver> observers_;
+
+  // Keep track of the HostZoomMap we're currently subscribed to.
+  raw_ptr<content::HostZoomMap> host_zoom_map_;
+
+  base::CallbackListSubscription zoom_subscription_;
 
   WEB_CONTENTS_USER_DATA_KEY_DECL();
 };

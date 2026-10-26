@@ -4,10 +4,10 @@ chrome_100_percent.pak
 chrome_200_percent.pak
 d3dcompiler_47.dll
 electron.exe
+electron_wer.dll
 ffmpeg.dll
 icudtl.dat
-libEGL.dll
-libGLESv2.dll
+dxcompiler.dll
 locales/af.pak
 locales/am.pak
 locales/ar.pak

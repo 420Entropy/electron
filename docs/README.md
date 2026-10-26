@@ -21,7 +21,6 @@ an issue:
 ### Getting started
 
 * [Introduction](tutorial/introduction.md)
-* [Quick Start](tutorial/quick-start.md)
 * [Process Model](tutorial/process-model.md)
 
 ### Learning the basics
@@ -37,15 +36,11 @@ an issue:
   * [Offline/Online Detection](tutorial/online-offline-events.md)
   * [Represented File for macOS BrowserWindows](tutorial/represented-file.md)
   * [Native File Drag & Drop](tutorial/native-file-drag-drop.md)
+  * [Navigation History](tutorial/navigation-history.md)
+  * [Window State Persistence](tutorial/window-state-persistence.md)
   * [Offscreen Rendering](tutorial/offscreen-rendering.md)
   * [Dark Mode](tutorial/dark-mode.md)
   * [Web embeds in Electron](tutorial/web-embeds.md)
-* [Boilerplates and CLIs](tutorial/boilerplates-and-clis.md)
-  * [Boilerplate vs CLI](tutorial/boilerplates-and-clis.md#boilerplate-vs-cli)
-  * [Electron Forge](tutorial/boilerplates-and-clis.md#electron-forge)
-  * [electron-builder](tutorial/boilerplates-and-clis.md#electron-builder)
-  * [electron-react-boilerplate](tutorial/boilerplates-and-clis.md#electron-react-boilerplate)
-  * [Other Tools and Boilerplates](tutorial/boilerplates-and-clis.md#other-tools-and-boilerplates)
 
 ### Advanced steps
 
@@ -62,7 +57,9 @@ an issue:
   * [Testing on Headless CI Systems (Travis, Jenkins)](tutorial/testing-on-headless-ci.md)
   * [DevTools Extension](tutorial/devtools-extension.md)
   * [Automated Testing](tutorial/automated-testing.md)
+  * [Testing Widevine CDM](tutorial/testing-widevine-cdm.md)
   * [REPL](tutorial/repl.md)
+  * [Crash Reporting](tutorial/crash-reporting.md)
 * [Distribution](tutorial/application-distribution.md)
   * [Code Signing](tutorial/code-signing.md)
   * [Mac App Store](tutorial/mac-app-store-submission-guide.md)
@@ -96,9 +93,9 @@ These individual tutorials expand on topics discussed in the guide above.
 * [Chrome Extensions Support](api/extensions.md)
 * [Breaking API Changes](breaking-changes.md)
 
-### Custom DOM Elements:
+### Custom Web Features:
 
-* [`File` Object](api/file-object.md)
+* [`-electron-corner-smoothing` CSS Rule](api/corner-smoothing-css.md)
 * [`<webview>` Tag](api/webview-tag.md)
 * [`window.open` Function](api/window-open.md)
 
@@ -106,13 +103,14 @@ These individual tutorials expand on topics discussed in the guide above.
 
 * [app](api/app.md)
 * [autoUpdater](api/auto-updater.md)
-* [BrowserView](api/browser-view.md)
+* [BaseWindow](api/base-window.md)
 * [BrowserWindow](api/browser-window.md)
 * [contentTracing](api/content-tracing.md)
 * [desktopCapturer](api/desktop-capturer.md)
 * [dialog](api/dialog.md)
 * [globalShortcut](api/global-shortcut.md)
 * [inAppPurchase](api/in-app-purchase.md)
+* [ImageView](api/image-view.md)
 * [ipcMain](api/ipc-main.md)
 * [Menu](api/menu.md)
 * [MenuItem](api/menu-item.md)
@@ -128,14 +126,17 @@ These individual tutorials expand on topics discussed in the guide above.
 * [pushNotifications](api/push-notifications.md)
 * [safeStorage](api/safe-storage.md)
 * [screen](api/screen.md)
+* [ServiceWorkerMain](api/service-worker-main.md)
 * [session](api/session.md)
 * [ShareMenu](api/share-menu.md)
 * [systemPreferences](api/system-preferences.md)
 * [TouchBar](api/touch-bar.md)
 * [Tray](api/tray.md)
 * [utilityProcess](api/utility-process.md)
+* [View](api/view.md)
 * [webContents](api/web-contents.md)
 * [webFrameMain](api/web-frame-main.md)
+* [WebContentsView](api/web-contents-view.md)
 
 ### Modules for the Renderer Process (Web Page):
 

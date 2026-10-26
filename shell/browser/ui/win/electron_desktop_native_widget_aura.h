@@ -5,7 +5,6 @@
 #ifndef ELECTRON_SHELL_BROWSER_UI_WIN_ELECTRON_DESKTOP_NATIVE_WIDGET_AURA_H_
 #define ELECTRON_SHELL_BROWSER_UI_WIN_ELECTRON_DESKTOP_NATIVE_WIDGET_AURA_H_
 
-#include "shell/browser/native_window_views.h"
 #include "ui/views/widget/desktop_aura/desktop_native_widget_aura.h"
 
 namespace views {
@@ -14,10 +13,13 @@ class DesktopWindowTreeHost;
 
 namespace electron {
 
+class NativeWindowViews;
+
 class ElectronDesktopNativeWidgetAura : public views::DesktopNativeWidgetAura {
  public:
   explicit ElectronDesktopNativeWidgetAura(
-      NativeWindowViews* native_window_view);
+      NativeWindowViews* native_window_view,
+      views::Widget* widget);
 
   // disable copy
   ElectronDesktopNativeWidgetAura(const ElectronDesktopNativeWidgetAura&) =
@@ -27,6 +29,9 @@ class ElectronDesktopNativeWidgetAura : public views::DesktopNativeWidgetAura {
 
   // views::DesktopNativeWidgetAura:
   void InitNativeWidget(views::Widget::InitParams params) override;
+#if BUILDFLAG(IS_WIN)
+  void OnSizeConstraintsChanged() override;
+#endif
 
   // internal::NativeWidgetPrivate:
   void Activate() override;
@@ -36,10 +41,11 @@ class ElectronDesktopNativeWidgetAura : public views::DesktopNativeWidgetAura {
                          aura::Window* gained_active,
                          aura::Window* lost_active) override;
 
-  NativeWindowViews* native_window_view_;
+  const raw_ptr<NativeWindowViews> native_window_view_;
 
   // Owned by DesktopNativeWidgetAura.
-  views::DesktopWindowTreeHost* desktop_window_tree_host_;
+  const raw_ptr<views::DesktopWindowTreeHost, DanglingUntriaged>
+      desktop_window_tree_host_;
 };
 
 }  // namespace electron

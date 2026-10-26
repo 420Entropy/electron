@@ -1,0 +1,91 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Michal Pichlinski <michal.pichlinski@openfin.co>
+Date: Thu, 15 Jun 2023 23:04:48 +0200
+Subject: allow disabling throttling in the `viz::DisplayScheduler` per
+ `ui::Compositor`
+
+In Chromium when the `viz::DisplayScheduler` is invisible it throttles
+its work by dropping frame draws and swaps.
+
+This patch allows disbling this throttling by preventing transition to
+invisible state of the `viz::DisplayScheduler` owned
+by the `ui::Compositor`.
+
+diff --git a/ui/compositor/compositor.cc b/ui/compositor/compositor.cc
+index 2f07d24490c95a75dba04045b3b6b3f6039d6df5..d1b73bd43828302052b3aacfeb1730929dca7d96 100644
+--- a/ui/compositor/compositor.cc
++++ b/ui/compositor/compositor.cc
+@@ -357,9 +357,11 @@ void Compositor::SetLayerTreeFrameSink(
+   // to match the Compositor's.
+   if (display_private_) {
+     display_private_->Resize(size());
++    // Invisible display is throttling itself.
+     display_private_->SetDisplayVisible(
+-        host_->IsVisible() ? viz::mojom::DisplayVisibility::kVisible
+-                           : viz::mojom::DisplayVisibility::kInvisible);
++        host_->IsVisible() || !background_throttling_
++            ? viz::mojom::DisplayVisibility::kVisible
++            : viz::mojom::DisplayVisibility::kInvisible);
+     display_private_->SetDisplayColorSpaces(display_color_spaces_);
+     display_private_->SetDisplayColorMatrix(
+         gfx::SkM44ToTransform(display_color_matrix_));
+@@ -599,9 +601,11 @@ void Compositor::SetVisible(bool visible) {
+   // updated then. We need to call this even if the visibility hasn't changed,
+   // for the same reason.
+   if (display_private_) {
++    // Invisible display is throttling itself.
+     display_private_->SetDisplayVisible(
+-        visible ? viz::mojom::DisplayVisibility::kVisible
+-                : viz::mojom::DisplayVisibility::kInvisible);
++        visible || !background_throttling_
++            ? viz::mojom::DisplayVisibility::kVisible
++            : viz::mojom::DisplayVisibility::kInvisible);
+   }
+ 
+   if (changed) {
+@@ -1070,6 +1074,17 @@ void Compositor::MaybeUpdateObserveBeginFrame() {
+       host_begin_frame_observer_->GetBoundRemote());
+ }
+ 
++void Compositor::SetBackgroundThrottling(bool background_throttling_enabled) {
++  background_throttling_ = background_throttling_enabled;
++  if (display_private_) {
++    // Invisible display is throttling itself.
++    display_private_->SetDisplayVisible(
++        host_->IsVisible() || !background_throttling_
++            ? viz::mojom::DisplayVisibility::kVisible
++            : viz::mojom::DisplayVisibility::kInvisible);
++  }
++}
++
+ #if BUILDFLAG(IS_CHROMEOS)
+ void Compositor::SetSeamlessRefreshRates(
+     const std::vector<float>& seamless_refresh_rates) {
+diff --git a/ui/compositor/compositor.h b/ui/compositor/compositor.h
+index c9409ec32097cac6ac7ff25706123f685d04f13c..39008279db0b65121c57c185044bdd9de1bc4acb 100644
+--- a/ui/compositor/compositor.h
++++ b/ui/compositor/compositor.h
+@@ -496,6 +496,10 @@ class COMPOSITOR_EXPORT Compositor
+ 
+   const cc::LayerTreeSettings& GetLayerTreeSettings() const;
+ 
++  // Sets |background_throttling_| responsible for suspending drawing
++  // and switching frames.
++  void SetBackgroundThrottling(bool background_throttling_enabled);
++
+   size_t saved_events_metrics_count_for_testing() const {
+     return host_->saved_events_metrics_count_for_testing();
+   }
+@@ -709,6 +713,12 @@ class COMPOSITOR_EXPORT Compositor
+   // See go/report-ux-metrics-at-painting for details.
+   bool animation_started_ = false;
+ 
++  // Background throttling is a default Chromium behaviour. It occurs
++  // when the |display_private_| is not visible by prevent drawing and swapping
++  // frames. When it is disabled we are keeping |display_private_| always
++  // visible in order to keep generating frames.
++  bool background_throttling_ = true;
++
+   TrackerId next_compositor_metrics_tracker_id_ = 1u;
+   struct TrackerState {
+     TrackerState();

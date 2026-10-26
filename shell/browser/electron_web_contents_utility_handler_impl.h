@@ -5,14 +5,11 @@
 #ifndef ELECTRON_SHELL_BROWSER_ELECTRON_WEB_CONTENTS_UTILITY_HANDLER_IMPL_H_
 #define ELECTRON_SHELL_BROWSER_ELECTRON_WEB_CONTENTS_UTILITY_HANDLER_IMPL_H_
 
-#include <string>
-#include <vector>
-
 #include "base/memory/weak_ptr.h"
+#include "content/public/browser/global_routing_id.h"
 #include "content/public/browser/web_contents_observer.h"
-#include "electron/shell/common/api/api.mojom.h"
+#include "electron/shell/common/web_contents_utility.mojom.h"
 #include "mojo/public/cpp/bindings/associated_receiver.h"
-#include "shell/browser/api/electron_api_web_contents.h"
 
 namespace content {
 class RenderFrameHost;
@@ -21,7 +18,7 @@ class RenderFrameHost;
 namespace electron {
 class ElectronWebContentsUtilityHandlerImpl
     : public mojom::ElectronWebContentsUtility,
-      public content::WebContentsObserver {
+      private content::WebContentsObserver {
  public:
   explicit ElectronWebContentsUtilityHandlerImpl(
       content::RenderFrameHost* render_frame_host,
@@ -41,10 +38,22 @@ class ElectronWebContentsUtilityHandlerImpl
 
   // mojom::ElectronWebContentsUtility:
   void OnFirstNonEmptyLayout() override;
-  void UpdateDraggableRegions(
-      std::vector<mojom::DraggableRegionPtr> regions) override;
   void SetTemporaryZoomLevel(double level) override;
-  void DoGetZoomLevel(DoGetZoomLevelCallback callback) override;
+  void CloseWindow() override;
+  void NotifyGuestFocusChange(bool focus) override;
+  void GetFrameRoutingIdDeprecated(
+      const blink::LocalFrameToken& frame_token,
+      GetFrameRoutingIdDeprecatedCallback callback) override;
+  void GetFrameTokenDeprecated(
+      int32_t routing_id,
+      GetFrameTokenDeprecatedCallback callback) override;
+  void CanAccessClipboardDeprecated(
+      mojom::PermissionName name,
+      const blink::LocalFrameToken& frame_token,
+      CanAccessClipboardDeprecatedCallback callback) override;
+  void SetPreloadCodeCache(const std::string& id,
+                           const std::vector<uint8_t>& source_hash,
+                           mojo_base::BigBuffer cache) override;
 
   base::WeakPtr<ElectronWebContentsUtilityHandlerImpl> GetWeakPtr() {
     return weak_factory_.GetWeakPtr();
@@ -54,14 +63,13 @@ class ElectronWebContentsUtilityHandlerImpl
   ~ElectronWebContentsUtilityHandlerImpl() override;
 
   // content::WebContentsObserver:
-  void WebContentsDestroyed() override;
+  void RenderFrameDeleted(content::RenderFrameHost* render_frame_host) override;
 
   void OnConnectionError();
 
   content::RenderFrameHost* GetRenderFrameHost();
 
-  const int render_process_id_;
-  const int render_frame_id_;
+  content::GlobalRenderFrameHostToken render_frame_host_token_;
 
   mojo::AssociatedReceiver<mojom::ElectronWebContentsUtility> receiver_{this};
 

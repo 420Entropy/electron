@@ -4,23 +4,38 @@
 
 #include "shell/browser/ui/win/electron_desktop_window_tree_host_win.h"
 
+#include "base/check.h"
 #include "base/win/windows_version.h"
-#include "electron/buildflags/buildflags.h"
+#include "shell/browser/api/electron_api_web_contents.h"
+#include "shell/browser/native_window_views.h"
 #include "shell/browser/ui/views/win_frame_view.h"
 #include "shell/browser/win/dark_mode.h"
-#include "ui/base/win/hwnd_metrics.h"
-#include "ui/base/win/shell.h"
+#include "ui/events/event.h"
 
 namespace electron {
 
 ElectronDesktopWindowTreeHostWin::ElectronDesktopWindowTreeHostWin(
     NativeWindowViews* native_window_view,
+    views::Widget* widget,
     views::DesktopNativeWidgetAura* desktop_native_widget_aura)
-    : views::DesktopWindowTreeHostWin(native_window_view->widget(),
-                                      desktop_native_widget_aura),
-      native_window_view_(native_window_view) {}
+    : views::DesktopWindowTreeHostWin{widget, desktop_native_widget_aura},
+      native_window_view_{native_window_view} {}
 
 ElectronDesktopWindowTreeHostWin::~ElectronDesktopWindowTreeHostWin() = default;
+
+bool ElectronDesktopWindowTreeHostWin::ShouldUpdateWindowTransparency() const {
+  // If transparency is updated for an opaque window before widget init is
+  // completed, the window flickers white before the background color is applied
+  // and we don't want that. We do, however, want translucent windows to be
+  // properly transparent, so ensure it gets updated in that case.
+  if (!widget_init_done_ && !native_window_view_->IsTranslucent())
+    return false;
+  return views::DesktopWindowTreeHostWin::ShouldUpdateWindowTransparency();
+}
+
+void ElectronDesktopWindowTreeHostWin::OnWidgetInitDone() {
+  widget_init_done_ = true;
+}
 
 bool ElectronDesktopWindowTreeHostWin::PreHandleMSG(UINT message,
                                                     WPARAM w_param,
@@ -38,18 +53,27 @@ bool ElectronDesktopWindowTreeHostWin::PreHandleMSG(UINT message,
 }
 
 bool ElectronDesktopWindowTreeHostWin::ShouldPaintAsActive() const {
-  // Tell Chromium to use system default behavior when rendering inactive
-  // titlebar, otherwise it would render inactive titlebar as active under
-  // some cases.
-  // See also https://github.com/electron/electron/issues/24647.
-  return false;
+  if (force_should_paint_as_active_.has_value()) {
+    return force_should_paint_as_active_.value();
+  }
+
+  return views::DesktopWindowTreeHostWin::ShouldPaintAsActive();
 }
 
 bool ElectronDesktopWindowTreeHostWin::GetDwmFrameInsetsInPixels(
     gfx::Insets* insets) const {
   // Set DWMFrameInsets to prevent maximized frameless window from bleeding
   // into other monitors.
+
   if (IsMaximized() && !native_window_view_->has_frame()) {
+    // We avoid doing this when the window is translucent (e.g. using
+    // backgroundMaterial effects), because setting zero insets can interfere
+    // with DWM rendering of blur or acrylic, potentially causing visual
+    // glitches.
+    const std::string& bg_material = native_window_view_->background_material();
+    if (!bg_material.empty() && bg_material != "none") {
+      return false;
+    }
     // This would be equivalent to calling:
     // DwmExtendFrameIntoClientArea({0, 0, 0, 0});
     //
@@ -65,24 +89,49 @@ bool ElectronDesktopWindowTreeHostWin::GetDwmFrameInsetsInPixels(
   return false;
 }
 
+bool ElectronDesktopWindowTreeHostWin::WidgetSizeIsClientSize() const {
+  // For both framed and frameless windows with resize insets (thick frames),
+  // this should return true so that the aura layer is sized to the client area
+  // rather than the full HWND, and so insets are accounted for when handling
+  // size/aspect ratio constraints.
+  if (native_window_view_->has_thick_frame())
+    return true;
+  return views::DesktopWindowTreeHostWin::WidgetSizeIsClientSize();
+}
+
 bool ElectronDesktopWindowTreeHostWin::GetClientAreaInsets(
     gfx::Insets* insets,
-    HMONITOR monitor) const {
-  // Windows by default extends the maximized window slightly larger than
-  // current workspace, for frameless window since the standard frame has been
-  // removed, the client area would then be drew outside current workspace.
-  //
-  // Indenting the client area can fix this behavior.
-  if (IsMaximized() && !native_window_view_->has_frame()) {
-    // The insets would be eventually passed to WM_NCCALCSIZE, which takes
-    // the metrics under the DPI of _main_ monitor instead of current monitor.
-    //
-    // Please make sure you tested maximized frameless window under multiple
-    // monitors with different DPIs before changing this code.
-    const int thickness = ::GetSystemMetrics(SM_CXSIZEFRAME) +
-                          ::GetSystemMetrics(SM_CXPADDEDBORDER);
-    *insets = gfx::Insets::TLBR(thickness, thickness, thickness, thickness);
-    return true;
+    int frame_thickness) const {
+  if (native_window_view_->IsFullscreen())
+    return false;
+
+  if (!native_window_view_->has_frame()) {
+    if (IsMaximized()) {
+      // Windows by default extends the maximized window slightly larger than
+      // current workspace, for frameless window since the standard frame has
+      // been removed, the client area would then be drew outside current
+      // workspace.
+      //
+      // Indenting the client area can fix this behavior.
+      //
+      // The insets would be eventually passed to WM_NCCALCSIZE, which takes
+      // the metrics under the DPI of _main_ monitor instead of current monitor.
+      //
+      // Please make sure you tested maximized frameless window under multiple
+      // monitors with different DPIs before changing this code.
+      const int thickness = ::GetSystemMetrics(SM_CXSIZEFRAME) +
+                            ::GetSystemMetrics(SM_CXPADDEDBORDER);
+      *insets = gfx::Insets::TLBR(thickness, thickness, thickness, thickness);
+      return true;
+    } else if (native_window_view_->has_thick_frame()) {
+      // Grow the insets to support resize targets past the frame edge like in
+      // windows with standard frames. Non-resizable windows still get input
+      // insets for stable bounds and so they can be dragged from outer edges,
+      // also like in windows with standard frames.
+      *insets = gfx::Insets::TLBR(0, frame_thickness, frame_thickness,
+                                  frame_thickness);
+      return true;
+    }
   }
   return false;
 }
@@ -99,7 +148,7 @@ bool ElectronDesktopWindowTreeHostWin::HandleMouseEventForCaption(
   // Chromium lets the OS handle caption buttons for FrameMode::SYSTEM_DRAWN but
   // again this does not generate the SC_MINIMIZE, SC_MAXIMIZE, SC_RESTORE
   // commands when Non-client mouse events are generated for HTCLOSE,
-  // HTMINBUTTON, HTMAXBUTTON. To workaround this issue, wit this delegate we
+  // HTMINBUTTON, HTMAXBUTTON. To workaround this issue, with this delegate we
   // let chromium handle the mouse events via
   // HWNDMessageHandler::HandleMouseInputForCaption instead of the OS and this
   // will generate the necessary system commands to perform caption button
@@ -108,9 +157,132 @@ bool ElectronDesktopWindowTreeHostWin::HandleMouseEventForCaption(
   return native_window_view_->IsWindowControlsOverlayEnabled();
 }
 
+bool ElectronDesktopWindowTreeHostWin::HandleMouseEvent(ui::MouseEvent* event) {
+  if (event->is_system_menu() && !native_window_view_->has_frame()) {
+    bool prevent_default = false;
+    native_window_view_->NotifyWindowSystemContextMenu(event->x(), event->y(),
+                                                       &prevent_default);
+    // If the user prevents default behavior, emit contextmenu event to
+    // allow bringing up the custom menu.
+    if (prevent_default) {
+      electron::api::WebContents::SetDisableDraggableRegions(true);
+      views::DesktopWindowTreeHostWin::HandleMouseEvent(event);
+      electron::api::WebContents::SetDisableDraggableRegions(false);
+    }
+    return prevent_default;
+  }
+
+  return views::DesktopWindowTreeHostWin::HandleMouseEvent(event);
+}
+
+void ElectronDesktopWindowTreeHostWin::DispatchSyntheticMouseMessage(
+    UINT message,
+    const gfx::Point& client_point) {
+  DCHECK(message == WM_MOUSEMOVE || message == WM_MOUSELEAVE);
+
+  // The aura tree only exists once the widget has been initialized; this is the
+  // same precondition |HandleTouchEvent| checks before calling SendEventToSink.
+  views::Widget* widget = GetWidget();
+  if (!widget || !widget->GetNativeView())
+    return;
+
+  HWND hwnd = GetAcceleratedWidget();
+  if (!hwnd)
+    return;
+
+  // Build the message the way Win32 would deliver it: |lParam| carries the
+  // position relative to the client area, |pt| the position on the desktop.
+  // |ui::MouseEvent| reads its |native_event()| back out of the message (for
+  // example Windows-only filtering in |CanRendererHandleEvent|), so the
+  // message must be a well formed one.
+  POINT desktop_point = client_point.ToPOINT();
+  ::ClientToScreen(hwnd, &desktop_point);
+
+  CHROME_MSG msg = {};
+  msg.hwnd = hwnd;
+  msg.message = message;
+  msg.wParam = 0;  // No virtual keys pressed for our purposes.
+  msg.lParam = MAKELPARAM(client_point.x(), client_point.y());
+  msg.time = ::GetTickCount();
+  msg.pt.x = desktop_point.x;
+  msg.pt.y = desktop_point.y;
+
+  // WindowEventDispatcher::OnEventFromSource() expects locations in raw
+  // (physical) pixels, which is exactly what the low level mouse hook reports,
+  // so no DIP conversion is needed here.
+  ui::MouseEvent event(msg);
+
+  // This is the same entry point a real WM_MOUSEMOVE takes, which means hit
+  // testing, draggable regions, capture and input event routing all behave as
+  // they would for an OS generated event.
+  SendEventToSink(&event);
+}
+
+bool ElectronDesktopWindowTreeHostWin::HandleIMEMessage(UINT message,
+                                                        WPARAM w_param,
+                                                        LPARAM l_param,
+                                                        LRESULT* result) {
+  if ((message == WM_SYSCHAR) && (w_param == VK_SPACE)) {
+    if (native_window_view_->widget() &&
+        native_window_view_->widget()->non_client_view()) {
+      const auto* frame =
+          native_window_view_->widget()->non_client_view()->frame_view();
+      auto location = frame->GetSystemMenuScreenPixelLocation();
+
+      bool prevent_default = false;
+      native_window_view_->NotifyWindowSystemContextMenu(
+          location.x(), location.y(), &prevent_default);
+
+      return prevent_default ||
+             views::DesktopWindowTreeHostWin::HandleIMEMessage(message, w_param,
+                                                               l_param, result);
+    }
+  }
+
+  return views::DesktopWindowTreeHostWin::HandleIMEMessage(message, w_param,
+                                                           l_param, result);
+}
+
+// Refs https://chromium-review.googlesource.com/c/chromium/src/+/7095963
+// Chromium's fullscreen handler conflicts with ours and results in incorrect
+// restoration.
+void ElectronDesktopWindowTreeHostWin::Restore() {
+  ::SendMessage(GetAcceleratedWidget(), WM_SYSCOMMAND,
+                static_cast<WPARAM>(SC_RESTORE), 0);
+}
+
 void ElectronDesktopWindowTreeHostWin::OnNativeThemeUpdated(
     ui::NativeTheme* observed_theme) {
-  win::SetDarkModeForWindow(GetAcceleratedWidget());
+  HWND hWnd = GetAcceleratedWidget();
+  win::SetDarkModeForWindow(hWnd);
+
+  auto* os_info = base::win::OSInfo::GetInstance();
+  auto const version = os_info->version();
+
+  // Toggle the nonclient area active state to force a redraw (Win10 workaround)
+  if (version < base::win::Version::WIN11) {
+    // When handling WM_NCACTIVATE messages, Chromium logical ORs the wParam and
+    // the value of ShouldPaintAsActive() - so if the latter is true, it's not
+    // possible to toggle the title bar to inactive. Force it to false while we
+    // send the message so that the wParam value will always take effect. Refs
+    // https://source.chromium.org/chromium/chromium/src/+/main:ui/views/win/hwnd_message_handler.cc;l=2332-2381;drc=e6361d070be0adc585ebbff89fec76e2df4ad768
+    force_should_paint_as_active_ = false;
+    ::SendMessage(hWnd, WM_NCACTIVATE, hWnd != ::GetActiveWindow(), 0);
+
+    // Clear forced value and tell Chromium the value changed to get a repaint
+    force_should_paint_as_active_.reset();
+    PaintAsActiveChanged();
+  }
+}
+
+bool ElectronDesktopWindowTreeHostWin::ShouldWindowContentsBeTransparent()
+    const {
+  // Window should be marked as opaque if no transparency setting has been
+  // set, otherwise animations or videos rendered in the window will trigger a
+  // DirectComposition redraw for every frame.
+  // https://github.com/electron/electron/pull/39895
+  return native_window_view_->GetOpacity() < 1.0 ||
+         native_window_view_->IsTranslucent();
 }
 
 }  // namespace electron

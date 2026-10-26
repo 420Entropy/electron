@@ -9,10 +9,6 @@
 #include <string>
 #include <utility>
 
-#include "base/functional/bind.h"
-#include "base/strings/strcat.h"
-#include "base/strings/stringprintf.h"
-#include "base/strings/utf_string_conversions.h"
 #include "chrome/common/extensions/extension_metrics.h"
 #include "chrome/common/extensions/manifest_handlers/app_launch_info.h"
 #include "chrome/common/webui_url_constants.h"
@@ -26,8 +22,7 @@
 #include "extensions/browser/extension_system.h"
 #include "extensions/common/api/management.h"
 #include "extensions/common/extension.h"
-#include "services/data_decoder/public/cpp/data_decoder.h"
-#include "third_party/blink/public/mojom/manifest/display_mode.mojom.h"
+#include "third_party/abseil-cpp/absl/strings/str_format.h"
 
 namespace {
 class ManagementSetEnabledFunctionInstallPromptDelegate
@@ -47,10 +42,6 @@ class ManagementSetEnabledFunctionInstallPromptDelegate
       const ManagementSetEnabledFunctionInstallPromptDelegate&) = delete;
   ManagementSetEnabledFunctionInstallPromptDelegate& operator=(
       const ManagementSetEnabledFunctionInstallPromptDelegate&) = delete;
-
- private:
-  base::WeakPtrFactory<ManagementSetEnabledFunctionInstallPromptDelegate>
-      weak_factory_{this};
 };
 
 class ManagementUninstallFunctionUninstallDialogDelegate
@@ -103,18 +94,6 @@ extensions::LaunchType ElectronManagementAPIDelegate::GetLaunchType(
   return extensions::LAUNCH_TYPE_DEFAULT;
 }
 
-void ElectronManagementAPIDelegate::
-    GetPermissionWarningsByManifestFunctionDelegate(
-        extensions::ManagementGetPermissionWarningsByManifestFunction* function,
-        const std::string& manifest_str) const {
-  data_decoder::DataDecoder::ParseJsonIsolated(
-      manifest_str,
-      base::BindOnce(
-          &extensions::ManagementGetPermissionWarningsByManifestFunction::
-              OnParse,
-          function));
-}
-
 std::unique_ptr<extensions::InstallPromptDelegate>
 ElectronManagementAPIDelegate::SetEnabledFunctionDelegate(
     content::WebContents* web_contents,
@@ -164,26 +143,9 @@ void ElectronManagementAPIDelegate::InstallOrLaunchReplacementWebApp(
   // TODO(sentialx)
 }
 
-bool ElectronManagementAPIDelegate::CanContextInstallAndroidApps(
-    content::BrowserContext* context) const {
-  return false;
-}
-
-void ElectronManagementAPIDelegate::CheckAndroidAppInstallStatus(
-    const std::string& package_name,
-    AndroidAppInstallStatusCallback callback) const {
-  std::move(callback).Run(false);
-}
-
-void ElectronManagementAPIDelegate::InstallReplacementAndroidApp(
-    const std::string& package_name,
-    InstallAndroidAppCallback callback) const {
-  std::move(callback).Run(false);
-}
-
 void ElectronManagementAPIDelegate::EnableExtension(
     content::BrowserContext* context,
-    const std::string& extension_id) const {
+    const extensions::ExtensionId& extension_id) const {
   // const extensions::Extension* extension =
   //     extensions::ExtensionRegistry::Get(context)->GetExtensionById(
   //         extension_id, extensions::ExtensionRegistry::EVERYTHING);
@@ -200,7 +162,7 @@ void ElectronManagementAPIDelegate::EnableExtension(
 void ElectronManagementAPIDelegate::DisableExtension(
     content::BrowserContext* context,
     const extensions::Extension* source_extension,
-    const std::string& extension_id,
+    const extensions::ExtensionId& extension_id,
     extensions::disable_reason::DisableReason disable_reason) const {
   // TODO(sentialx): we don't have ExtensionService
   // extensions::ExtensionSystem::Get(context)
@@ -211,7 +173,7 @@ void ElectronManagementAPIDelegate::DisableExtension(
 
 bool ElectronManagementAPIDelegate::UninstallExtension(
     content::BrowserContext* context,
-    const std::string& transient_extension_id,
+    const extensions::ExtensionId& transient_extension_id,
     extensions::UninstallReason reason,
     std::u16string* error) const {
   // TODO(sentialx): we don't have ExtensionService
@@ -223,7 +185,7 @@ bool ElectronManagementAPIDelegate::UninstallExtension(
 
 void ElectronManagementAPIDelegate::SetLaunchType(
     content::BrowserContext* context,
-    const std::string& extension_id,
+    const extensions::ExtensionId& extension_id,
     extensions::LaunchType launch_type) const {
   // TODO(sentialx)
   // extensions::SetLaunchType(context, extension_id, launch_type);
@@ -232,12 +194,11 @@ void ElectronManagementAPIDelegate::SetLaunchType(
 GURL ElectronManagementAPIDelegate::GetIconURL(
     const extensions::Extension* extension,
     int icon_size,
-    ExtensionIconSet::MatchType match,
+    ExtensionIconSet::Match match,
     bool grayscale) const {
-  GURL icon_url(base::StringPrintf("%s%s/%d/%d%s",
-                                   chrome::kChromeUIExtensionIconURL,
-                                   extension->id().c_str(), icon_size, match,
-                                   grayscale ? "?grayscale=true" : ""));
+  GURL icon_url(absl::StrFormat(
+      "%s%s/%d/%d%s", chrome::kChromeUIExtensionIconURL, extension->id(),
+      icon_size, static_cast<int>(match), grayscale ? "?grayscale=true" : ""));
   CHECK(icon_url.is_valid());
   return icon_url;
 }
@@ -246,5 +207,5 @@ GURL ElectronManagementAPIDelegate::GetEffectiveUpdateURL(
     const extensions::Extension& extension,
     content::BrowserContext* context) const {
   // TODO(codebytere): we do not currently support ExtensionManagement.
-  return GURL::EmptyGURL();
+  return {};
 }

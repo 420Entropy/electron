@@ -7,33 +7,113 @@
 #include <string>
 #include <utility>
 
-#include "base/command_line.h"
-#include "base/containers/contains.h"
+#include "base/scoped_observation.h"
 #include "chrome/common/chrome_features.h"
+#include "content/public/browser/browser_context.h"
+#include "content/public/browser/render_frame_host.h"
+#include "content/public/browser/storage_partition.h"
 #include "content/public/browser/web_contents.h"
+#include "electron/buildflags/buildflags.h"
 #include "services/device/public/cpp/hid/hid_switches.h"
+#include "shell/browser/electron_browser_context.h"
 #include "shell/browser/electron_permission_manager.h"
 #include "shell/browser/hid/hid_chooser_context.h"
 #include "shell/browser/hid/hid_chooser_context_factory.h"
 #include "shell/browser/hid/hid_chooser_controller.h"
 #include "shell/browser/web_contents_permission_helper.h"
 #include "third_party/blink/public/common/permissions/permission_utils.h"
+#include "third_party/blink/public/mojom/hid/hid.mojom.h"
 
-#if BUILDFLAG(ENABLE_EXTENSIONS)
+#if BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS)
+#include "extensions/browser/guest_view/web_view/web_view_guest.h"
 #include "extensions/common/constants.h"
-#endif  // BUILDFLAG(ENABLE_EXTENSIONS)
+#endif  // BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS)
 
 namespace {
 
 electron::HidChooserContext* GetChooserContext(
     content::BrowserContext* browser_context) {
+  if (!browser_context)
+    return nullptr;
   return electron::HidChooserContextFactory::GetForBrowserContext(
       browser_context);
+}
+
+// The origin device permissions are scoped to: the requesting document's, or
+// for a service worker (no frame) the origin content keyed the service on.
+const url::Origin& RequestingOrigin(content::RenderFrameHost* render_frame_host,
+                                    const url::Origin& service_origin) {
+  return render_frame_host ? render_frame_host->GetLastCommittedOrigin()
+                           : service_origin;
 }
 
 }  // namespace
 
 namespace electron {
+
+// Manages the HidDelegate observers for a single browser context.
+class ElectronHidDelegate::ContextObservation
+    : private HidChooserContext::DeviceObserver {
+ public:
+  ContextObservation(ElectronHidDelegate* parent,
+                     content::BrowserContext* browser_context)
+      : parent_(parent), browser_context_(browser_context) {
+    if (auto* chooser_context = GetChooserContext(browser_context_))
+      device_observation_.Observe(chooser_context);
+  }
+
+  ContextObservation(ContextObservation&) = delete;
+  ContextObservation& operator=(ContextObservation&) = delete;
+  ~ContextObservation() override = default;
+
+  // HidChooserContext::DeviceObserver:
+  void OnDeviceAdded(const device::mojom::HidDeviceInfo& device_info) override {
+    observer_list_.Notify(&content::HidDelegate::Observer::OnDeviceAdded,
+                          device_info);
+  }
+
+  void OnDeviceRemoved(
+      const device::mojom::HidDeviceInfo& device_info) override {
+    observer_list_.Notify(&content::HidDelegate::Observer::OnDeviceRemoved,
+                          device_info);
+  }
+
+  void OnDeviceChanged(
+      const device::mojom::HidDeviceInfo& device_info) override {
+    observer_list_.Notify(&content::HidDelegate::Observer::OnDeviceChanged,
+                          device_info);
+  }
+
+  void OnHidManagerConnectionError() override {
+    observer_list_.Notify(
+        &content::HidDelegate::Observer::OnHidManagerConnectionError);
+  }
+
+  void OnHidChooserContextShutdown() override {
+    parent_->observations_.erase(browser_context_);
+    // Return since `this` is now deleted.
+  }
+
+  void AddObserver(content::HidDelegate::Observer* observer) {
+    observer_list_.AddObserver(observer);
+  }
+
+  void RemoveObserver(content::HidDelegate::Observer* observer) {
+    observer_list_.RemoveObserver(observer);
+  }
+
+ private:
+  // Safe because `parent_` owns `this`.
+  const raw_ptr<ElectronHidDelegate> parent_;
+
+  // Safe because `this` is destroyed when the context is lost.
+  const raw_ptr<content::BrowserContext> browser_context_;
+
+  base::ScopedObservation<HidChooserContext, HidChooserContext::DeviceObserver>
+      device_observation_{this};
+
+  base::ObserverList<content::HidDelegate::Observer> observer_list_;
+};
 
 ElectronHidDelegate::ElectronHidDelegate() = default;
 
@@ -45,10 +125,11 @@ std::unique_ptr<content::HidChooser> ElectronHidDelegate::RunChooser(
     std::vector<blink::mojom::HidDeviceFilterPtr> exclusion_filters,
     content::HidChooser::Callback callback) {
   DCHECK(render_frame_host);
-  auto* chooser_context =
-      GetChooserContext(render_frame_host->GetBrowserContext());
-  if (!device_observation_.IsObserving())
-    device_observation_.Observe(chooser_context);
+  auto* browser_context = render_frame_host->GetBrowserContext();
+
+  // Start observing HidChooserContext for permission and device events.
+  GetContextObserver(browser_context);
+  DCHECK(observations_.contains(browser_context));
 
   HidChooserController* controller = ControllerForFrame(render_frame_host);
   if (controller) {
@@ -64,108 +145,132 @@ std::unique_ptr<content::HidChooser> ElectronHidDelegate::RunChooser(
   return nullptr;
 }
 
+bool ElectronHidDelegate::IsHidAllowedForFrame(
+    content::RenderFrameHost* render_frame_host) {
+  if (!render_frame_host)
+    return false;
+
+  content::RenderFrameHost* main_rfh =
+      render_frame_host->GetOutermostMainFrame();
+
+#if BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS)
+  // WebViewGuests have no mechanism to show permission prompts and their
+  // embedder can't grant HID access through its permissionrequest API. Also
+  // since webviews use a separate StoragePartition, they must not gain access
+  // through permissions granted in non-webview contexts.
+  if (extensions::WebViewGuest::FromRenderFrameHost(main_rfh))
+    return false;
+#endif  // BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS)
+
+  // HID permissions are scoped to a BrowserContext instead of a
+  // StoragePartition, so guard against sharing them with HTTP(S) pages in
+  // non-default partitions, as ElectronUsbDelegate::PageMayUseUsb() does.
+  if (main_rfh->GetStoragePartition() !=
+      main_rfh->GetBrowserContext()->GetDefaultStoragePartition()) {
+    return !main_rfh->GetLastCommittedURL().SchemeIsHTTPOrHTTPS();
+  }
+
+  return true;
+}
+
 bool ElectronHidDelegate::CanRequestDevicePermission(
     content::BrowserContext* browser_context,
+    content::RenderFrameHost* render_frame_host,
     const url::Origin& origin) {
-  base::Value::Dict details;
-  details.Set("securityOrigin", origin.GetURL().spec());
+  if (!browser_context)
+    return false;
+
+  const url::Origin& requesting_origin =
+      RequestingOrigin(render_frame_host, origin);
+  base::DictValue details;
+  details.Set("securityOrigin", requesting_origin.GetURL().spec());
   auto* permission_manager = static_cast<ElectronPermissionManager*>(
       browser_context->GetPermissionControllerDelegate());
   return permission_manager->CheckPermissionWithDetails(
-      static_cast<blink::PermissionType>(
-          WebContentsPermissionHelper::PermissionType::HID),
-      nullptr, origin.GetURL(), std::move(details));
+      blink::PermissionType::HID, render_frame_host, requesting_origin.GetURL(),
+      std::move(details));
 }
 
 bool ElectronHidDelegate::HasDevicePermission(
     content::BrowserContext* browser_context,
+    content::RenderFrameHost* render_frame_host,
     const url::Origin& origin,
     const device::mojom::HidDeviceInfo& device) {
-  return GetChooserContext(browser_context)
-      ->HasDevicePermission(origin, device);
+  return browser_context &&
+         GetChooserContext(browser_context)
+             ->HasDevicePermission(RequestingOrigin(render_frame_host, origin),
+                                   device);
 }
 
 void ElectronHidDelegate::RevokeDevicePermission(
     content::BrowserContext* browser_context,
+    content::RenderFrameHost* render_frame_host,
     const url::Origin& origin,
     const device::mojom::HidDeviceInfo& device) {
-  return GetChooserContext(browser_context)
-      ->RevokeDevicePermission(origin, device);
+  if (browser_context) {
+    GetChooserContext(browser_context)
+        ->RevokeDevicePermission(RequestingOrigin(render_frame_host, origin),
+                                 device);
+  }
 }
 
 device::mojom::HidManager* ElectronHidDelegate::GetHidManager(
     content::BrowserContext* browser_context) {
+  if (!browser_context)
+    return nullptr;
   return GetChooserContext(browser_context)->GetHidManager();
 }
 
 void ElectronHidDelegate::AddObserver(content::BrowserContext* browser_context,
                                       Observer* observer) {
-  observer_list_.AddObserver(observer);
-  auto* chooser_context = GetChooserContext(browser_context);
-  if (!device_observation_.IsObserving())
-    device_observation_.Observe(chooser_context);
+  if (!browser_context)
+    return;
+  GetContextObserver(browser_context)->AddObserver(observer);
 }
 
 void ElectronHidDelegate::RemoveObserver(
     content::BrowserContext* browser_context,
     content::HidDelegate::Observer* observer) {
-  observer_list_.RemoveObserver(observer);
+  if (!browser_context)
+    return;
+  DCHECK(observations_.contains(browser_context));
+  GetContextObserver(browser_context)->RemoveObserver(observer);
 }
 
 const device::mojom::HidDeviceInfo* ElectronHidDelegate::GetDeviceInfo(
     content::BrowserContext* browser_context,
     const std::string& guid) {
   auto* chooser_context = GetChooserContext(browser_context);
+  if (!chooser_context)
+    return nullptr;
   return chooser_context->GetDeviceInfo(guid);
 }
 
 bool ElectronHidDelegate::IsFidoAllowedForOrigin(
     content::BrowserContext* browser_context,
     const url::Origin& origin) {
-  return base::CommandLine::ForCurrentProcess()->HasSwitch(
-      switches::kDisableHidBlocklist);
+  auto* chooser_context = GetChooserContext(browser_context);
+  return chooser_context && chooser_context->IsFidoAllowedForOrigin(origin);
 }
 
 bool ElectronHidDelegate::IsServiceWorkerAllowedForOrigin(
     const url::Origin& origin) {
-#if BUILDFLAG(ENABLE_EXTENSIONS)
+#if BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS)
   // WebHID is only available on extension service workers with feature flag
   // enabled for now.
-  if (base::FeatureList::IsEnabled(
-          features::kEnableWebHidOnExtensionServiceWorker) &&
-      origin.scheme() == extensions::kExtensionScheme)
+  if (origin.scheme() == extensions::kExtensionScheme)
     return true;
-#endif  // BUILDFLAG(ENABLE_EXTENSIONS)
+#endif  // BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS)
   return false;
 }
 
-void ElectronHidDelegate::OnDeviceAdded(
-    const device::mojom::HidDeviceInfo& device_info) {
-  for (auto& observer : observer_list_)
-    observer.OnDeviceAdded(device_info);
-}
-
-void ElectronHidDelegate::OnDeviceRemoved(
-    const device::mojom::HidDeviceInfo& device_info) {
-  for (auto& observer : observer_list_)
-    observer.OnDeviceRemoved(device_info);
-}
-
-void ElectronHidDelegate::OnDeviceChanged(
-    const device::mojom::HidDeviceInfo& device_info) {
-  for (auto& observer : observer_list_)
-    observer.OnDeviceChanged(device_info);
-}
-
-void ElectronHidDelegate::OnHidManagerConnectionError() {
-  device_observation_.Reset();
-
-  for (auto& observer : observer_list_)
-    observer.OnHidManagerConnectionError();
-}
-
-void ElectronHidDelegate::OnHidChooserContextShutdown() {
-  device_observation_.Reset();
+ElectronHidDelegate::ContextObservation*
+ElectronHidDelegate::GetContextObserver(
+    content::BrowserContext* browser_context) {
+  auto& observation = observations_[browser_context];
+  if (!observation)
+    observation = std::make_unique<ContextObservation>(this, browser_context);
+  return observation.get();
 }
 
 HidChooserController* ElectronHidDelegate::ControllerForFrame(
@@ -184,8 +289,7 @@ HidChooserController* ElectronHidDelegate::AddControllerForFrame(
   auto controller = std::make_unique<HidChooserController>(
       render_frame_host, std::move(filters), std::move(exclusion_filters),
       std::move(callback), web_contents, weak_factory_.GetWeakPtr());
-  controller_map_.insert(
-      std::make_pair(render_frame_host, std::move(controller)));
+  controller_map_.try_emplace(render_frame_host, std::move(controller));
   return ControllerForFrame(render_frame_host);
 }
 

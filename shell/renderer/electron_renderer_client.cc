@@ -4,34 +4,84 @@
 
 #include "shell/renderer/electron_renderer_client.h"
 
-#include <string>
+#include <utility>
 
-#include "base/command_line.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/weak_ptr.h"
+#include "base/task/sequenced_task_runner.h"
+#include "components/cdm/renderer/key_system_support_update.h"
 #include "content/public/renderer/render_frame.h"
-#include "electron/buildflags/buildflags.h"
+#include "electron/fuses.h"
 #include "net/http/http_request_headers.h"
 #include "shell/common/api/electron_bindings.h"
 #include "shell/common/gin_helper/dictionary.h"
 #include "shell/common/gin_helper/event_emitter_caller.h"
 #include "shell/common/node_bindings.h"
 #include "shell/common/node_includes.h"
-#include "shell/common/options_switches.h"
+#include "shell/common/node_util.h"
+#include "shell/common/v8_util.h"
+#include "shell/renderer/electron_api_service_impl.h"
 #include "shell/renderer/electron_render_frame_observer.h"
 #include "shell/renderer/web_worker_observer.h"
 #include "third_party/blink/public/common/web_preferences/web_preferences.h"
+#include "third_party/blink/public/platform/web_content_settings_client.h"
 #include "third_party/blink/public/web/web_document.h"
 #include "third_party/blink/public/web/web_local_frame.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_wasm_response_extensions.h"  // nogncheck
 #include "third_party/blink/renderer/core/execution_context/execution_context.h"  // nogncheck
+#include "third_party/blink/renderer/core/workers/worker_or_worklet_global_scope.h"  // nogncheck
 
 namespace electron {
 
+struct ElectronRendererClient::FrameEnvironment {
+  // A main frame borrows |primary|, which integrates uv_default_loop(), while
+  // no other environment occupies it; every other frame gets its own loop.
+  FrameEnvironment(bool is_main_frame,
+                   NodeBindings* primary,
+                   ElectronBindings* primary_electron_bindings) {
+    if (is_main_frame && primary->uv_env() == nullptr) {
+      node_bindings = primary;
+      electron_bindings = primary_electron_bindings;
+      return;
+    }
+    own_node_bindings = NodeBindings::Create(
+        NodeBindings::BrowserEnvironment::kRenderer, nullptr);
+    own_electron_bindings =
+        std::make_unique<ElectronBindings>(own_node_bindings->uv_loop());
+    node_bindings = own_node_bindings.get();
+    electron_bindings = own_electron_bindings.get();
+  }
+
+  std::unique_ptr<NodeBindings> own_node_bindings;
+  std::unique_ptr<ElectronBindings> own_electron_bindings;
+  raw_ptr<NodeBindings> node_bindings;
+  raw_ptr<ElectronBindings> electron_bindings;
+  std::shared_ptr<node::Environment> environment;
+  // The world of |environment|'s context, recorded while Blink can still map
+  // the context to its frame.
+  int world_id = 0;
+  // Set once the frame's context is released; the environment may outlive
+  // that briefly (see WillReleaseScriptContext) but must not run again.
+  bool released = false;
+  base::WeakPtrFactory<FrameEnvironment> weak_factory{this};
+};
+
 ElectronRendererClient::ElectronRendererClient()
-    : node_bindings_(
-          NodeBindings::Create(NodeBindings::BrowserEnvironment::kRenderer)),
-      electron_bindings_(
-          std::make_unique<ElectronBindings>(node_bindings_->uv_loop())) {}
+    : node_bindings_{
+          NodeBindings::Create(NodeBindings::BrowserEnvironment::kRenderer,
+                               uv_default_loop())},
+      electron_bindings_{
+          std::make_unique<ElectronBindings>(node_bindings_->uv_loop())} {}
 
 ElectronRendererClient::~ElectronRendererClient() = default;
+
+void ElectronRendererClient::PostIOThreadCreated(
+    base::SingleThreadTaskRunner* io_thread_task_runner) {
+  // Freezing flags after init conflicts with node in the renderer.
+  // We do this here in order to avoid having to patch the ctor in
+  // content/renderer/render_process_impl.cc.
+  v8::V8::SetFlagsFromString("--no-freeze-flags-after-init");
+}
 
 void ElectronRendererClient::RenderFrameCreated(
     content::RenderFrame* render_frame) {
@@ -45,9 +95,19 @@ void ElectronRendererClient::RunScriptsAtDocumentStart(
   // Inform the document start phase.
   v8::HandleScope handle_scope(v8::Isolate::GetCurrent());
   node::Environment* env = GetEnvironment(render_frame);
-  if (env)
+  if (env) {
+    v8::Context::Scope context_scope(env->context());
+    // A document Blink finishes inside the commit (about:blank, a media or
+    // plain-text response) gets here in the same task that created the
+    // environment, before any microtask checkpoint, so the process.nextTick()
+    // callbacks queued during setup are still pending; EmitEvent's callback
+    // scope runs them, and must do so inside a MicrotasksScope.
+    v8::MicrotasksScope microtasks_scope(env->isolate(),
+                                         env->context()->GetMicrotaskQueue(),
+                                         v8::MicrotasksScope::kRunMicrotasks);
     gin_helper::EmitEvent(env->isolate(), env->process_object(),
                           "document-start");
+  }
 }
 
 void ElectronRendererClient::RunScriptsAtDocumentEnd(
@@ -56,40 +116,79 @@ void ElectronRendererClient::RunScriptsAtDocumentEnd(
   // Inform the document end phase.
   v8::HandleScope handle_scope(v8::Isolate::GetCurrent());
   node::Environment* env = GetEnvironment(render_frame);
-  if (env)
+  if (env) {
+    v8::Context::Scope context_scope(env->context());
+    v8::MicrotasksScope microtasks_scope(env->isolate(),
+                                         env->context()->GetMicrotaskQueue(),
+                                         v8::MicrotasksScope::kRunMicrotasks);
     gin_helper::EmitEvent(env->isolate(), env->process_object(),
                           "document-end");
+  }
+}
+
+void ElectronRendererClient::UndeferLoad(content::RenderFrame* render_frame) {
+  render_frame->GetWebFrame()->GetDocumentLoader()->SetDefersLoading(
+      blink::LoaderFreezeMode::kNone);
+}
+
+std::unique_ptr<media::KeySystemSupportRegistration>
+ElectronRendererClient::GetSupportedKeySystems(
+    content::RenderFrame* render_frame,
+    media::GetSupportedKeySystemsCB cb) {
+  return cdm::GetSupportedKeySystemsUpdates(render_frame,
+                                            /*can_persist_data=*/true,
+                                            std::move(cb));
 }
 
 void ElectronRendererClient::DidCreateScriptContext(
-    v8::Handle<v8::Context> renderer_context,
+    v8::Isolate* const isolate,
+    v8::Local<v8::Context> renderer_context,
     content::RenderFrame* render_frame) {
+  RendererClientBase::DidCreateScriptContext(isolate, renderer_context,
+                                             render_frame);
+
   // TODO(zcbenz): Do not create Node environment if node integration is not
   // enabled.
 
   // Only load Node.js if we are a main frame or a devtools extension
   // unless Node.js support has been explicitly enabled for subframes.
-  if (!ShouldLoadPreload(renderer_context, render_frame))
+  if (!ShouldLoadPreload(isolate, renderer_context, render_frame))
     return;
-
-  injected_frames_.insert(render_frame);
 
   if (!node_integration_initialized_) {
     node_integration_initialized_ = true;
-    node_bindings_->Initialize(renderer_context);
-    node_bindings_->PrepareEmbedThread();
+    node_bindings_->Initialize(isolate, renderer_context);
+    node_bindings_->SetUpIsolate(isolate);
+    // SetUpIsolate registers Node's WebAssembly streaming callback, whose JS
+    // side kNoBrowserGlobals never installs; put Blink's back.
+    blink::WasmResponseExtensions::Initialize(isolate);
   }
 
-  // Setup node tracing controller.
-  if (!node::tracing::TraceEventHelper::GetAgent())
-    node::tracing::TraceEventHelper::SetAgent(node::CreateAgent());
+  CHECK(!environments_.contains(render_frame));
+  auto frame_env = std::make_unique<FrameEnvironment>(
+      render_frame->IsMainFrame(), node_bindings_.get(),
+      electron_bindings_.get());
+  frame_env->world_id =
+      render_frame->GetWebFrame()->GetScriptContextWorldId(renderer_context);
+  NodeBindings* node_bindings = frame_env->node_bindings;
 
   // Setup node environment for each window.
   v8::Maybe<bool> initialized = node::InitializeContext(renderer_context);
   CHECK(!initialized.IsNothing() && initialized.FromJust());
 
-  node::Environment* env =
-      node_bindings_->CreateEnvironment(renderer_context, nullptr);
+  // Before we load the node environment, let's tell blink to hold off on
+  // loading the body of this frame.  We will undefer the load once the preload
+  // script has finished.  This allows our preload script to run async (E.g.
+  // with ESM) without the preload being in a race
+  render_frame->GetWebFrame()->GetDocumentLoader()->SetDefersLoading(
+      blink::LoaderFreezeMode::kStrict);
+
+  std::shared_ptr<node::Environment> env = node_bindings->CreateEnvironment(
+      isolate, renderer_context, nullptr, 0,
+      base::BindRepeating(&ElectronRendererClient::UndeferLoad,
+                          base::Unretained(this), render_frame));
+  frame_env->environment = env;
+  node_bindings->set_uv_env(env.get());
 
   // If we have disabled the site instance overrides we should prevent loading
   // any non-context aware native module.
@@ -98,112 +197,248 @@ void ElectronRendererClient::DidCreateScriptContext(
   // We do not want to crash the renderer process on unhandled rejections.
   env->options()->unhandled_rejections = "warn-with-error-code";
 
-  environments_.insert(env);
-
   // Add Electron extended APIs.
-  electron_bindings_->BindTo(env->isolate(), env->process_object());
+  frame_env->electron_bindings->BindTo(env->isolate(), env->process_object());
   gin_helper::Dictionary process_dict(env->isolate(), env->process_object());
   BindProcess(env->isolate(), &process_dict, render_frame);
 
-  // Load everything.
-  node_bindings_->LoadEnvironment(env);
-
-  if (node_bindings_->uv_env() == nullptr) {
-    // Make uv loop being wrapped by window context.
-    node_bindings_->set_uv_env(env);
-
-    // Give the node loop a run to make sure everything is ready.
-    node_bindings_->StartPolling();
+  // The preload scripts to run, pushed by the browser ahead of the navigation
+  // (see WebContents::MaybeSendRendererStartupData) so renderer init does not
+  // have to ask for them with a synchronous IPC.
+  {
+    v8::LocalVector<v8::Value> preload_paths(isolate);
+    if (auto* api_service = ElectronApiServiceImpl::Get(render_frame)) {
+      if (const auto& data = api_service->startup_data()) {
+        for (const auto& script : data->preload_scripts)
+          preload_paths.push_back(gin::StringToV8(isolate, script->file_path));
+      }
+    }
+    process_dict.SetHidden(
+        "preloadPaths",
+        v8::Array::New(isolate, preload_paths.data(), preload_paths.size()));
   }
+
+  base::WeakPtr<FrameEnvironment> weak_frame_env =
+      frame_env->weak_factory.GetWeakPtr();
+  environments_[render_frame] = std::move(frame_env);
+
+  {
+    // Node.js runs the process.nextTick() callbacks queued during bootstrap,
+    // the preload's included, when bootstrap's callback scope closes. That is
+    // still inside Blink's context setup, where one that removes this frame
+    // frees it underneath Blink, so keep them queued here instead.
+    v8::Context::Scope context_scope(renderer_context);
+    node::InternalCallbackScope keep_ticks_queued(
+        env.get(), v8::Object::New(isolate), {0, 0},
+        node::InternalCallbackScope::kSkipAsyncHooks |
+            node::InternalCallbackScope::kSkipTaskQueues);
+    node_bindings->LoadEnvironment(env.get());
+  }
+  // Run them from a microtask, which the frame observer holds until that setup
+  // has returned. Queued behind the preload's own promise reactions, which
+  // have always run first.
+  renderer_context->GetMicrotaskQueue()->EnqueueMicrotask(
+      isolate, &ElectronRendererClient::RunTicksQueuedDuringSetup,
+      new base::WeakPtr<FrameEnvironment>(weak_frame_env));
+
+  // This context may have been created from inside a script (e.g. the opener's
+  // window.open() call), so give the loop its first run from a fresh task.
+  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+      FROM_HERE, base::BindOnce(
+                     [](base::WeakPtr<FrameEnvironment> frame_env) {
+                       if (!frame_env || frame_env->released)
+                         return;
+                       frame_env->node_bindings->PrepareEmbedThread();
+                       frame_env->node_bindings->StartPolling();
+                     },
+                     weak_frame_env));
 }
 
 void ElectronRendererClient::WillReleaseScriptContext(
-    v8::Handle<v8::Context> context,
+    v8::Isolate* const isolate,
+    v8::Local<v8::Context> context,
     content::RenderFrame* render_frame) {
-  if (injected_frames_.erase(render_frame) == 0)
+  node::Environment* env = GetEnvironment(render_frame);
+  if (!env || env->context() != context)
     return;
+  gin_helper::EmitEvent(isolate, env->process_object(), "exit");
 
-  node::Environment* env = node::Environment::GetCurrent(context);
-  if (environments_.erase(env) == 0)
+  auto iter = environments_.find(render_frame);
+  std::unique_ptr<FrameEnvironment> frame_env = std::move(iter->second);
+  environments_.erase(iter);
+  frame_env->released = true;
+  frame_env->node_bindings->set_uv_env(nullptr);
+
+  // The frame can go away from inside one of its own Node.js callbacks, e.g.
+  // an iframe removing itself from a setImmediate(). Freeing the environment
+  // and its loop there frees them underneath that callback, so stop the
+  // environment calling back into JS and free it from a fresh task. A main
+  // frame on the process-wide loop is still freed here: another environment
+  // may take that loop over before the task runs.
+  if (frame_env->own_node_bindings && env->async_callback_scope_depth() > 0) {
+    env->set_can_call_into_js(false);
+    released_environments_.push_back(std::move(frame_env));
+    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+        FROM_HERE,
+        base::BindOnce(&ElectronRendererClient::FreeReleasedEnvironments,
+                       base::Unretained(this)));
     return;
+  }
+  FreeFrameEnvironment(std::move(frame_env));
+}
 
-  gin_helper::EmitEvent(env->isolate(), env->process_object(), "exit");
+void ElectronRendererClient::FreeReleasedEnvironments() {
+  for (auto& frame_env : std::exchange(released_environments_, {}))
+    FreeFrameEnvironment(std::move(frame_env));
+}
 
-  // The main frame may be replaced.
-  if (env == node_bindings_->uv_env())
-    node_bindings_->set_uv_env(nullptr);
+// static
+void ElectronRendererClient::FreeFrameEnvironment(
+    std::unique_ptr<FrameEnvironment> frame_env) {
+  node::Environment* const env = frame_env->environment.get();
+  // Park the embed thread so FreeEnvironment's uv_run is the loop's only user.
+  frame_env->node_bindings->StopPolling();
+  frame_env->electron_bindings->EnvironmentDestroyed(env);
+  v8::Isolate* const isolate = env->isolate();
+  v8::HandleScope handle_scope{isolate};
+  // Freeing the environment runs its loop, i.e. enters Node.js.
+  util::ExplicitMicrotasksScope microtasks_scope(
+      env->context()->GetMicrotaskQueue());
+  frame_env->environment.reset();
+}
 
-  // Destroying the node environment will also run the uv loop,
-  // Node.js expects `kExplicit` microtasks policy and will run microtasks
-  // checkpoints after every call into JavaScript. Since we use a different
-  // policy in the renderer - switch to `kExplicit` and then drop back to the
-  // previous policy value.
-  v8::MicrotaskQueue* microtask_queue = context->GetMicrotaskQueue();
-  auto old_policy = microtask_queue->microtasks_policy();
-  DCHECK_EQ(microtask_queue->GetMicrotasksScopeDepth(), 0);
-  microtask_queue->set_microtasks_policy(v8::MicrotasksPolicy::kExplicit);
+// static
+void ElectronRendererClient::RunTicksQueuedDuringSetup(void* data) {
+  const std::unique_ptr<base::WeakPtr<FrameEnvironment>> weak_frame_env{
+      static_cast<base::WeakPtr<FrameEnvironment>*>(data)};
+  FrameEnvironment* const frame_env = weak_frame_env->get();
+  if (!frame_env || frame_env->released)
+    return;
+  node::Environment* const env = frame_env->environment.get();
+  v8::Isolate* const isolate = env->isolate();
+  v8::HandleScope handle_scope{isolate};
+  v8::Context::Scope context_scope{env->context()};
+  // Closing the scope runs them.
+  node::CallbackScope callback_scope{isolate, v8::Object::New(isolate), {0, 0}};
+}
 
-  node::FreeEnvironment(env);
-  if (node_bindings_->uv_env() == nullptr) {
-    node::FreeIsolateData(node_bindings_->isolate_data());
-    node_bindings_->set_isolate_data(nullptr);
+namespace {
+
+// Carries the creating frame's nodeIntegrationInWorker decision to the
+// worker thread. Blink hands the client from CreateWorkerContentSettingsClient
+// to dedicated workers and off-main-thread worklets, and Clone()s it for
+// nested workers, so in-process windows with different webPreferences each
+// pass their own value down.
+class WorkerContentSettingsClient final
+    : public blink::WebContentSettingsClient {
+ public:
+  explicit WorkerContentSettingsClient(bool node_integration)
+      : node_integration_(node_integration) {}
+
+  bool node_integration() const { return node_integration_; }
+
+  // blink::WebContentSettingsClient
+  std::unique_ptr<blink::WebContentSettingsClient> Clone() override {
+    return std::make_unique<WorkerContentSettingsClient>(node_integration_);
   }
 
-  microtask_queue->set_microtasks_policy(old_policy);
+ private:
+  const bool node_integration_;
+};
 
-  // ElectronBindings is tracking node environments.
-  electron_bindings_->EnvironmentDestroyed(env);
+bool WorkerHasNodeIntegration(blink::ExecutionContext* ec) {
+  // We do not create a Node.js environment in service or shared workers
+  // owing to an inability to customize sandbox policies in these workers
+  // given that they're run out-of-process.
+  // Also avoid creating a Node.js environment for worklet global scope
+  // created on the main thread — those share the page's V8 context where
+  // Node is already wired up.
+  if (ec->IsServiceWorkerGlobalScope() || ec->IsSharedWorkerGlobalScope() ||
+      ec->IsMainThreadWorkletGlobalScope())
+    return false;
+
+  auto* scope = blink::DynamicTo<blink::WorkerOrWorkletGlobalScope>(ec);
+  if (!scope)
+    return false;
+
+  // Dedicated workers and worklets only ever get their content settings
+  // client from CreateWorkerContentSettingsClient() below or its Clone().
+  auto* client =
+      static_cast<WorkerContentSettingsClient*>(scope->ContentSettingsClient());
+  return client && client->node_integration();
+}
+
+}  // namespace
+
+std::unique_ptr<blink::WebContentSettingsClient>
+ElectronRendererClient::CreateWorkerContentSettingsClient(
+    content::RenderFrame* render_frame) {
+  // Only frames that themselves get Node integration (the main frame, or any
+  // frame when nodeIntegrationInSubFrames is on) pass it on to their workers.
+  const blink::web_pref::WebPreferences& prefs =
+      render_frame->GetBlinkPreferences();
+  return std::make_unique<WorkerContentSettingsClient>(
+      prefs.node_integration_in_worker &&
+      (render_frame->IsMainFrame() || prefs.node_integration_in_sub_frames));
 }
 
 void ElectronRendererClient::WorkerScriptReadyForEvaluationOnWorkerThread(
     v8::Local<v8::Context> context) {
-  // We do not create a Node.js environment in service or shared workers
-  // owing to an inability to customize sandbox policies in these workers
-  // given that they're run out-of-process.
+  RendererClientBase::WorkerScriptReadyForEvaluationOnWorkerThread(context);
+
   auto* ec = blink::ExecutionContext::From(context);
-  if (ec->IsServiceWorkerGlobalScope() || ec->IsSharedWorkerGlobalScope())
+  if (!WorkerHasNodeIntegration(ec))
     return;
 
-  // This won't be correct for in-process child windows with webPreferences
-  // that have a different value for nodeIntegrationInWorker
-  if (base::CommandLine::ForCurrentProcess()->HasSwitch(
-          switches::kNodeIntegrationInWorker)) {
-    // WorkerScriptReadyForEvaluationOnWorkerThread can be invoked multiple
-    // times for the same thread, so we need to create a new observer each time
-    // this happens. We use a ThreadLocalOwnedPointer to ensure that the old
-    // observer for a given thread gets destructed when swapping with the new
-    // observer in WebWorkerObserver::Create.
-    WebWorkerObserver::Create()->WorkerScriptReadyForEvaluation(context);
-  }
+  auto* current = WebWorkerObserver::GetCurrent();
+  if (!current)
+    current = WebWorkerObserver::Create(v8::Isolate::GetCurrent());
+  current->WorkerScriptReadyForEvaluation(context);
 }
 
 void ElectronRendererClient::WillDestroyWorkerContextOnWorkerThread(
     v8::Local<v8::Context> context) {
   auto* ec = blink::ExecutionContext::From(context);
-  if (ec->IsServiceWorkerGlobalScope() || ec->IsSharedWorkerGlobalScope())
-    return;
-
-  // TODO(loc): Note that this will not be correct for in-process child windows
-  // with webPreferences that have a different value for nodeIntegrationInWorker
-  if (base::CommandLine::ForCurrentProcess()->HasSwitch(
-          switches::kNodeIntegrationInWorker)) {
+  if (WorkerHasNodeIntegration(ec)) {
     auto* current = WebWorkerObserver::GetCurrent();
     if (current)
       current->ContextWillDestroy(context);
   }
+
+  // Call base class last: OOM callback deregistration must happen after
+  // all other cleanup that might still trigger V8 heap operations.
+  RendererClientBase::WillDestroyWorkerContextOnWorkerThread(context);
+}
+
+void ElectronRendererClient::SetUpWebAssemblyTrapHandler() {
+#if ((BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)) && \
+     defined(ARCH_CPU_X86_64)) ||                                       \
+    ((BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_MAC)) && defined(ARCH_CPU_ARM64))
+  if (electron::fuses::IsWasmTrapHandlersEnabled()) {
+    electron::SetUpWebAssemblyTrapHandler();
+  }
+#endif
+}
+
+v8::Local<v8::Context> ElectronRendererClient::GetEnvironmentContext(
+    content::RenderFrame* render_frame) const {
+  node::Environment* env = GetEnvironment(render_frame);
+  return env ? env->context() : v8::Local<v8::Context>();
+}
+
+std::optional<int> ElectronRendererClient::GetEnvironmentWorldId(
+    content::RenderFrame* render_frame) const {
+  auto iter = environments_.find(render_frame);
+  if (iter == environments_.end())
+    return std::nullopt;
+  return iter->second->world_id;
 }
 
 node::Environment* ElectronRendererClient::GetEnvironment(
     content::RenderFrame* render_frame) const {
-  if (injected_frames_.find(render_frame) == injected_frames_.end())
-    return nullptr;
-  v8::HandleScope handle_scope(v8::Isolate::GetCurrent());
-  auto context =
-      GetContext(render_frame->GetWebFrame(), v8::Isolate::GetCurrent());
-  node::Environment* env = node::Environment::GetCurrent(context);
-  if (environments_.find(env) == environments_.end())
-    return nullptr;
-  return env;
+  auto iter = environments_.find(render_frame);
+  return iter == environments_.end() ? nullptr
+                                     : iter->second->environment.get();
 }
 
 }  // namespace electron

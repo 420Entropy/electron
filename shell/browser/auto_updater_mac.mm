@@ -18,31 +18,19 @@
 #include "shell/browser/browser.h"
 #include "shell/common/gin_converters/value_converter.h"
 #include "shell/common/gin_helper/dictionary.h"
-#include "shell/common/gin_helper/error_thrower.h"
 
 namespace auto_updater {
 
 namespace {
 
 // The global SQRLUpdater object.
-SQRLUpdater* g_updater = nil;
-
-}  // namespace
-
-namespace {
-
+SQRLUpdater* __strong g_updater = nil;
 bool g_update_available = false;
-std::string update_url_ = "";  // NOLINT(runtime/string)
 
 }  // namespace
-
-std::string AutoUpdater::GetFeedURL() {
-  return update_url_;
-}
 
 // static
-void AutoUpdater::SetFeedURL(gin::Arguments* args) {
-  gin_helper::ErrorThrower thrower(args->isolate());
+void AutoUpdater::SetFeedURL(gin::Arguments* const args) {
   gin_helper::Dictionary opts;
 
   std::string feed;
@@ -55,7 +43,7 @@ void AutoUpdater::SetFeedURL(gin::Arguments* args) {
     }
   } else if (args->GetNext(&opts)) {
     if (!opts.Get("url", &feed)) {
-      thrower.ThrowError(
+      args->ThrowTypeError(
           "Expected options object to contain a 'url' string property in "
           "setFeedUrl call");
       return;
@@ -63,11 +51,11 @@ void AutoUpdater::SetFeedURL(gin::Arguments* args) {
     opts.Get("headers", &requestHeaders);
     opts.Get("serverType", &serverType);
     if (serverType != "default" && serverType != "json") {
-      thrower.ThrowError("Expected serverType to be 'default' or 'json'");
+      args->ThrowTypeError("Expected serverType to be 'default' or 'json'");
       return;
     }
   } else {
-    thrower.ThrowError(
+    args->ThrowTypeError(
         "Expected an options object with a 'url' property to be provided");
     return;
   }
@@ -76,9 +64,19 @@ void AutoUpdater::SetFeedURL(gin::Arguments* args) {
   if (!delegate)
     return;
 
-  update_url_ = feed;
+  NSString* feed_string = base::SysUTF8ToNSString(feed);
+  if (!feed_string) {
+    args->ThrowTypeError("Expected 'url' to be a valid URL");
+    return;
+  }
 
-  NSURL* url = [NSURL URLWithString:base::SysUTF8ToNSString(feed)];
+  NSURL* url = [NSURL URLWithString:feed_string];
+  if (!url) {
+    args->ThrowTypeError("Expected 'url' to be a valid URL");
+    return;
+  }
+
+  GetFeedURL() = feed;
   NSMutableURLRequest* urlRequest = [NSMutableURLRequest requestWithURL:url];
 
   for (const auto& it : requestHeaders) {
@@ -87,7 +85,7 @@ void AutoUpdater::SetFeedURL(gin::Arguments* args) {
   }
 
   if (g_updater)
-    [g_updater release];
+    g_updater = nil;
 
   // Initialize the SQRLUpdater.
   @try {
@@ -138,7 +136,8 @@ void AutoUpdater::CheckForUpdates() {
           delegate->OnUpdateDownloaded(
               base::SysNSStringToUTF8(update.releaseNotes),
               base::SysNSStringToUTF8(update.releaseName),
-              base::Time::FromDoubleT(update.releaseDate.timeIntervalSince1970),
+              base::Time::FromSecondsSinceUnixEpoch(
+                  update.releaseDate.timeIntervalSince1970),
               base::SysNSStringToUTF8(update.updateURL.absoluteString));
         } else {
           g_update_available = false;
@@ -177,6 +176,13 @@ void AutoUpdater::QuitAndInstall() {
     if (delegate)
       delegate->OnError("No update available, can't quit and install");
   }
+}
+
+bool AutoUpdater::IsVersionAllowedForUpdate(const std::string& current_version,
+                                            const std::string& target_version) {
+  return [SQRLUpdater
+      isVersionAllowedForUpdate:base::SysUTF8ToNSString(target_version)
+                           from:base::SysUTF8ToNSString(current_version)];
 }
 
 }  // namespace auto_updater

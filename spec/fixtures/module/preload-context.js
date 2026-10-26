@@ -1,4 +1,4 @@
-var test = 'test' // eslint-disable-line
+var test = 'test'; // oxlint-disable-line no-var,@typescript-eslint/no-unused-vars
 
 const types = {
   require: typeof require,

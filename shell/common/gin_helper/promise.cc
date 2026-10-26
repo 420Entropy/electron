@@ -2,9 +2,74 @@
 // Use of this source code is governed by the MIT license that can be
 // found in the LICENSE file.
 
+#include <string>
+#include <string_view>
+
+#include "base/functional/callback_helpers.h"
+#include "base/task/common/task_annotator.h"
+#include "content/public/browser/browser_thread.h"
 #include "shell/common/gin_helper/promise.h"
+#include "shell/common/process_util.h"
+#include "v8/include/cppgc/allocation.h"
+#include "v8/include/cppgc/name-provider.h"
+#include "v8/include/v8-context.h"
+#include "v8/include/v8-cppgc.h"
+#include "v8/include/v8-traced-handle.h"
 
 namespace gin_helper {
+
+class PromiseHandle final : public cppgc::GarbageCollected<PromiseHandle>,
+                            public cppgc::NameProvider {
+ public:
+  PromiseHandle(v8::Isolate* isolate,
+                v8::Local<v8::Context> context,
+                v8::Local<v8::Promise::Resolver> resolver)
+      : context_(isolate, context), resolver_(isolate, resolver) {}
+
+  void Trace(cppgc::Visitor* visitor) const {
+    visitor->Trace(context_);
+    visitor->Trace(resolver_);
+  }
+
+  const char* GetHumanReadableName() const final {
+    return "Electron / PromiseHandle";
+  }
+
+  [[nodiscard]] bool IsAlive() const { return !resolver_.IsEmpty(); }
+
+  v8::Local<v8::Context> GetContext(v8::Isolate* isolate) const {
+    return context_.Get(isolate);
+  }
+
+  v8::Local<v8::Promise::Resolver> GetResolver(v8::Isolate* isolate) const {
+    return resolver_.Get(isolate);
+  }
+
+ private:
+  v8::TracedReference<v8::Context> context_;
+  v8::TracedReference<v8::Promise::Resolver> resolver_;
+};
+
+PromiseBase::SettleScope::SettleScope(const PromiseBase& base)
+    : handle_scope_{base.isolate()},
+      context_{base.GetContext()},
+      microtasks_scope_(context_, v8::MicrotasksScope::kRunMicrotasks),
+      context_scope_{context_} {}
+
+// The browser process runs microtasks explicitly: Node.js performs a
+// checkpoint when it returns from a libuv callback, and MicrotasksRunner
+// performs one after every task the UI thread runs. A promise settled from
+// anywhere else, such as an X11 reply or a native event that the message pump
+// dispatches itself, would leave its continuations queued until some
+// unrelated task happened to run. Post an empty task in that case so that the
+// checkpoint follows straight away.
+PromiseBase::SettleScope::~SettleScope() {
+  if (electron::IsBrowserProcess() &&
+      !base::TaskAnnotator::CurrentTaskForThread() &&
+      content::BrowserThread::CurrentlyOn(content::BrowserThread::UI)) {
+    content::GetUIThreadTaskRunner({})->PostTask(FROM_HERE, base::DoNothing());
+  }
+}
 
 PromiseBase::PromiseBase(v8::Isolate* isolate)
     : PromiseBase(isolate,
@@ -13,11 +78,13 @@ PromiseBase::PromiseBase(v8::Isolate* isolate)
 
 PromiseBase::PromiseBase(v8::Isolate* isolate,
                          v8::Local<v8::Promise::Resolver> handle)
-    : isolate_(isolate),
-      context_(isolate, isolate->GetCurrentContext()),
-      resolver_(isolate, handle) {}
+    : handle_(cppgc::MakeGarbageCollected<PromiseHandle>(
+          isolate->GetCppHeap()->GetAllocationHandle(),
+          isolate,
+          isolate->GetCurrentContext(),
+          handle)) {}
 
-PromiseBase::PromiseBase() : isolate_(nullptr) {}
+PromiseBase::PromiseBase() = default;
 
 PromiseBase::PromiseBase(PromiseBase&&) = default;
 
@@ -25,52 +92,64 @@ PromiseBase::~PromiseBase() = default;
 
 PromiseBase& PromiseBase::operator=(PromiseBase&&) = default;
 
-v8::Maybe<bool> PromiseBase::Reject() {
-  v8::HandleScope handle_scope(isolate());
-  gin_helper::MicrotasksScope microtasks_scope(
-      isolate(), GetContext()->GetMicrotaskQueue());
-  v8::Context::Scope context_scope(GetContext());
+bool PromiseBase::IsAlive() const {
+  return isolate() && handle_ && handle_->IsAlive();
+}
 
-  return GetInner()->Reject(GetContext(), v8::Undefined(isolate()));
+// static
+scoped_refptr<base::TaskRunner> PromiseBase::GetTaskRunner() {
+  if (electron::IsBrowserProcess() &&
+      !content::BrowserThread::CurrentlyOn(content::BrowserThread::UI)) {
+    return content::GetUIThreadTaskRunner({});
+  }
+  return {};
 }
 
 v8::Maybe<bool> PromiseBase::Reject(v8::Local<v8::Value> except) {
-  v8::HandleScope handle_scope(isolate());
-  gin_helper::MicrotasksScope microtasks_scope(
-      isolate(), GetContext()->GetMicrotaskQueue());
-  v8::Context::Scope context_scope(GetContext());
-
-  return GetInner()->Reject(GetContext(), except);
+  if (!IsAlive())
+    return v8::Nothing<bool>();
+  SettleScope settle_scope{*this};
+  return GetInner()->Reject(settle_scope.context_, except);
 }
 
-v8::Maybe<bool> PromiseBase::RejectWithErrorMessage(base::StringPiece message) {
-  v8::HandleScope handle_scope(isolate());
-  gin_helper::MicrotasksScope microtasks_scope(
-      isolate(), GetContext()->GetMicrotaskQueue());
-  v8::Context::Scope context_scope(GetContext());
+v8::Maybe<bool> PromiseBase::RejectWithErrorMessage(std::string_view errmsg) {
+  if (!IsAlive())
+    return v8::Nothing<bool>();
+  SettleScope settle_scope{*this};
+  return GetInner()->Reject(
+      settle_scope.context_,
+      v8::Exception::Error(gin::StringToV8(isolate(), errmsg)));
+}
 
-  v8::Local<v8::Value> error =
-      v8::Exception::Error(gin::StringToV8(isolate(), message));
-  return GetInner()->Reject(GetContext(), (error));
+v8::Maybe<bool> PromiseBase::Resolve() {
+  if (!IsAlive())
+    return v8::Nothing<bool>();
+  return ResolveWith(v8::Undefined(isolate()));
 }
 
 v8::Local<v8::Context> PromiseBase::GetContext() const {
-  return v8::Local<v8::Context>::New(isolate_, context_);
+  return IsAlive() ? handle_->GetContext(isolate()) : v8::Local<v8::Context>();
 }
 
 v8::Local<v8::Promise> PromiseBase::GetHandle() const {
-  return GetInner()->GetPromise();
+  auto inner = GetInner();
+  return inner.IsEmpty() ? v8::Local<v8::Promise>() : inner->GetPromise();
 }
 
 v8::Local<v8::Promise::Resolver> PromiseBase::GetInner() const {
-  return resolver_.Get(isolate());
+  return IsAlive() ? handle_->GetResolver(isolate())
+                   : v8::Local<v8::Promise::Resolver>();
+}
+
+v8::Maybe<bool> PromiseBase::ResolveWith(v8::Local<v8::Value> value) {
+  SettleScope settle_scope{*this};
+  return GetInner()->Resolve(settle_scope.context_, value);
 }
 
 // static
 void Promise<void>::ResolvePromise(Promise<void> promise) {
-  if (gin_helper::Locker::IsBrowserProcess() &&
-      !content::BrowserThread::CurrentlyOn(content::BrowserThread::UI)) {
-    content::GetUIThreadTaskRunner({})->PostTask(
+  if (auto task_runner = GetTaskRunner()) {
+    task_runner->PostTask(
         FROM_HERE,
         base::BindOnce([](Promise<void> promise) { promise.Resolve(); },
                        std::move(promise)));
@@ -84,15 +163,6 @@ v8::Local<v8::Promise> Promise<void>::ResolvedPromise(v8::Isolate* isolate) {
   Promise<void> resolved(isolate);
   resolved.Resolve();
   return resolved.GetHandle();
-}
-
-v8::Maybe<bool> Promise<void>::Resolve() {
-  v8::HandleScope handle_scope(isolate());
-  gin_helper::MicrotasksScope microtasks_scope(
-      isolate(), GetContext()->GetMicrotaskQueue());
-  v8::Context::Scope context_scope(GetContext());
-
-  return GetInner()->Resolve(GetContext(), v8::Undefined(isolate()));
 }
 
 }  // namespace gin_helper

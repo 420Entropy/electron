@@ -6,111 +6,224 @@
 
 #include <memory>
 #include <string>
-#include <unordered_set>
 #include <utility>
 
-#include "base/allocator/partition_alloc_features.h"
-#include "base/allocator/partition_allocator/partition_alloc.h"
-#include "base/bits.h"
+#include "base/check.h"
 #include "base/command_line.h"
-#include "base/feature_list.h"
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
+#include "base/logging.h"
+#include "base/synchronization/lock.h"
 #include "base/task/current_thread.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/task/thread_pool/initialization_util.h"
-#include "base/trace_event/trace_event.h"
+#include "base/thread_annotations.h"
+#include "electron/snapshot_checksum.h"
 #include "gin/array_buffer.h"
+#include "gin/per_isolate_data.h"
+#include "gin/public/isolate_holder.h"
 #include "gin/v8_initializer.h"
+#include "partition_alloc/partition_alloc_constants.h"
 #include "shell/browser/microtasks_runner.h"
+#include "shell/browser/native_peer.h"
 #include "shell/common/gin_helper/cleaned_up_at_exit.h"
 #include "shell/common/node_includes.h"
+#include "shell/common/node_util.h"
+#include "shell/common/process_util.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_map.h"
 #include "third_party/blink/public/common/switches.h"
+#include "third_party/electron_node/src/node_snapshot_builder.h"
 #include "third_party/electron_node/src/node_wasm_web_api.h"
+#include "v8/include/v8-initialization.h"
+#include "v8/include/v8-isolate.h"
+#include "v8/include/v8-locker.h"
+#include "v8/include/v8-platform.h"
+#include "v8/include/v8-snapshot.h"
 
 namespace {
 v8::Isolate* g_isolate;
 }
 
-namespace gin {
-
-class ConvertableToTraceFormatWrapper final
-    : public base::trace_event::ConvertableToTraceFormat {
- public:
-  explicit ConvertableToTraceFormatWrapper(
-      std::unique_ptr<v8::ConvertableToTraceFormat> inner)
-      : inner_(std::move(inner)) {}
-  ~ConvertableToTraceFormatWrapper() override = default;
-
-  // disable copy
-  ConvertableToTraceFormatWrapper(const ConvertableToTraceFormatWrapper&) =
-      delete;
-  ConvertableToTraceFormatWrapper& operator=(
-      const ConvertableToTraceFormatWrapper&) = delete;
-
-  void AppendAsTraceFormat(std::string* out) const final {
-    inner_->AppendAsTraceFormat(out);
-  }
-
- private:
-  std::unique_ptr<v8::ConvertableToTraceFormat> inner_;
-};
-
-}  // namespace gin
-
-// Allow std::unique_ptr<v8::ConvertableToTraceFormat> to be a valid
-// initialization value for trace macros.
-template <>
-struct base::trace_event::TraceValue::Helper<
-    std::unique_ptr<v8::ConvertableToTraceFormat>> {
-  static constexpr unsigned char kType = TRACE_VALUE_TYPE_CONVERTABLE;
-  static inline void SetValue(
-      TraceValue* v,
-      std::unique_ptr<v8::ConvertableToTraceFormat> value) {
-    // NOTE: |as_convertable| is an owning pointer, so using new here
-    // is acceptable.
-    v->as_convertable =
-        new gin::ConvertableToTraceFormatWrapper(std::move(value));
-  }
-};
-
 namespace electron {
 
 namespace {
 
-gin::IsolateHolder CreateIsolateHolder(v8::Isolate* isolate) {
+#if defined(V8_ENABLE_SANDBOX)
+// V8's built-in in-sandbox allocator (behind ArrayBuffer::Allocator::
+// NewDefaultAllocator(), which Node uses for Buffers) is a slow fallback that
+// embedders are expected to replace; route it to gin's PartitionAlloc
+// partition inside the sandbox, as Blink does for renderers. Requests beyond
+// PartitionAlloc's single-allocation cap (~2 GiB) come straight from the
+// sandbox's address space instead.
+class InSandboxAllocator final : public v8::Allocator {
+ public:
+  void* Allocate(size_t size) override {
+    if (size > partition_alloc::MaxAllocationSize())
+      return AllocatePages(size);
+    return gin::ArrayBufferAllocator::SharedInstance()->Allocate(size);
+  }
+  void* AllocateUninitialized(size_t size) override {
+    if (size > partition_alloc::MaxAllocationSize())
+      return AllocatePages(size);
+    return gin::ArrayBufferAllocator::SharedInstance()->AllocateUninitialized(
+        size);
+  }
+  void* AllocateUninitializedOrCrash(size_t size) override {
+    void* result = AllocateUninitialized(size);
+    CHECK(result);
+    return result;
+  }
+  void Free(void* ptr) override {
+    if (!ptr)
+      return;
+    {
+      base::AutoLock lock(lock_);
+      auto it = pages_.find(ptr);
+      if (it != pages_.end()) {
+        v8::V8::GetSandboxAddressSpace()->FreePages(
+            reinterpret_cast<uintptr_t>(ptr), it->second);
+        pages_.erase(it);
+        return;
+      }
+    }
+    gin::ArrayBufferAllocator::SharedInstance()->Free(ptr, 0);
+  }
+
+ private:
+  // Fresh sandbox pages are zero-filled, so this serves both entry points.
+  void* AllocatePages(size_t size) {
+    v8::VirtualAddressSpace* space = v8::V8::GetSandboxAddressSpace();
+    size_t granularity = space->allocation_granularity();
+    size_t rounded = (size + granularity - 1) / granularity * granularity;
+    if (rounded < size)
+      return nullptr;
+    uintptr_t address =
+        space->AllocatePages(v8::VirtualAddressSpace::kNoHint, rounded,
+                             granularity, v8::PagePermissions::kReadWrite);
+    if (!address)
+      return nullptr;
+    base::AutoLock lock(lock_);
+    pages_.emplace(reinterpret_cast<void*>(address), rounded);
+    return reinterpret_cast<void*>(address);
+  }
+
+  base::Lock lock_;
+  absl::flat_hash_map<void*, size_t> pages_ GUARDED_BY(lock_);
+};
+#endif
+
+// Whether the V8 snapshot blob this process loaded (v8_context_snapshot.bin,
+// or in the browser process under the LoadBrowserProcessSpecificV8Snapshot
+// fuse, browser_v8_context_snapshot.bin) is the one this build shipped, as
+// opposed to a custom blob produced with electron-mksnapshot. Compares size
+// and V8's blob header -- which embeds V8's checksum of the rest of the
+// blob -- against build-time constants, so no hashing at startup and no
+// per-process-type knowledge of which file was picked.
+bool LoadedV8SnapshotIsBuiltIn() {
+  v8::StartupData blob{nullptr, 0};
+  gin::V8Initializer::GetV8ExternalSnapshotData(&blob);
+  if (!blob.data || blob.raw_size <= 0)
+    return false;
+  const auto loaded = base::as_bytes(UNSAFE_BUFFERS(
+      base::span<const char>(blob.data, static_cast<size_t>(blob.raw_size))));
+  const auto expected_prefix = base::span(snapshot_checksum::kHeaderPrefix);
+  return loaded.size() == snapshot_checksum::kSize &&
+         loaded.size() >= expected_prefix.size() &&
+         loaded.first(expected_prefix.size()) == expected_prefix;
+}
+
+// The Node startup snapshot a JavascriptEnvironment's isolate is created
+// from, when one is embedded and this process is allowed to consume it: the
+// browser process, ELECTRON_RUN_AS_NODE children (shell/app/node_main.cc,
+// which also run without a --type) and the utility process hosting the node
+// service (the only utility-process code that creates a JavascriptEnvironment).
+// Each creates exactly one main isolate -- Node worker threads inherit the
+// snapshot through IsolateData -- so V8's one-read-only-heap-per-process rule
+// holds even though the process-wide external startup data content/gin loaded
+// is the v8 context snapshot. (Renderers never have a JavascriptEnvironment;
+// their isolates belong to blink.)
+const node::SnapshotData* NodeSnapshotForThisProcess() {
+  static const node::SnapshotData* const snapshot =
+      []() -> const node::SnapshotData* {
+    if (!electron::IsBrowserProcess() && !electron::IsUtilityProcess())
+      return nullptr;
+    const node::SnapshotData* embedded =
+        node::SnapshotBuilder::GetEmbeddedSnapshotData();
+    if (!embedded)
+      return nullptr;
+    // A custom V8 snapshot (electron-mksnapshot, or the browser-specific blob
+    // the LoadBrowserProcessSpecificV8Snapshot fuse selects) exists to put
+    // objects into the main process's context. The embedded Node snapshot was
+    // built on top of the stock blob at build time and cannot contain them, so
+    // creating the main context from it would silently drop the custom
+    // snapshot's contents. Fall back to bootstrapping Node from scratch on the
+    // loaded blob, as builds without a Node snapshot do.
+    if (!LoadedV8SnapshotIsBuiltIn()) {
+      VLOG(1) << "Custom V8 snapshot loaded; not creating this process's "
+                 "Node.js environment from the embedded Node snapshot.";
+      return nullptr;
+    }
+    return embedded;
+  }();
+  return snapshot;
+}
+
+std::unique_ptr<gin::IsolateHolder> CreateIsolateHolder(
+    v8::Isolate* isolate,
+    size_t* max_young_generation_size) {
   std::unique_ptr<v8::Isolate::CreateParams> create_params =
       gin::IsolateHolder::getDefaultIsolateParams();
+  // The value is needed to adjust heap limit when capturing
+  // snapshot via v8.setHeapSnapshotNearHeapLimit(limit) or
+  // --heapsnapshot-near-heap-limit=max_count.
+  *max_young_generation_size =
+      create_params->constraints.max_young_generation_size_in_bytes();
+  // Electron: create the browser-process isolate from the embedded Node
+  // startup snapshot when one is present, so the Node bootstrap is
+  // deserialized instead of recompiled at app start.
+  if (const node::SnapshotData* sd = NodeSnapshotForThisProcess()) {
+    node::SnapshotBuilder::InitializeIsolateParams(sd, create_params.get());
+  }
   // Align behavior with V8 Isolate default for Node.js.
   // This is necessary for important aspects of Node.js
   // including heap and cpu profilers to function properly.
-  //
-  // Additional note:
-  // We do not want to invoke a termination exception at exit when
-  // we're running with only_terminate_in_safe_scope set to false. Heap and
-  // coverage profilers run after environment exit and if there is a pending
-  // exception at this stage then they will fail to generate the appropriate
-  // profiles. Node.js does not call node::Stop(), which calls
-  // isolate->TerminateExecution(), and therefore does not have this issue
-  // when also running with only_terminate_in_safe_scope set to false.
-  create_params->only_terminate_in_safe_scope = false;
 
-  return gin::IsolateHolder(
+  return std::make_unique<gin::IsolateHolder>(
       base::SingleThreadTaskRunner::GetCurrentDefault(),
       gin::IsolateHolder::kSingleThread,
       gin::IsolateHolder::IsolateType::kUtility, std::move(create_params),
-      gin::IsolateHolder::IsolateCreationMode::kNormal, isolate);
+      gin::IsolateHolder::IsolateCreationMode::kNormal, nullptr, nullptr,
+      isolate);
 }
 
 }  // namespace
 
-JavascriptEnvironment::JavascriptEnvironment(uv_loop_t* event_loop,
-                                             bool setup_wasm_streaming)
-    : isolate_(Initialize(event_loop, setup_wasm_streaming)),
-      isolate_holder_(CreateIsolateHolder(isolate_)),
-      locker_(isolate_) {
-  isolate_->Enter();
+JavascriptEnvironment::JavascriptEnvironment(
+    uv_loop_t* event_loop,
+    bool setup_wasm_streaming,
+    v8::TracingController* tracing_controller)
+    : isolate_holder_{CreateIsolateHolder(
+          Initialize(event_loop, setup_wasm_streaming, tracing_controller),
+          &max_young_generation_size_)},
+      locker_{std::in_place, isolate()} {
+  v8::Isolate* const isolate = this->isolate();
+  isolate->Enter();
 
-  v8::HandleScope scope(isolate_);
-  auto context = node::NewContext(isolate_);
+  // Every JavascriptEnvironment hosts a Node.js environment (browser process,
+  // ELECTRON_RUN_AS_NODE, the utility-process node service). Install the
+  // build-time builtin code cache before node::NewContext below constructs
+  // the first BuiltinLoader (for the per-context scripts).
+  electron::util::InstallProcessCodeCache();
+
+  // Electron: when consuming the embedded Node startup snapshot, the main
+  // context is materialized from the snapshot inside node::CreateEnvironment
+  // (Context::FromSnapshot) and entered in electron_browser_main_parts.cc
+  // after that. Creating a fresh node::NewContext here would be wasted work.
+  if (NodeSnapshotForThisProcess() != nullptr)
+    return;
+
+  v8::HandleScope scope{isolate};
+  auto context = node::NewContext(isolate);
   CHECK(!context.IsEmpty());
 
   context->Enter();
@@ -118,187 +231,61 @@ JavascriptEnvironment::JavascriptEnvironment(uv_loop_t* event_loop,
 
 JavascriptEnvironment::~JavascriptEnvironment() {
   DCHECK_NE(platform_, nullptr);
-  platform_->DrainTasks(isolate_);
+  v8::Isolate* isolate = this->isolate();
+
+  // PostMainMessageLoopRun() is skipped when startup fails early (e.g. no
+  // display), so dispose the runner here while the isolate is still alive.
+  if (microtasks_runner_)
+    DestroyMicrotasksRunner();
 
   {
-    v8::HandleScope scope(isolate_);
-    isolate_->GetCurrentContext()->Exit();
+    v8::HandleScope scope{isolate};
+    isolate->GetCurrentContext()->Exit();
   }
-  isolate_->Exit();
+  isolate->Exit();
   g_isolate = nullptr;
 
-  platform_->UnregisterIsolate(isolate_);
+  // Deinit gin::IsolateHolder prior to calling NodePlatform::UnregisterIsolate.
+  // Otherwise cppgc::internal::Sweeper::Start will try to request a task runner
+  // from the NodePlatform with an already unregistered isolate.
+  locker_.reset();
+  isolate_holder_.reset();
+
+  platform_->UnregisterIsolate(isolate);
+
+  // Heap teardown destroys the remaining wrappers, which queue their released
+  // peers. Delete those peers now that no cppgc finalizer can be running.
+  NativePeerBase::DeleteQueuedPeersAfterIsolateDisposal();
 }
 
-class EnabledStateObserverImpl final
-    : public base::trace_event::TraceLog::EnabledStateObserver {
- public:
-  EnabledStateObserverImpl() {
-    base::trace_event::TraceLog::GetInstance()->AddEnabledStateObserver(this);
-  }
-
-  ~EnabledStateObserverImpl() override {
-    base::trace_event::TraceLog::GetInstance()->RemoveEnabledStateObserver(
-        this);
-  }
-
-  // disable copy
-  EnabledStateObserverImpl(const EnabledStateObserverImpl&) = delete;
-  EnabledStateObserverImpl& operator=(const EnabledStateObserverImpl&) = delete;
-
-  void OnTraceLogEnabled() final {
-    base::AutoLock lock(mutex_);
-    for (auto* o : observers_) {
-      o->OnTraceEnabled();
-    }
-  }
-
-  void OnTraceLogDisabled() final {
-    base::AutoLock lock(mutex_);
-    for (auto* o : observers_) {
-      o->OnTraceDisabled();
-    }
-  }
-
-  void AddObserver(v8::TracingController::TraceStateObserver* observer) {
-    {
-      base::AutoLock lock(mutex_);
-      DCHECK(!observers_.count(observer));
-      observers_.insert(observer);
-    }
-
-    // Fire the observer if recording is already in progress.
-    if (base::trace_event::TraceLog::GetInstance()->IsEnabled())
-      observer->OnTraceEnabled();
-  }
-
-  void RemoveObserver(v8::TracingController::TraceStateObserver* observer) {
-    base::AutoLock lock(mutex_);
-    DCHECK_EQ(observers_.count(observer), 1lu);
-    observers_.erase(observer);
-  }
-
- private:
-  base::Lock mutex_;
-  std::unordered_set<v8::TracingController::TraceStateObserver*> observers_;
-};
-
-base::LazyInstance<EnabledStateObserverImpl>::Leaky g_trace_state_dispatcher =
-    LAZY_INSTANCE_INITIALIZER;
-
-class TracingControllerImpl : public node::tracing::TracingController {
- public:
-  TracingControllerImpl() = default;
-  ~TracingControllerImpl() override = default;
-
-  // disable copy
-  TracingControllerImpl(const TracingControllerImpl&) = delete;
-  TracingControllerImpl& operator=(const TracingControllerImpl&) = delete;
-
-  // TracingController implementation.
-  const uint8_t* GetCategoryGroupEnabled(const char* name) override {
-    return TRACE_EVENT_API_GET_CATEGORY_GROUP_ENABLED(name);
-  }
-  uint64_t AddTraceEvent(
-      char phase,
-      const uint8_t* category_enabled_flag,
-      const char* name,
-      const char* scope,
-      uint64_t id,
-      uint64_t bind_id,
-      int32_t num_args,
-      const char** arg_names,
-      const uint8_t* arg_types,
-      const uint64_t* arg_values,
-      std::unique_ptr<v8::ConvertableToTraceFormat>* arg_convertables,
-      unsigned int flags) override {
-    base::trace_event::TraceArguments args(
-        num_args, arg_names, arg_types,
-        reinterpret_cast<const unsigned long long*>(  // NOLINT(runtime/int)
-            arg_values),
-        arg_convertables);
-    DCHECK_LE(num_args, 2);
-    base::trace_event::TraceEventHandle handle =
-        TRACE_EVENT_API_ADD_TRACE_EVENT_WITH_BIND_ID(
-            phase, category_enabled_flag, name, scope, id, bind_id, &args,
-            flags);
-    uint64_t result;
-    memcpy(&result, &handle, sizeof(result));
-    return result;
-  }
-  uint64_t AddTraceEventWithTimestamp(
-      char phase,
-      const uint8_t* category_enabled_flag,
-      const char* name,
-      const char* scope,
-      uint64_t id,
-      uint64_t bind_id,
-      int32_t num_args,
-      const char** arg_names,
-      const uint8_t* arg_types,
-      const uint64_t* arg_values,
-      std::unique_ptr<v8::ConvertableToTraceFormat>* arg_convertables,
-      unsigned int flags,
-      int64_t timestampMicroseconds) override {
-    base::trace_event::TraceArguments args(
-        num_args, arg_names, arg_types,
-        reinterpret_cast<const unsigned long long*>(  // NOLINT(runtime/int)
-            arg_values),
-        arg_convertables);
-    DCHECK_LE(num_args, 2);
-    base::TimeTicks timestamp =
-        base::TimeTicks() + base::Microseconds(timestampMicroseconds);
-    base::trace_event::TraceEventHandle handle =
-        TRACE_EVENT_API_ADD_TRACE_EVENT_WITH_THREAD_ID_AND_TIMESTAMP(
-            phase, category_enabled_flag, name, scope, id, bind_id,
-            TRACE_EVENT_API_CURRENT_THREAD_ID, timestamp, &args, flags);
-    uint64_t result;
-    memcpy(&result, &handle, sizeof(result));
-    return result;
-  }
-  void UpdateTraceEventDuration(const uint8_t* category_enabled_flag,
-                                const char* name,
-                                uint64_t handle) override {
-    base::trace_event::TraceEventHandle traceEventHandle;
-    memcpy(&traceEventHandle, &handle, sizeof(handle));
-    TRACE_EVENT_API_UPDATE_TRACE_EVENT_DURATION(category_enabled_flag, name,
-                                                traceEventHandle);
-  }
-  void AddTraceStateObserver(TraceStateObserver* observer) override {
-    g_trace_state_dispatcher.Get().AddObserver(observer);
-  }
-  void RemoveTraceStateObserver(TraceStateObserver* observer) override {
-    g_trace_state_dispatcher.Get().RemoveObserver(observer);
-  }
-};
-
-v8::Isolate* JavascriptEnvironment::Initialize(uv_loop_t* event_loop,
-                                               bool setup_wasm_streaming) {
+v8::Isolate* JavascriptEnvironment::Initialize(
+    uv_loop_t* event_loop,
+    bool setup_wasm_streaming,
+    v8::TracingController* tracing_controller) {
   auto* cmd = base::CommandLine::ForCurrentProcess();
-
   // --js-flags.
-  std::string js_flags =
-      cmd->GetSwitchValueASCII(blink::switches::kJavaScriptFlags);
-  js_flags.append(" --no-freeze-flags-after-init");
-  if (!js_flags.empty())
-    v8::V8::SetFlagsFromString(js_flags.c_str(), js_flags.size());
+  std::string js_flags = "--no-freeze-flags-after-init ";
+  js_flags.append(cmd->GetSwitchValueASCII(blink::switches::kJavaScriptFlags));
+  v8::V8::SetFlagsFromString(js_flags.c_str(), js_flags.size());
 
   // The V8Platform of gin relies on Chromium's task schedule, which has not
   // been started at this point, so we have to rely on Node's V8Platform.
-  auto* tracing_agent = node::CreateAgent();
-  auto* tracing_controller = new TracingControllerImpl();
-  node::tracing::TraceEventHelper::SetAgent(tracing_agent);
   platform_ = node::MultiIsolatePlatform::Create(
       base::RecommendedMaxNumberOfThreadsInThreadGroup(3, 8, 0.1, 0),
-      tracing_controller, gin::V8Platform::GetCurrentPageAllocator());
+      tracing_controller, gin::V8Platform::Get()->GetPageAllocator());
 
   v8::V8::InitializePlatform(platform_.get());
-  gin::IsolateHolder::Initialize(gin::IsolateHolder::kNonStrictMode,
-                                 gin::ArrayBufferAllocator::SharedInstance(),
-                                 nullptr /* external_reference_table */,
-                                 js_flags, nullptr /* fatal_error_callback */,
-                                 nullptr /* oom_error_callback */,
-                                 false /* create_v8_platform */);
+  gin::IsolateHolder::Initialize(
+      gin::IsolateHolder::kNonStrictMode,
+      gin::ArrayBufferAllocator::SharedInstance(),
+      nullptr /* external_reference_table */, js_flags,
+      false /* disallow_v8_feature_flag_overrides */,
+      nullptr /* fatal_error_callback */, nullptr /* oom_error_callback */,
+      false /* create_v8_platform */);
+
+#if defined(V8_ENABLE_SANDBOX)
+  v8::V8::SetInSandboxAllocator(std::make_shared<InSandboxAllocator>());
+#endif
 
   v8::Isolate* isolate = v8::Isolate::Allocate();
   platform_->RegisterIsolate(isolate, event_loop);
@@ -318,10 +305,19 @@ v8::Isolate* JavascriptEnvironment::Initialize(uv_loop_t* event_loop,
   return isolate;
 }
 
+v8::Isolate* JavascriptEnvironment::isolate() const {
+  return isolate_holder_->isolate();
+}
+
 // static
 v8::Isolate* JavascriptEnvironment::GetIsolate() {
   CHECK(g_isolate);
   return g_isolate;
+}
+
+// static
+const node::SnapshotData* JavascriptEnvironment::NodeSnapshot() {
+  return NodeSnapshotForThisProcess();
 }
 
 void JavascriptEnvironment::CreateMicrotasksRunner() {
@@ -333,18 +329,17 @@ void JavascriptEnvironment::CreateMicrotasksRunner() {
 void JavascriptEnvironment::DestroyMicrotasksRunner() {
   DCHECK(microtasks_runner_);
   {
-    v8::HandleScope scope(isolate_);
+    v8::HandleScope scope{isolate()};
     gin_helper::CleanedUpAtExit::DoCleanup();
+    // After DoCleanup() so that observers created by JS that ran during it
+    // (e.g. a webContents 'destroyed' handler) are notified too.
+    microtasks_runner_->NotifyBeforeDispose();
+    // Posted peer release tasks will not run after this point. Release the
+    // peers already queued while V8 can still run.
+    NativePeerBase::ReleaseQueuedPeersForShutdown();
   }
   base::CurrentThread::Get()->RemoveTaskObserver(microtasks_runner_.get());
-}
-
-NodeEnvironment::NodeEnvironment(node::Environment* env) : env_(env) {}
-
-NodeEnvironment::~NodeEnvironment() {
-  auto* isolate_data = env_->isolate_data();
-  node::FreeEnvironment(env_);
-  node::FreeIsolateData(isolate_data);
+  microtasks_runner_.reset();
 }
 
 }  // namespace electron

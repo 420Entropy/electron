@@ -1,35 +1,39 @@
 const { app, safeStorage } = require('electron');
-const { expect } = require('chai');
+
+const { expect } = require('../../../lib/vitest-cjs.cjs');
+
+async function expectRejection(promise, pattern) {
+  let error;
+  try {
+    await promise;
+  } catch (e) {
+    error = e;
+  }
+  expect(error).toBeInstanceOf(Error);
+  expect(error.message).toMatch(pattern);
+}
 
 (async () => {
   if (!app.isReady()) {
-    // isEncryptionAvailable() returns false before the app is ready on
-    // Linux: https://github.com/electron/electron/issues/32206
-    // and
-    // Windows: https://github.com/electron/electron/issues/33640.
-    expect(safeStorage.isEncryptionAvailable()).to.equal(process.platform === 'darwin');
-    if (safeStorage.isEncryptionAvailable()) {
-      const plaintext = 'plaintext';
-      const ciphertext = safeStorage.encryptString(plaintext);
-      expect(Buffer.isBuffer(ciphertext)).to.equal(true);
-      expect(safeStorage.decryptString(ciphertext)).to.equal(plaintext);
-    } else {
-      expect(() => safeStorage.encryptString('plaintext')).to.throw(/safeStorage cannot be used before app is ready/);
-      expect(() => safeStorage.decryptString(Buffer.from(''))).to.throw(/safeStorage cannot be used before app is ready/);
-    }
+    expect(await safeStorage.isAsyncEncryptionAvailable()).toBe(false);
+
+    await expectRejection(
+      safeStorage.encryptStringAsync('plaintext'),
+      /safeStorage cannot be used before app is ready/
+    );
+    await expectRejection(
+      safeStorage.decryptStringAsync(Buffer.from('')),
+      /safeStorage cannot be used before app is ready/
+    );
   }
+
   await app.whenReady();
-  // isEncryptionAvailable() will always return false on CI due to a mocked
-  // dbus as mentioned above.
-  expect(safeStorage.isEncryptionAvailable()).to.equal(process.platform !== 'linux');
-  if (safeStorage.isEncryptionAvailable()) {
+
+  if (await safeStorage.isAsyncEncryptionAvailable()) {
     const plaintext = 'plaintext';
-    const ciphertext = safeStorage.encryptString(plaintext);
-    expect(Buffer.isBuffer(ciphertext)).to.equal(true);
-    expect(safeStorage.decryptString(ciphertext)).to.equal(plaintext);
-  } else {
-    expect(() => safeStorage.encryptString('plaintext')).to.throw(/Encryption is not available/);
-    expect(() => safeStorage.decryptString(Buffer.from(''))).to.throw(/Decryption is not available/);
+    const ciphertext = await safeStorage.encryptStringAsync(plaintext);
+    expect(Buffer.isBuffer(ciphertext)).toBe(true);
+    expect((await safeStorage.decryptStringAsync(ciphertext)).result).toBe(plaintext);
   }
 })()
   .then(app.quit)

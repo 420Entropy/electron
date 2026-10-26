@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from __future__ import print_function
+
 import os
 import subprocess
 import sys
@@ -17,11 +17,22 @@ EXTENSIONS_TO_SKIP = [
   # the PATHS_TO_SKIP is checked with |startswith|.
   'dbgcore.dll',
   'dbghelp.dll',
+  # msdia140.dll is copied to the output dir alongside dbghelp.dll (dbghelp
+  # dynamically loads it to symbolize stack traces). Since we don't ship
+  # dbghelp.dll/dbgcore.dll, msdia140.dll is unneeded in the distribution.
+  'msdia140.dll',
 ]
 
 PATHS_TO_SKIP = [
   # Skip because it is an output of //ui/gl that we don't need.
   'angledata',
+  # //electron:electron_wer ships this as <exe name>_wer.dll.
+  './crashpad_wer.dll',
+  # Skip because ANGLE is statically linked; these are dummy stubs
+  # that upstream generates only for Chromium bot infrastructure and nothing
+  # loads them at runtime. See the TODO(crbug.com/514229803) in ui/gl/BUILD.gn.
+  './libEGL',
+  './libGLESv2',
   # Skip because these are outputs that we don't need.
   './libVkICD_mock_',
   # Skip because these are outputs that we don't need.
@@ -39,8 +50,12 @@ PATHS_TO_SKIP = [
   'pyproto',
   # Skip because these are outputs that we don't need.
   'resources/inspector',
+  'gen/third_party/blink/public/devtools_protocol/types',
+  'gen/third_party/chromium-bidi/src',
   'gen/third_party/devtools-frontend/src',
   'gen/ui/webui',
+  # Skip because these get zipped separately in script/zip-symbols.py
+  'debug',
 ]
 
 def skip_path(dep, dist_zip, target_cpu):
@@ -50,16 +65,26 @@ def skip_path(dep, dist_zip, target_cpu):
   # and arm 64 binaries of mksnapshot since they are built on x64 hardware.
   # Consumers of arm and arm64 mksnapshot can generate snapshot_blob.bin
   # themselves by running mksnapshot.
+  #
+  # Outputs of a secondary toolchain live under $root_out_dir/<toolchain>/
+  # (e.g. clang_x64_v8_arm64/gen/...), so match PATHS_TO_SKIP against the
+  # path relative to that toolchain dir too.
+  candidates = [dep]
+  if dep.startswith('clang_') and '/' in dep:
+    toolchain_relative_dep = dep.split('/', 1)[1]
+    candidates += [toolchain_relative_dep, './' + toolchain_relative_dep]
   should_skip = (
-    any(dep.startswith(path) for path in PATHS_TO_SKIP) or
+    any(c.startswith(path) for c in candidates for path in PATHS_TO_SKIP) or
     any(dep.endswith(ext) for ext in EXTENSIONS_TO_SKIP) or
     (
       "arm" in target_cpu
       and dist_zip == "mksnapshot.zip"
-      and dep == "snapshot_blob.bin"
-    )
+      and "snapshot_blob.bin" in candidates
+    ) or
+    # electron_xcache links V8 but is always handed the target's blob.
+    (dist_zip == "xcache.zip" and "snapshot_blob.bin" in candidates)
   )
-  if should_skip:
+  if should_skip and os.environ.get('ELECTRON_DEBUG_ZIP_SKIP') == '1':
     print("Skipping {}".format(dep))
   return should_skip
 
@@ -80,12 +105,18 @@ def main(argv):
       dep = dep.strip()
       if not skip_path(dep, dist_zip, target_cpu):
         dist_files.add(dep)
+  # On Linux, filter out any files which have a .stripped companion
+  if sys.platform == 'linux':
+    dist_files = {
+      dep for dep in dist_files if f"{dep.removeprefix('./')}.stripped" not in dist_files
+    }
   if sys.platform == 'darwin' and not should_flatten:
     execute(['zip', '-r', '-y', dist_zip] + list(dist_files))
   else:
     with zipfile.ZipFile(
       dist_zip, 'w', zipfile.ZIP_DEFLATED, allowZip64=True
     ) as z:
+      written = set()
       for dep in dist_files:
         if os.path.isdir(dep):
           for root, _, files in os.walk(dep):
@@ -96,10 +127,13 @@ def main(argv):
           dirname = os.path.dirname(dep)
           arcname = (
             os.path.join(dirname, 'chrome-sandbox')
-            if basename == 'chrome_sandbox'
+            if basename.removesuffix('.stripped') == 'chrome_sandbox'
             else dep
           )
           name_to_write = arcname
+          # On Linux, strip the .stripped suffix from the name before zipping
+          if sys.platform == 'linux':
+            name_to_write = name_to_write.removesuffix('.stripped')
           if should_flatten:
             if flatten_relative_to:
               if name_to_write.startswith(flatten_relative_to):
@@ -108,6 +142,11 @@ def main(argv):
                 name_to_write = os.path.basename(arcname)
             else:
               name_to_write = os.path.basename(arcname)
+          # Flattening can map several deps onto one name (e.g. the same
+          # file built by two toolchains); keep the first.
+          if name_to_write in written:
+            continue
+          written.add(name_to_write)
           z.write(
             dep,
             name_to_write,

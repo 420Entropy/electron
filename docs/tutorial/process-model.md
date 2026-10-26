@@ -64,7 +64,8 @@ const contents = win.webContents
 console.log(contents)
 ```
 
-> Note: A renderer process is also created for [web embeds][web-embed] such as the
+> [!NOTE]
+> A renderer process is also created for [web embeds][web-embed] such as the
 > `BrowserView` module. The `webContents` object is also accessible for embedded
 > web content.
 
@@ -83,10 +84,10 @@ terminated as well.
 
 The main process also controls your application's lifecycle through Electron's
 [`app`][app] module. This module provides a large set of events and methods
-that you can use to add custom application behaviour (for instance, programmatically
+that you can use to add custom application behavior (for instance, programmatically
 quitting your application, modifying the application dock, or showing an About panel).
 
-As a practical example, the app shown in the [quick start guide][quick-start-lifecycle]
+As a practical example, the app shown in the [tutorial starter code][tutorial-lifecycle]
 uses `app` APIs to create a more native application window experience.
 
 ```js title='main.js'
@@ -97,7 +98,7 @@ app.on('window-all-closed', () => {
 ```
 
 [app]: ../api/app.md
-[quick-start-lifecycle]: ../tutorial/quick-start.md#manage-your-windows-lifecycle
+[tutorial-lifecycle]: ../tutorial/tutorial-2-first-app.md#quit-the-app-when-all-windows-are-closed-windows--linux
 
 ### Native APIs
 
@@ -112,7 +113,7 @@ For a full list of Electron's main process modules, check out our API documentat
 
 Each Electron app spawns a separate renderer process for each open `BrowserWindow`
 (and each web embed). As its name implies, a renderer is responsible for
-_rendering_ web content. For all intents and purposes, code ran in renderer processes
+_rendering_ web content. For all intents and purposes, code run in renderer processes
 should behave according to web standards (insofar as Chromium does, at least).
 
 Therefore, all user interfaces and app functionality within a single browser
@@ -158,13 +159,13 @@ A preload script can be attached to the main process in the `BrowserWindow` cons
 
 ```js title='main.js'
 const { BrowserWindow } = require('electron')
-//...
+// ...
 const win = new BrowserWindow({
   webPreferences: {
-    preload: 'path/to/preload.js',
-  },
+    preload: 'path/to/preload.js'
+  }
 })
-//...
+// ...
 ```
 
 Because the preload script shares a global [`Window`][window-mdn] interface with the
@@ -175,13 +176,13 @@ Although preload scripts share a `window` global with the renderer they're attac
 you cannot directly attach any variables from the preload script to `window` because of
 the [`contextIsolation`][context-isolation] default.
 
-```js title='preload.js'
+```js title='preload.js' @ts-nocheck
 window.myAPI = {
-  desktop: true,
+  desktop: true
 }
 ```
 
-```js title='renderer.js'
+```js title='renderer.js' @ts-nocheck
 console.log(window.myAPI)
 // => undefined
 ```
@@ -196,11 +197,11 @@ securely:
 const { contextBridge } = require('electron')
 
 contextBridge.exposeInMainWorld('myAPI', {
-  desktop: true,
+  desktop: true
 })
 ```
 
-```js title='renderer.js'
+```js title='renderer.js' @ts-nocheck
 console.log(window.myAPI)
 // => { desktop: true }
 ```
@@ -227,6 +228,23 @@ child_process module is that the utility process can establish a communication
 channel with a renderer process using [`MessagePort`][]s. An Electron app can
 always prefer the [UtilityProcess][] API over Node.js [`child_process.fork`][] API when
 there is need to fork a child process from the main process.
+
+## Process-specific module aliases (TypeScript)
+
+Electron's npm package also exports subpaths that contain a subset of
+Electron's TypeScript type definitions.
+
+- `electron/main` includes types for all main process modules.
+- `electron/renderer` includes types for all renderer process modules.
+- `electron/common` includes types for modules that can run in main and renderer processes.
+
+These aliases have no impact on runtime, but can be used for typechecking
+and autocomplete.
+
+```js title="Usage example"
+const { shell } = require('electron/common')
+const { app } = require('electron/main')
+```
 
 [window-mdn]: https://developer.mozilla.org/en-US/docs/Web/API/Window
 [`MessagePort`]: https://developer.mozilla.org/en-US/docs/Web/API/MessagePort

@@ -6,8 +6,9 @@
 #define ELECTRON_SHELL_COMMON_GIN_HELPER_WRAPPABLE_H_
 
 #include "base/functional/bind.h"
-#include "gin/per_isolate_data.h"
 #include "shell/common/gin_helper/constructor.h"
+#include "shell/common/gin_helper/function_template_cache.h"
+#include "shell/common/gin_helper/wrappable_base.h"
 
 namespace gin_helper {
 
@@ -29,19 +30,18 @@ class Wrappable : public WrappableBase {
         isolate, base::BindRepeating(&internal::InvokeNew<Sig>, constructor));
     templ->InstanceTemplate()->SetInternalFieldCount(1);
     T::BuildPrototype(isolate, templ);
-    gin::PerIsolateData::From(isolate)->SetFunctionTemplate(&kWrapperInfo,
-                                                            templ);
+    SetCachedFunctionTemplate(isolate, &kTemplateKey, templ);
   }
 
   static v8::Local<v8::FunctionTemplate> GetConstructor(v8::Isolate* isolate) {
     // Fill the object template.
-    auto* data = gin::PerIsolateData::From(isolate);
-    auto templ = data->GetFunctionTemplate(&kWrapperInfo);
+    v8::Local<v8::FunctionTemplate> templ =
+        GetCachedFunctionTemplate(isolate, &kTemplateKey);
     if (templ.IsEmpty()) {
       templ = v8::FunctionTemplate::New(isolate);
       templ->InstanceTemplate()->SetInternalFieldCount(1);
       T::BuildPrototype(isolate, templ);
-      data->SetFunctionTemplate(&kWrapperInfo, templ);
+      SetCachedFunctionTemplate(isolate, &kTemplateKey, templ);
     }
     return templ;
   }
@@ -66,12 +66,8 @@ class Wrappable : public WrappableBase {
   }
 
  private:
-  static gin::WrapperInfo kWrapperInfo;
+  static inline const char kTemplateKey = 0;
 };
-
-// static
-template <typename T>
-gin::WrapperInfo Wrappable<T>::kWrapperInfo = {gin::kEmbedderNativeGin};
 
 }  // namespace gin_helper
 

@@ -7,25 +7,37 @@
 #include <string>
 #include <utility>
 
+#include "base/functional/bind.h"
 #include "base/mac/scoped_sending_event.h"
 #include "base/strings/sys_string_conversions.h"
 #include "base/task/current_thread.h"
 #include "base/task/sequenced_task_runner.h"
-#include "content/public/browser/browser_task_traits.h"
-#include "content/public/browser/browser_thread.h"
-#include "content/public/browser/web_contents.h"
+#include "content/public/browser/render_widget_host_view.h"
+#include "gin/persistent.h"
+#include "shell/browser/api/electron_api_base_window.h"
+#include "shell/browser/api/electron_api_web_frame_main.h"
 #include "shell/browser/native_window.h"
 #include "shell/common/keyboard_util.h"
-#include "shell/common/node_includes.h"
+#include "ui/base/cocoa/menu_utils.h"
+#include "v8/include/cppgc/allocation.h"
+#include "v8/include/v8-cppgc.h"
+
+// Roots the Menu whose NSMenu is (or is about to become) [NSApp mainMenu];
+// ElectronMenuController only holds a weak reference to the model.
+@interface ElectronApplicationMenuHolder : NSObject
+- (instancetype)initWithMenu:(electron::api::Menu*)menu;
+- (void)install;
+@end
 
 namespace {
 
-static scoped_nsobject<NSMenu> applicationMenu_;
+ElectronApplicationMenuHolder* __strong g_pending_application_menu = nil;
+ElectronApplicationMenuHolder* __strong g_installed_application_menu = nil;
 
 ui::Accelerator GetAcceleratorFromKeyEquivalentAndModifierMask(
     NSString* key_equivalent,
     NSUInteger modifier_mask) {
-  absl::optional<char16_t> shifted_char;
+  std::optional<char16_t> shifted_char;
   ui::KeyboardCode code = electron::KeyboardCodeFromStr(
       base::SysNSStringToUTF8(key_equivalent), &shifted_char);
   int modifiers = 0;
@@ -42,29 +54,70 @@ ui::Accelerator GetAcceleratorFromKeyEquivalentAndModifierMask(
 
 }  // namespace
 
+@implementation ElectronApplicationMenuHolder {
+  cppgc::Persistent<electron::api::Menu> _menu;
+  ElectronMenuController* __strong _controller;
+}
+
+- (instancetype)initWithMenu:(electron::api::Menu*)menu {
+  if ((self = [super init])) {
+    _menu = menu;
+    _controller = [[ElectronMenuController alloc] initWithModel:menu->model()
+                                          useDefaultAccelerator:YES];
+  }
+  return self;
+}
+
+- (void)install {
+  [NSApp setMainMenu:[_controller menu]];
+  // Drops the previous holder and its reference to the old Menu.
+  g_installed_application_menu = self;
+}
+
+@end
+
 namespace electron::api {
 
-MenuMac::MenuMac(gin::Arguments* args) : Menu(args) {}
+MenuMac::MenuMac(gin::Arguments* args) : Menu{args} {}
 
-MenuMac::~MenuMac() = default;
+MenuMac::~MenuMac() {
+  // Must remove observer before destroying popup_controllers_, which hold
+  // weak references to model_
+  RemoveModelObserver();
+}
+
+void MenuMac::Trace(cppgc::Visitor* visitor) const {
+  Menu::Trace(visitor);
+  visitor->Trace(weak_cell_factory_);
+}
 
 void MenuMac::PopupAt(BaseWindow* window,
+                      std::optional<WebFrameMain*> frame,
                       int x,
                       int y,
                       int positioning_item,
+                      ui::mojom::MenuSourceType source_type,
                       base::OnceClosure callback) {
   NativeWindow* native_window = window->window();
   if (!native_window)
     return;
 
+  cppgc::WeakPersistent<WebFrameMain> weak_frame;
+  if (frame && frame.value()) {
+    weak_frame = frame.value();
+  }
+
   // Make sure the Menu object would not be garbage-collected until the callback
   // has run.
   base::OnceClosure callback_with_ref = BindSelfToClosure(std::move(callback));
 
-  auto popup =
-      base::BindOnce(&MenuMac::PopupOnUI, weak_factory_.GetWeakPtr(),
-                     native_window->GetWeakPtr(), window->weak_map_id(), x, y,
-                     positioning_item, std::move(callback_with_ref));
+  v8::Isolate* isolate = v8::Isolate::GetCurrent();
+  auto popup = base::BindOnce(
+      &MenuMac::PopupOnUI,
+      gin::WrapPersistent(weak_cell_factory_.GetWeakCell(
+          isolate->GetCppHeap()->GetAllocationHandle())),
+      native_window->GetWeakPtr(), std::move(weak_frame), window->weak_map_id(),
+      x, y, positioning_item, std::move(callback_with_ref));
   base::SequencedTaskRunner::GetCurrentDefault()->PostTask(FROM_HERE,
                                                            std::move(popup));
 }
@@ -74,16 +127,15 @@ v8::Local<v8::Value> Menu::GetUserAcceleratorAt(int command_id) const {
   if (![NSMenuItem usesUserKeyEquivalents])
     return v8::Null(isolate);
 
-  auto controller = base::scoped_nsobject<ElectronMenuController>(
-      [[ElectronMenuController alloc] initWithModel:model()
-                              useDefaultAccelerator:NO]);
+  auto controller = [[ElectronMenuController alloc] initWithModel:model()
+                                            useDefaultAccelerator:NO];
 
   int command_index = GetIndexOfCommandId(command_id);
   if (command_index == -1)
     return v8::Null(isolate);
 
-  base::scoped_nsobject<NSMenuItem> item =
-      [controller makeMenuItemForIndex:command_index fromModel:model()];
+  NSMenuItem* item = [controller makeMenuItemForIndex:command_index
+                                            fromModel:model()];
   if ([[item userKeyEquivalent] length] == 0)
     return v8::Null(isolate);
 
@@ -96,6 +148,7 @@ v8::Local<v8::Value> Menu::GetUserAcceleratorAt(int command_id) const {
 }
 
 void MenuMac::PopupOnUI(const base::WeakPtr<NativeWindow>& native_window,
+                        cppgc::WeakPersistent<WebFrameMain> frame,
                         int32_t window_id,
                         int x,
                         int y,
@@ -105,12 +158,15 @@ void MenuMac::PopupOnUI(const base::WeakPtr<NativeWindow>& native_window,
     return;
   NSWindow* nswindow = native_window->GetNativeWindow().GetNativeNSWindow();
 
+  v8::Isolate* isolate = v8::Isolate::GetCurrent();
   base::OnceClosure close_callback =
-      base::BindOnce(&MenuMac::OnClosed, weak_factory_.GetWeakPtr(), window_id,
-                     std::move(callback));
-  popup_controllers_[window_id] = base::scoped_nsobject<ElectronMenuController>(
+      base::BindOnce(&MenuMac::OnClosed,
+                     gin::WrapPersistent(weak_cell_factory_.GetWeakCell(
+                         isolate->GetCppHeap()->GetAllocationHandle())),
+                     window_id, std::move(callback));
+  popup_controllers_[window_id] =
       [[ElectronMenuController alloc] initWithModel:model()
-                              useDefaultAccelerator:NO]);
+                              useDefaultAccelerator:NO];
   NSMenu* menu = [popup_controllers_[window_id] menu];
   NSView* view = [nswindow contentView];
 
@@ -145,7 +201,33 @@ void MenuMac::PopupOnUI(const base::WeakPtr<NativeWindow>& native_window,
   if (rightmostMenuPoint > screenRight)
     position.x = position.x - [menu size].width;
 
-  [popup_controllers_[window_id] setCloseCallback:std::move(close_callback)];
+  [popup_controllers_[window_id]
+      setPopupCloseCallback:std::move(close_callback)];
+
+  if (WebFrameMain* frame_ptr = frame.Get();
+      frame_ptr && frame_ptr->render_frame_host()) {
+    auto* rfh =
+        frame_ptr->render_frame_host()->GetOutermostMainFrameOrEmbedder();
+    auto* rwhv = rfh && rfh->IsRenderFrameLive() ? rfh->GetView() : nullptr;
+    NSView* frame_view = rwhv ? rwhv->GetNativeView().GetNativeNSView() : nil;
+    if (frame_view) {
+      // TODO: ui::ShowContextMenu does not dispatch the event correctly
+      // if no frame is found. Fix this to remove if/else condition.
+      NSEvent* dummy_event =
+          [NSEvent mouseEventWithType:NSEventTypeRightMouseDown
+                             location:position
+                        modifierFlags:0
+                            timestamp:0
+                         windowNumber:nswindow.windowNumber
+                              context:nil
+                          eventNumber:0
+                           clickCount:1
+                             pressure:0];
+      ui::ShowContextMenu(menu, dummy_event, frame_view, true);
+      return;
+    }
+  }
+
   // Make sure events can be pumped while the menu is up.
   base::CurrentThread::ScopedAllowApplicationTasksInNativeNestedLoop allow;
 
@@ -161,8 +243,12 @@ void MenuMac::PopupOnUI(const base::WeakPtr<NativeWindow>& native_window,
 }
 
 void MenuMac::ClosePopupAt(int32_t window_id) {
-  auto close_popup = base::BindOnce(&MenuMac::ClosePopupOnUI,
-                                    weak_factory_.GetWeakPtr(), window_id);
+  v8::Isolate* isolate = v8::Isolate::GetCurrent();
+  auto close_popup =
+      base::BindOnce(&MenuMac::ClosePopupOnUI,
+                     gin::WrapPersistent(weak_cell_factory_.GetWeakCell(
+                         isolate->GetCppHeap()->GetAllocationHandle())),
+                     window_id);
   base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE, std::move(close_popup));
 }
@@ -170,9 +256,9 @@ void MenuMac::ClosePopupAt(int32_t window_id) {
 std::u16string MenuMac::GetAcceleratorTextAtForTesting(int index) const {
   // A least effort to get the real shortcut text of NSMenuItem, the code does
   // not need to be perfect since it is test only.
-  base::scoped_nsobject<ElectronMenuController> controller(
+  ElectronMenuController* controller =
       [[ElectronMenuController alloc] initWithModel:model()
-                              useDefaultAccelerator:NO]);
+                              useDefaultAccelerator:NO];
   NSMenuItem* item = [[controller menu] itemAtIndex:index];
   std::u16string text;
   NSEventModifierFlags modifiers = [item keyEquivalentModifierMask];
@@ -180,27 +266,41 @@ std::u16string MenuMac::GetAcceleratorTextAtForTesting(int index) const {
     text += u"Ctrl";
   if (modifiers & NSEventModifierFlagShift) {
     if (!text.empty())
-      text += u"+";
+      text += u'+';
     text += u"Shift";
   }
   if (modifiers & NSEventModifierFlagOption) {
     if (!text.empty())
-      text += u"+";
+      text += u'+';
     text += u"Alt";
   }
   if (modifiers & NSEventModifierFlagCommand) {
     if (!text.empty())
-      text += u"+";
+      text += u'+';
     text += u"Command";
   }
   if (!text.empty())
-    text += u"+";
+    text += u'+';
   auto key = base::ToUpperASCII(base::SysNSStringToUTF16([item keyEquivalent]));
   if (key == u"\t")
     text += u"Tab";
   else
     text += key;
   return text;
+}
+
+void Menu::SimulateSubmenuCloseSequenceForTesting() {
+  ElectronMenuController* controller =
+      [[ElectronMenuController alloc] initWithModel:model()
+                              useDefaultAccelerator:NO];
+  NSMenu* menu = [controller menu];
+  NSMenu* submenu = menu.itemArray[0].submenu;
+
+  [controller setPopupCloseCallback:base::BindOnce([] {})];
+  [controller menuWillOpen:menu];
+  [controller menuWillOpen:submenu];
+  [controller menuDidClose:submenu];
+  [controller menuDidClose:menu];
 }
 
 void MenuMac::ClosePopupOnUI(int32_t window_id) {
@@ -224,26 +324,24 @@ void MenuMac::OnClosed(int32_t window_id, base::OnceClosure callback) {
 }
 
 // static
-void Menu::SetApplicationMenu(Menu* base_menu) {
-  MenuMac* menu = static_cast<MenuMac*>(base_menu);
-  base::scoped_nsobject<ElectronMenuController> menu_controller(
-      [[ElectronMenuController alloc] initWithModel:menu->model_.get()
-                              useDefaultAccelerator:YES]);
+void Menu::SetApplicationMenu(Menu* menu) {
+  ElectronApplicationMenuHolder* holder =
+      [[ElectronApplicationMenuHolder alloc] initWithMenu:menu];
 
+  // Install in the default run loop mode so the main menu is not swapped
+  // while a menu is open; the installed holder keeps its Menu alive till then.
   NSRunLoop* currentRunLoop = [NSRunLoop currentRunLoop];
-  [currentRunLoop cancelPerformSelector:@selector(setMainMenu:)
-                                 target:NSApp
-                               argument:applicationMenu_];
-  applicationMenu_.reset([[menu_controller menu] retain]);
-  [[NSRunLoop currentRunLoop]
-      performSelector:@selector(setMainMenu:)
-               target:NSApp
-             argument:applicationMenu_
+  if (g_pending_application_menu) {
+    [currentRunLoop
+        cancelPerformSelectorsWithTarget:g_pending_application_menu];
+  }
+  g_pending_application_menu = holder;
+  [currentRunLoop
+      performSelector:@selector(install)
+               target:holder
+             argument:nil
                 order:0
                 modes:[NSArray arrayWithObject:NSDefaultRunLoopMode]];
-
-  // Ensure the menu_controller_ is destroyed after main menu is set.
-  menu_controller.swap(menu->menu_controller_);
 }
 
 // static
@@ -253,11 +351,10 @@ void Menu::SendActionToFirstResponder(const std::string& action) {
 }
 
 // static
-gin::Handle<Menu> Menu::New(gin::Arguments* args) {
-  auto handle =
-      gin::CreateHandle(args->isolate(), static_cast<Menu*>(new MenuMac(args)));
-  gin_helper::CallMethod(args->isolate(), handle.get(), "_init");
-  return handle;
+Menu* Menu::Create(v8::Isolate* isolate, gin::Arguments* args) {
+  Menu* menu = cppgc::MakeGarbageCollected<MenuMac>(
+      isolate->GetCppHeap()->GetAllocationHandle(), args);
+  return menu;
 }
 
 }  // namespace electron::api

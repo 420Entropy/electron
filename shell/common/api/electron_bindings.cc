@@ -5,28 +5,27 @@
 #include "shell/common/api/electron_bindings.h"
 
 #include <algorithm>
-#include <string>
 #include <utility>
-#include <vector>
 
-#include "base/logging.h"
+#include "base/files/file.h"
 #include "base/process/process.h"
 #include "base/process/process_handle.h"
-#include "base/process/process_metrics_iocounters.h"
 #include "base/system/sys_info.h"
-#include "chrome/common/chrome_version.h"
-#include "electron/electron_version.h"
+#include "electron/mas.h"
 #include "services/resource_coordinator/public/cpp/memory_instrumentation/global_memory_dump.h"
 #include "services/resource_coordinator/public/cpp/memory_instrumentation/memory_instrumentation.h"
+// #include
+// "services/resource_coordinator/public/mojom/memory_instrumentation/memory_instrumentation.mojom.h"
 #include "shell/browser/browser.h"
 #include "shell/common/application_info.h"
 #include "shell/common/gin_converters/file_path_converter.h"
 #include "shell/common/gin_helper/dictionary.h"
+#include "shell/common/gin_helper/error_thrower.h"
 #include "shell/common/gin_helper/locker.h"
-#include "shell/common/gin_helper/microtasks_scope.h"
 #include "shell/common/gin_helper/promise.h"
 #include "shell/common/heap_snapshot.h"
 #include "shell/common/node_includes.h"
+#include "shell/common/process_util.h"
 #include "shell/common/thread_restrictions.h"
 #include "third_party/blink/renderer/platform/heap/process_heap.h"  // nogncheck
 
@@ -50,13 +49,12 @@ void ElectronBindings::BindProcess(v8::Isolate* isolate,
   process->SetMethod("getCreationTime", &GetCreationTime);
   process->SetMethod("getHeapStatistics", &GetHeapStatistics);
   process->SetMethod("getBlinkMemoryInfo", &GetBlinkMemoryInfo);
-  if (gin_helper::Locker::IsBrowserProcess()) {
+  if (electron::IsBrowserProcess()) {
     process->SetMethod("getProcessMemoryInfo", &GetProcessMemoryInfo);
   }
   process->SetMethod("getSystemMemoryInfo", &GetSystemMemoryInfo);
   process->SetMethod("getSystemVersion",
                      &base::SysInfo::OperatingSystemVersion);
-  process->SetMethod("getIOCounters", &GetIOCounters);
   process->SetMethod("getCPUUsage",
                      base::BindRepeating(&ElectronBindings::GetCPUUsage,
                                          base::Unretained(metrics)));
@@ -76,32 +74,22 @@ void ElectronBindings::BindTo(v8::Isolate* isolate,
   gin_helper::Dictionary dict(isolate, process);
   BindProcess(isolate, &dict, metrics_.get());
 
-  dict.SetMethod("takeHeapSnapshot", &TakeHeapSnapshot);
+  dict.SetMethod<&TakeHeapSnapshot>("takeHeapSnapshot");
 #if BUILDFLAG(IS_POSIX)
-  dict.SetMethod("setFdLimit", &base::IncreaseFdLimitTo);
+  dict.SetMethod<&base::IncreaseFdLimitTo>("setFdLimit");
 #endif
   dict.SetMethod("activateUvLoop",
                  base::BindRepeating(&ElectronBindings::ActivateUVLoop,
                                      base::Unretained(this)));
-
-  gin_helper::Dictionary versions;
-  if (dict.Get("versions", &versions)) {
-    versions.SetReadOnly(ELECTRON_PROJECT_NAME, ELECTRON_VERSION_STRING);
-    versions.SetReadOnly("chrome", CHROME_VERSION_STRING);
-  }
 }
 
 void ElectronBindings::EnvironmentDestroyed(node::Environment* env) {
-  auto it =
-      std::find(pending_next_ticks_.begin(), pending_next_ticks_.end(), env);
-  if (it != pending_next_ticks_.end())
-    pending_next_ticks_.erase(it);
+  std::erase(pending_next_ticks_, env);
 }
 
 void ElectronBindings::ActivateUVLoop(v8::Isolate* isolate) {
   node::Environment* env = node::Environment::GetCurrent(isolate);
-  if (std::find(pending_next_ticks_.begin(), pending_next_ticks_.end(), env) !=
-      pending_next_ticks_.end())
+  if (std::ranges::contains(pending_next_ticks_, env))
     return;
 
   pending_next_ticks_.push_back(env);
@@ -111,7 +99,7 @@ void ElectronBindings::ActivateUVLoop(v8::Isolate* isolate) {
 // static
 void ElectronBindings::OnCallNextTick(uv_async_t* handle) {
   auto* self = static_cast<ElectronBindings*>(handle->data);
-  for (auto* env : self->pending_next_ticks_) {
+  for (node::Environment* env : self->pending_next_ticks_) {
     gin_helper::Locker locker(env->isolate());
     v8::Context::Scope context_scope(env->context());
     v8::HandleScope handle_scope(env->isolate());
@@ -125,7 +113,7 @@ void ElectronBindings::OnCallNextTick(uv_async_t* handle) {
 // static
 void ElectronBindings::Crash() {
   volatile int* zero = nullptr;
-  *zero = 0;
+  *zero = 0;  // NOLINT(clang-analyzer-core.NullDereference)
 }
 
 // static
@@ -139,8 +127,7 @@ v8::Local<v8::Value> ElectronBindings::GetHeapStatistics(v8::Isolate* isolate) {
   v8::HeapStatistics v8_heap_stats;
   isolate->GetHeapStatistics(&v8_heap_stats);
 
-  gin_helper::Dictionary dict = gin::Dictionary::CreateEmpty(isolate);
-  dict.SetHidden("simple", true);
+  auto dict = gin_helper::Dictionary::CreateEmpty(isolate);
   dict.Set("totalHeapSize",
            static_cast<double>(v8_heap_stats.total_heap_size() >> 10));
   dict.Set(
@@ -170,37 +157,43 @@ v8::Local<v8::Value> ElectronBindings::GetCreationTime(v8::Isolate* isolate) {
   if (timeValue.is_null()) {
     return v8::Null(isolate);
   }
-  double jsTime = timeValue.ToJsTime();
+  double jsTime = timeValue.InMillisecondsFSinceUnixEpoch();
   return v8::Number::New(isolate, jsTime);
 }
 
 // static
 v8::Local<v8::Value> ElectronBindings::GetSystemMemoryInfo(
-    v8::Isolate* isolate,
-    gin_helper::Arguments* args) {
-  base::SystemMemoryInfoKB mem_info;
+    v8::Isolate* const isolate) {
+  base::SystemMemoryInfo mem_info;
   if (!base::GetSystemMemoryInfo(&mem_info)) {
-    args->ThrowError("Unable to retrieve system memory information");
+    gin_helper::ErrorThrower{isolate}.ThrowError(
+        "Unable to retrieve system memory information");
     return v8::Undefined(isolate);
   }
 
-  gin_helper::Dictionary dict = gin::Dictionary::CreateEmpty(isolate);
-  dict.SetHidden("simple", true);
-  dict.Set("total", mem_info.total);
+  auto dict = gin_helper::Dictionary::CreateEmpty(isolate);
+  dict.Set("total", mem_info.total.InKiB());
 
   // See Chromium's "base/process/process_metrics.h" for an explanation.
-  int free =
+  base::ByteSize free =
 #if BUILDFLAG(IS_WIN)
       mem_info.avail_phys;
 #else
       mem_info.free;
 #endif
-  dict.Set("free", free);
+  dict.Set("free", free.InKiB());
 
+#if BUILDFLAG(IS_LINUX)
+  dict.Set("available", mem_info.available.InKiB());
+#endif
+
+#if BUILDFLAG(IS_MAC)
+  dict.Set("fileBacked", mem_info.file_backed.InKiB());
+  dict.Set("purgeable", mem_info.purgeable.InKiB());
+#else
   // NB: These return bogus values on macOS
-#if !BUILDFLAG(IS_MAC)
-  dict.Set("swapTotal", mem_info.swap_total);
-  dict.Set("swapFree", mem_info.swap_free);
+  dict.Set("swapTotal", mem_info.swap_total.InKiB());
+  dict.Set("swapFree", mem_info.swap_free.InKiB());
 #endif
 
   return dict.GetHandle();
@@ -209,7 +202,7 @@ v8::Local<v8::Value> ElectronBindings::GetSystemMemoryInfo(
 // static
 v8::Local<v8::Promise> ElectronBindings::GetProcessMemoryInfo(
     v8::Isolate* isolate) {
-  CHECK(gin_helper::Locker::IsBrowserProcess());
+  CHECK(electron::IsBrowserProcess());
   gin_helper::Promise<gin_helper::Dictionary> promise(isolate);
   v8::Local<v8::Promise> handle = promise.GetHandle();
 
@@ -219,13 +212,11 @@ v8::Local<v8::Promise> ElectronBindings::GetProcessMemoryInfo(
     return handle;
   }
 
-  v8::Global<v8::Context> context(isolate, isolate->GetCurrentContext());
   memory_instrumentation::MemoryInstrumentation::GetInstance()
       ->RequestGlobalDumpForPid(
-          base::GetCurrentProcId(), std::vector<std::string>(),
+          base::GetCurrentProcId(), {} /* allocator_dump_names */,
           base::BindOnce(&ElectronBindings::DidReceiveMemoryDump,
-                         std::move(context), std::move(promise),
-                         base::GetCurrentProcId()));
+                         std::move(promise), base::GetCurrentProcId()));
   return handle;
 }
 
@@ -235,8 +226,7 @@ v8::Local<v8::Value> ElectronBindings::GetBlinkMemoryInfo(
   auto allocated = blink::ProcessHeap::TotalAllocatedObjectSize();
   auto total = blink::ProcessHeap::TotalAllocatedSpace();
 
-  gin_helper::Dictionary dict = gin::Dictionary::CreateEmpty(isolate);
-  dict.SetHidden("simple", true);
+  auto dict = gin_helper::Dictionary::CreateEmpty(isolate);
   dict.Set("allocated", static_cast<double>(allocated >> 10));
   dict.Set("total", static_cast<double>(total >> 10));
   return dict.GetHandle();
@@ -244,20 +234,17 @@ v8::Local<v8::Value> ElectronBindings::GetBlinkMemoryInfo(
 
 // static
 void ElectronBindings::DidReceiveMemoryDump(
-    v8::Global<v8::Context> context,
     gin_helper::Promise<gin_helper::Dictionary> promise,
     base::ProcessId target_pid,
-    bool success,
+    const memory_instrumentation::mojom::RequestOutcome outcome,
     std::unique_ptr<memory_instrumentation::GlobalMemoryDump> global_dump) {
+  DCHECK(electron::IsBrowserProcess());
   v8::Isolate* isolate = promise.isolate();
   v8::HandleScope handle_scope(isolate);
-  v8::Local<v8::Context> local_context =
-      v8::Local<v8::Context>::New(isolate, context);
-  gin_helper::MicrotasksScope microtasks_scope(
-      isolate, local_context->GetMicrotaskQueue(), true);
+  v8::Local<v8::Context> local_context = promise.GetContext();
   v8::Context::Scope context_scope(local_context);
 
-  if (!success) {
+  if (outcome != memory_instrumentation::mojom::RequestOutcome::kSuccess) {
     promise.RejectWithErrorMessage("Failed to create memory dump");
     return;
   }
@@ -266,7 +253,7 @@ void ElectronBindings::DidReceiveMemoryDump(
   for (const memory_instrumentation::GlobalMemoryDump::ProcessDump& dump :
        global_dump->process_dumps()) {
     if (target_pid == dump.pid()) {
-      gin_helper::Dictionary dict = gin::Dictionary::CreateEmpty(isolate);
+      auto dict = gin_helper::Dictionary::CreateEmpty(isolate);
       const auto& osdump = dump.os_dump();
 #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_WIN)
       dict.Set("residentSet", osdump.resident_set_kb);
@@ -288,11 +275,17 @@ void ElectronBindings::DidReceiveMemoryDump(
 v8::Local<v8::Value> ElectronBindings::GetCPUUsage(
     base::ProcessMetrics* metrics,
     v8::Isolate* isolate) {
-  gin_helper::Dictionary dict = gin::Dictionary::CreateEmpty(isolate);
-  dict.SetHidden("simple", true);
+  auto dict = gin_helper::Dictionary::CreateEmpty(isolate);
   int processor_count = base::SysInfo::NumberOfProcessors();
-  dict.Set("percentCPUUsage",
-           metrics->GetPlatformIndependentCPUUsage() / processor_count);
+
+  // Default usage percentage to 0 for compatibility
+  double usagePercent = 0;
+  if (auto usage = metrics->GetCumulativeCPUUsage(); usage.has_value()) {
+    dict.Set("cumulativeCPUUsage", usage->InSecondsF());
+    usagePercent = metrics->GetPlatformIndependentCPUUsage(*usage);
+  }
+
+  dict.Set("percentCPUUsage", usagePercent / processor_count);
 
   // NB: This will throw NOTIMPLEMENTED() on Windows
   // For backwards compatibility, we'll return 0
@@ -301,25 +294,6 @@ v8::Local<v8::Value> ElectronBindings::GetCPUUsage(
 #else
   dict.Set("idleWakeupsPerSecond", 0);
 #endif
-
-  return dict.GetHandle();
-}
-
-// static
-v8::Local<v8::Value> ElectronBindings::GetIOCounters(v8::Isolate* isolate) {
-  auto metrics = base::ProcessMetrics::CreateCurrentProcessMetrics();
-  base::IoCounters io_counters;
-  gin_helper::Dictionary dict = gin::Dictionary::CreateEmpty(isolate);
-  dict.SetHidden("simple", true);
-
-  if (metrics->GetIOCounters(&io_counters)) {
-    dict.Set("readOperationCount", io_counters.ReadOperationCount);
-    dict.Set("writeOperationCount", io_counters.WriteOperationCount);
-    dict.Set("otherOperationCount", io_counters.OtherOperationCount);
-    dict.Set("readTransferCount", io_counters.ReadTransferCount);
-    dict.Set("writeTransferCount", io_counters.WriteTransferCount);
-    dict.Set("otherTransferCount", io_counters.OtherTransferCount);
-  }
 
   return dict.GetHandle();
 }

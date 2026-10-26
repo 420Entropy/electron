@@ -4,7 +4,9 @@
 
 #include "electron/shell/browser/feature_list.h"
 
+#include <algorithm>
 #include <string>
+#include <string_view>
 
 #include "base/base_switches.h"
 #include "base/command_line.h"
@@ -15,10 +17,26 @@
 #include "electron/buildflags/buildflags.h"
 #include "media/base/media_switches.h"
 #include "net/base/features.h"
+#include "printing/buildflags/buildflags.h"
+#include "sandbox/policy/features.h"
 #include "services/network/public/cpp/features.h"
+#include "ui/accessibility/ax_features.mojom-features.h"
 
 #if BUILDFLAG(IS_MAC)
 #include "device/base/features.h"  // nogncheck
+#endif
+
+#if BUILDFLAG(ENABLE_PDF_VIEWER)
+#include "pdf/pdf_features.h"
+#endif
+
+#if BUILDFLAG(IS_LINUX)
+#include "printing/printing_features.h"
+#include "ui/base/ui_base_features.h"
+#endif
+
+#if BUILDFLAG(IS_WIN)
+#include "ui/views/views_features.h"
 #endif
 
 namespace electron {
@@ -29,24 +47,78 @@ void InitializeFeatureList() {
       cmd_line->GetSwitchValueASCII(::switches::kEnableFeatures);
   auto disable_features =
       cmd_line->GetSwitchValueASCII(::switches::kDisableFeatures);
-  // Disable creation of spare renderer process with site-per-process mode,
-  // it interferes with our process preference tracking for non sandboxed mode.
-  // Can be reenabled when our site instance policy is aligned with chromium
-  // when node integration is enabled.
+  // A renderer's command line depends on the WebContents it is created for,
+  // so Electron warms one spare itself (for the first sandboxed window) rather
+  // than letting content keep one alive at all times; apps that open many
+  // windows can opt back into that with --enable-features.
+  if (!std::ranges::any_of(
+          base::FeatureList::SplitFeatureListString(enable_features),
+          [](std::string_view entry) {
+            std::string name, study, group, params;
+            return base::FeatureList::ParseEnableFeatureString(
+                       entry, &name, &study, &group, &params) &&
+                   name == features::kSpareRendererForSitePerProcess.name;
+          })) {
+    disable_features +=
+        std::string(",") + features::kSpareRendererForSitePerProcess.name;
+  }
   disable_features +=
-      std::string(",") + features::kSpareRendererForSitePerProcess.name;
-
-#if !BUILDFLAG(ENABLE_PICTURE_IN_PICTURE)
-  disable_features += std::string(",") + media::kPictureInPicture.name;
-#endif
+      // See https://chromium-review.googlesource.com/c/chromium/src/+/6487926
+      // this breaks PDFs locally as we don't have GLIC infra enabled.
+      std::string(",") + ax::mojom::features::kScreenAIOCREnabled.name +
+      // See https://chromium-review.googlesource.com/c/chromium/src/+/6626905
+      // Needed so that ElectronBrowserClient::RegisterPendingSiteInstance does
+      // not throw a check.
+      std::string(", TraceSiteInstanceGetProcessCreation") +
+      // See https://chromium-review.googlesource.com/c/chromium/src/+/6910012
+      // Needed until we rework some of our logic and checks to enable this
+      // properly.
+      std::string(",") + network::features::kLocalNetworkAccessChecks.name;
 
 #if BUILDFLAG(IS_WIN)
-  // Disable async spellchecker suggestions for Windows, which causes
-  // an empty suggestions list to be returned
+  // See https://chromium-review.googlesource.com/c/chromium/src/+/7204292
+  // This feature causes the following sandbox failure on Windows:
+  // sandbox\policy\win\sandbox_win.cc:777 Sandbox cannot access executable
+  // electron.exe. Check filesystem permissions are valid.
+  // See https://bit.ly/31yqMJR.: Access is denied. (0x5)
   disable_features +=
-      std::string(",") + spellcheck::kWinRetrieveSuggestionsOnlyOnDemand.name;
+      std::string(",") + sandbox::policy::features::kNetworkServiceSandbox.name;
+
+  // Off upstream so Chromium's own Picture-in-Picture windows stay visible in
+  // remote sessions; that also makes setContentProtection(true) a no-op there.
+  enable_features +=
+      std::string(",") +
+      views::features::kAllowWindowCaptureExclusionInRemoteSessions.name;
 #endif
-  base::FeatureList::InitializeInstance(enable_features, disable_features);
+
+#if BUILDFLAG(ENABLE_PDF_VIEWER)
+  // Enable window.showSaveFilePicker api for saving pdf files.
+  // Refs https://issues.chromium.org/issues/373852607
+  enable_features +=
+      std::string(",") + chrome_pdf::features::kPdfUseShowSaveFilePicker.name;
+#endif
+
+#if BUILDFLAG(IS_LINUX)
+  // Without this, globalShortcut is a silent no-op on GNOME Wayland (the
+  // ozone factory returns no listener there). Chromium keeps it off due to
+  // https://gitlab.gnome.org/GNOME/xdg-desktop-portal-gnome/-/issues/185,
+  // but current GNOME persists bound shortcuts across sessions, so re-binds
+  // are silent. A user-passed --disable-features for this still wins.
+  enable_features +=
+      std::string(",") + features::kGlobalShortcutsPortalPreferredTrigger.name;
+#endif
+
+  std::string platform_specific_enable_features =
+      EnablePlatformSpecificFeatures();
+  if (platform_specific_enable_features.size() > 0) {
+    enable_features += std::string(",") + platform_specific_enable_features;
+  }
+  std::string platform_specific_disable_features =
+      DisablePlatformSpecificFeatures();
+  if (platform_specific_disable_features.size() > 0) {
+    disable_features += std::string(",") + platform_specific_disable_features;
+  }
+  base::FeatureList::InitInstance(enable_features, disable_features);
 }
 
 void InitializeFieldTrials() {
@@ -56,5 +128,14 @@ void InitializeFieldTrials() {
 
   base::FieldTrialList::CreateTrialsFromString(force_fieldtrials);
 }
+
+#if !BUILDFLAG(IS_MAC)
+std::string EnablePlatformSpecificFeatures() {
+  return "";
+}
+std::string DisablePlatformSpecificFeatures() {
+  return "";
+}
+#endif
 
 }  // namespace electron

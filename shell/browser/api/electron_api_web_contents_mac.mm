@@ -5,11 +5,11 @@
 #include "content/public/browser/render_widget_host_view.h"
 #include "shell/browser/api/electron_api_web_contents.h"
 #include "shell/browser/ui/cocoa/event_dispatching_window.h"
-#include "shell/browser/web_contents_preferences.h"
 #include "ui/base/cocoa/command_dispatcher.h"
 #include "ui/base/cocoa/nsmenu_additions.h"
 #include "ui/base/cocoa/nsmenuitem_additions.h"
 #include "ui/events/keycodes/keyboard_codes.h"
+#include "ui/views/cocoa/native_widget_mac_ns_window_host.h"
 
 #import <Cocoa/Cocoa.h>
 
@@ -24,7 +24,14 @@ bool WebContents::IsFocused() const {
   if (!view)
     return false;
 
-  if (GetType() != Type::kBackgroundPage) {
+  if (type() != Type::kBackgroundPage) {
+    // A window in an app shim is key in the shim's process; its stand-in in
+    // this process never is.
+    if (auto* host = views::NativeWidgetMacNSWindowHost::GetFromNativeWindow(
+            web_contents()->GetTopLevelNativeWindow());
+        host && host->application_host()) {
+      return host->IsWindowKey() && view->HasFocus();
+    }
     auto window = [web_contents()->GetNativeView().GetNativeNSView() window];
     // On Mac the render widget host view does not lose focus when the window
     // loses focus so check if the top level window is the key window.
@@ -37,24 +44,26 @@ bool WebContents::IsFocused() const {
 
 bool WebContents::PlatformHandleKeyboardEvent(
     content::WebContents* source,
-    const content::NativeWebKeyboardEvent& event) {
-  if (event.skip_in_browser ||
-      event.GetType() == content::NativeWebKeyboardEvent::Type::kChar)
+    const input::NativeWebKeyboardEvent& event) {
+  if (event.skip_if_unhandled ||
+      event.GetType() == input::NativeWebKeyboardEvent::Type::kChar)
     return false;
 
-  // Escape exits tabbed fullscreen mode.
-  if (event.windows_key_code == ui::VKEY_ESCAPE && is_html_fullscreen()) {
-    ExitFullscreenModeForTab(source);
-    return true;
+  if (ShouldIgnoreMenuShortcutsFor(source))
+    return false;
+
+  NSEvent* ns_event = event.os_event.Get();
+
+  // A window in an app shim: the key was pressed in the shim's process, and
+  // the menu it is a shortcut of is the shim's, not this app's.
+  if (auto* host = views::NativeWidgetMacNSWindowHost::GetFromNativeWindow(
+          source->GetTopLevelNativeWindow());
+      host && host->application_host()) {
+    return host->RedispatchKeyEvent(ns_event);
   }
 
-  // Check if the webContents has preferences and to ignore shortcuts
-  auto* web_preferences = WebContentsPreferences::From(source);
-  if (web_preferences && web_preferences->ShouldIgnoreMenuShortcuts())
-    return false;
-
   // Send the event to the menu before sending it to the window
-  if (event.os_event.type == NSEventTypeKeyDown) {
+  if (ns_event.type == NSEventTypeKeyDown) {
     // If the keyboard event is a system shortcut, it's already sent to the
     // NSMenu instance in
     // content/app_shim_remote_cocoa/render_widget_host_view_cocoa.mm via
@@ -62,33 +71,32 @@ bool WebContents::PlatformHandleKeyboardEvent(
     // NSMenu handle it here as well, it'll be sent twice with unexpected side
     // effects.
     bool is_a_keyboard_shortcut_event =
-        [[NSApp mainMenu] cr_menuItemForKeyEquivalentEvent:event.os_event] !=
-        nil;
+        [[NSApp mainMenu] cr_menuItemForKeyEquivalentEvent:ns_event] != nil;
     bool is_a_system_shortcut_event =
         is_a_keyboard_shortcut_event &&
-        (ui::cocoa::ModifierMaskForKeyEvent(event.os_event) &
+        (ui::cocoa::ModifierMaskForKeyEvent(ns_event) &
          NSEventModifierFlagFunction) != 0;
     if (is_a_system_shortcut_event)
       return false;
 
-    if ([[NSApp mainMenu] performKeyEquivalent:event.os_event])
+    if ([[NSApp mainMenu] performKeyEquivalent:ns_event])
       return true;
   }
 
   // Let the window redispatch the OS event
-  if (event.os_event.window &&
-      [event.os_event.window isKindOfClass:[EventDispatchingWindow class]]) {
-    [event.os_event.window redispatchKeyEvent:event.os_event];
+  if (ns_event.window &&
+      [ns_event.window isKindOfClass:[EventDispatchingWindow class]]) {
+    [ns_event.window redispatchKeyEvent:ns_event];
     // FIXME(nornagon): this isn't the right return value; we should implement
     // devtools windows as Widgets in order to take advantage of the
     // preexisting redispatch code in bridged_native_widget.
     return false;
-  } else if (event.os_event.window &&
-             [event.os_event.window
+  } else if (ns_event.window &&
+             [ns_event.window
                  conformsToProtocol:@protocol(CommandDispatchingWindow)]) {
     NSObject<CommandDispatchingWindow>* window =
-        static_cast<NSObject<CommandDispatchingWindow>*>(event.os_event.window);
-    [[window commandDispatcher] redispatchKeyEvent:event.os_event];
+        static_cast<NSObject<CommandDispatchingWindow>*>(ns_event.window);
+    [[window commandDispatcher] redispatchKeyEvent:ns_event];
     // FIXME(clavin): Not exactly sure what to return here, likely the same
     // situation as the branch above. If a future refactor removes
     // |EventDispatchingWindow| then only this branch will need to remain.

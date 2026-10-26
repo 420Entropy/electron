@@ -6,11 +6,12 @@
 #define ELECTRON_SHELL_BROWSER_EXTENDED_WEB_CONTENTS_OBSERVER_H_
 
 #include <string>
-#include <vector>
 
-#include "base/observer_list.h"
-#include "electron/shell/common/api/api.mojom.h"
-#include "ui/gfx/geometry/rect.h"
+#include "base/observer_list_types.h"
+
+namespace gfx {
+class Rect;
+}
 
 namespace electron {
 
@@ -18,17 +19,15 @@ namespace electron {
 // Observer to dispatch those events.
 class ExtendedWebContentsObserver : public base::CheckedObserver {
  public:
-  virtual void OnCloseContents() {}
-  virtual void OnDraggableRegionsUpdated(
-      const std::vector<mojom::DraggableRegionPtr>& regions) {}
   virtual void OnSetContentBounds(const gfx::Rect& rect) {}
   virtual void OnActivateContents() {}
   virtual void OnPageTitleUpdated(const std::u16string& title,
-                                  bool explicit_set) {}
+                                  bool explicit_set,
+                                  bool from_same_document_history_navigation) {}
   virtual void OnDevToolsResized() {}
 
  protected:
-  ~ExtendedWebContentsObserver() override {}
+  ~ExtendedWebContentsObserver() override = default;
 };
 
 }  // namespace electron

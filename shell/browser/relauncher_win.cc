@@ -6,19 +6,23 @@
 
 #include <windows.h>
 
+#include <algorithm>
+
+#include "base/command_line.h"
 #include "base/logging.h"
 #include "base/process/launch.h"
-#include "base/strings/stringprintf.h"
+#include "base/process/process_handle.h"
+#include "base/strings/strcat_win.h"
+#include "base/strings/string_number_conversions_win.h"
+#include "base/win/elevation_util.h"
+#include "base/win/scoped_com_initializer.h"
 #include "base/win/scoped_handle.h"
 #include "sandbox/win/src/nt_internals.h"
 #include "sandbox/win/src/win_utils.h"
-#include "ui/base/win/shell.h"
 
 namespace relauncher::internal {
 
 namespace {
-
-const CharType* kWaitEventName = L"ElectronRelauncherWaitEvent";
 
 struct PROCESS_BASIC_INFORMATION {
   union {
@@ -42,73 +46,20 @@ struct PROCESS_BASIC_INFORMATION {
 };
 
 HANDLE GetParentProcessHandle(base::ProcessHandle handle) {
-  NtQueryInformationProcessFunction NtQueryInformationProcess = nullptr;
-  ResolveNTFunctionPtr("NtQueryInformationProcess", &NtQueryInformationProcess);
-  if (!NtQueryInformationProcess) {
-    LOG(ERROR) << "Unable to get NtQueryInformationProcess";
-    return NULL;
+  base::ProcessId ppid = base::GetParentProcessId(handle);
+  if (ppid == 0u) {
+    LOG(ERROR) << "Could not get parent process handle";
+    return nullptr;
   }
 
-  PROCESS_BASIC_INFORMATION pbi;
-  LONG status =
-      NtQueryInformationProcess(handle, ProcessBasicInformation, &pbi,
-                                sizeof(PROCESS_BASIC_INFORMATION), NULL);
-  if (!NT_SUCCESS(status)) {
-    LOG(ERROR) << "NtQueryInformationProcess failed";
-    return NULL;
-  }
-
-  return ::OpenProcess(PROCESS_ALL_ACCESS, TRUE,
-                       pbi.InheritedFromUniqueProcessId);
-}
-
-StringType AddQuoteForArg(const StringType& arg) {
-  // We follow the quoting rules of CommandLineToArgvW.
-  // http://msdn.microsoft.com/en-us/library/17w5ykft.aspx
-  std::wstring quotable_chars(L" \\\"");
-  if (arg.find_first_of(quotable_chars) == std::wstring::npos) {
-    // No quoting necessary.
-    return arg;
-  }
-
-  std::wstring out;
-  out.push_back(L'"');
-  for (size_t i = 0; i < arg.size(); ++i) {
-    if (arg[i] == '\\') {
-      // Find the extent of this run of backslashes.
-      size_t start = i, end = start + 1;
-      for (; end < arg.size() && arg[end] == '\\'; ++end) {
-      }
-      size_t backslash_count = end - start;
-
-      // Backslashes are escapes only if the run is followed by a double quote.
-      // Since we also will end the string with a double quote, we escape for
-      // either a double quote or the end of the string.
-      if (end == arg.size() || arg[end] == '"') {
-        // To quote, we need to output 2x as many backslashes.
-        backslash_count *= 2;
-      }
-      for (size_t j = 0; j < backslash_count; ++j)
-        out.push_back('\\');
-
-      // Advance i to one before the end to balance i++ in loop.
-      i = end - 1;
-    } else if (arg[i] == '"') {
-      out.push_back('\\');
-      out.push_back('"');
-    } else {
-      out.push_back(arg[i]);
-    }
-  }
-  out.push_back('"');
-
-  return out;
+  return ::OpenProcess(PROCESS_ALL_ACCESS, TRUE, ppid);
 }
 
 }  // namespace
 
 StringType GetWaitEventName(base::ProcessId pid) {
-  return base::StringPrintf(L"%ls-%d", kWaitEventName, static_cast<int>(pid));
+  return base::StrCat({L"ElectronRelauncherWaitEvent-",
+                       base::NumberToWString(static_cast<int>(pid))});
 }
 
 StringType ArgvToCommandLineString(const StringVector& argv) {
@@ -116,7 +67,7 @@ StringType ArgvToCommandLineString(const StringVector& argv) {
   for (const StringType& arg : argv) {
     if (!command_line.empty())
       command_line += L' ';
-    command_line += AddQuoteForArg(arg);
+    command_line += base::CommandLine::QuoteForCommandLineToArgvW(arg);
   }
   return command_line;
 }
@@ -129,7 +80,7 @@ void RelauncherSynchronizeWithParent() {
   // Notify the parent process that it can quit now.
   StringType name = internal::GetWaitEventName(process.Pid());
   base::win::ScopedHandle wait_event(
-      CreateEvent(NULL, TRUE, FALSE, name.c_str()));
+      CreateEvent(nullptr, TRUE, FALSE, name.c_str()));
   ::SetEvent(wait_event.Get());
 
   // Wait for parent process to quit.
@@ -138,6 +89,16 @@ void RelauncherSynchronizeWithParent() {
 
 int LaunchProgram(const StringVector& relauncher_args,
                   const StringVector& argv) {
+  if (std::ranges::find(relauncher_args, kRelauncherDeElevateArg) !=
+      relauncher_args.end()) {
+    // Goes through the desktop's IShellDispatch2, which starts the app with
+    // the shell's token and this process's current directory.
+    base::win::ScopedCOMInitializer com;
+    return SUCCEEDED(base::win::RunDeElevatedNoWait(
+               base::CommandLine::FromString(ArgvToCommandLineString(argv))))
+               ? 0
+               : 1;
+  }
   base::LaunchOptions options;
   base::Process process =
       base::LaunchProcess(ArgvToCommandLineString(argv), options);

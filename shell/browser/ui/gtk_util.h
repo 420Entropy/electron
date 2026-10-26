@@ -11,9 +11,11 @@ class SkBitmap;
 
 namespace gtk_util {
 
+// Returns true if GTK was loaded and initialized.
+// The gtk:: helpers in //ui/gtk crash when called while this is false.
+[[nodiscard]] bool IsGtkAvailable() noexcept;
+
 const char* GetCancelLabel();
-const char* GetOpenLabel();
-const char* GetSaveLabel();
 const char* GetOkLabel();
 const char* GetNoLabel();
 const char* GetYesLabel();

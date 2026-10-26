@@ -8,7 +8,7 @@ The `webFrameMain` module can be used to lookup frames across existing
 [`WebContents`](web-contents.md) instances. Navigation events are the common
 use case.
 
-```javascript
+```js
 const { BrowserWindow, webFrameMain } = require('electron')
 
 const win = new BrowserWindow({ width: 800, height: 1500 })
@@ -29,10 +29,10 @@ win.webContents.on(
 You can also access frames of existing pages by using the `mainFrame` property
 of [`WebContents`](web-contents.md).
 
-```javascript
+```js
 const { BrowserWindow } = require('electron')
 
-async function main () {
+async function main() {
   const win = new BrowserWindow({ width: 800, height: 600 })
   await win.loadURL('https://reddit.com')
 
@@ -66,6 +66,16 @@ These methods can be accessed from the `webFrameMain` module:
 Returns `WebFrameMain | undefined` - A frame with the given process and routing IDs,
 or `undefined` if there is no WebFrameMain associated with the given IDs.
 
+### `webFrameMain.fromFrameToken(processId, frameToken)`
+
+* `processId` Integer - An `Integer` representing the internal ID of the process which owns the frame.
+* `frameToken` string - A `string` token identifying the unique frame. Can also
+  be retrieved in the renderer process via
+  [`webFrame.frameToken`](web-frame.md#webframeframetoken-readonly).
+
+Returns `WebFrameMain | null` - A frame with the given process and frame token,
+or `null` if there is no WebFrameMain associated with the given IDs.
+
 ## Class: WebFrameMain
 
 Process: [Main](../glossary.md#main-process)<br />
@@ -97,16 +107,19 @@ this limitation.
 
 Returns `boolean` - Whether the reload was initiated successfully. Only results in `false` when the frame has no history.
 
+#### `frame.isDestroyed()`
+
+Returns `boolean` - Whether the frame is destroyed.
+
 #### `frame.send(channel, ...args)`
 
 * `channel` string
 * `...args` any[]
 
 Send an asynchronous message to the renderer process via `channel`, along with
-arguments. Arguments will be serialized with the [Structured Clone
-Algorithm][SCA], just like [`postMessage`][], so prototype chains will not be
-included. Sending Functions, Promises, Symbols, WeakMaps, or WeakSets will
-throw an exception.
+arguments. Arguments will be serialized with the [Structured Clone Algorithm][SCA],
+just like [`postMessage`][], so prototype chains will not be included.
+Sending Functions, Promises, Symbols, WeakMaps, or WeakSets will throw an exception.
 
 The renderer process can handle the message by listening to `channel` with the
 [`ipcRenderer`](ipc-renderer.md) module.
@@ -128,8 +141,9 @@ For example:
 
 ```js
 // Main process
+const win = new BrowserWindow()
 const { port1, port2 } = new MessageChannelMain()
-webContents.mainFrame.postMessage('port', { message: 'hello' }, [port1])
+win.webContents.mainFrame.postMessage('port', { message: 'hello' }, [port1])
 
 // Renderer process
 ipcRenderer.on('port', (e, msg) => {
@@ -137,6 +151,97 @@ ipcRenderer.on('port', (e, msg) => {
   // ...
 })
 ```
+
+#### `frame.collectJavaScriptCallStack()` _Experimental_
+
+Returns `Promise<string> | Promise<void>` - A promise that resolves with the currently running JavaScript call
+stack. If no JavaScript runs in the frame, the promise will never resolve. In cases where the call stack is
+otherwise unable to be collected, it will return `undefined`.
+
+This can be useful to determine why the frame is unresponsive in cases where there's long-running JavaScript.
+For more information, see the [proposed Crash Reporting API.](https://wicg.github.io/crash-reporting/)
+
+```js
+const { app } = require('electron')
+
+app.commandLine.appendSwitch('enable-features', 'DocumentPolicyIncludeJSCallStacksInCrashReports')
+
+app.on('web-contents-created', (_, webContents) => {
+  webContents.on('unresponsive', async () => {
+    // Interrupt execution and collect call stack from unresponsive renderer
+    const callStack = await webContents.mainFrame.collectJavaScriptCallStack()
+    console.log('Renderer unresponsive\n', callStack)
+  })
+})
+```
+
+#### `frame.copyVideoFrameAt(x, y)`
+
+* `x` Integer
+* `y` Integer
+
+When executed on a video media element, copies the frame at (x, y) to the clipboard.
+
+#### `frame.saveVideoFrameAs(x, y)`
+
+* `x` Integer
+* `y` Integer
+
+When executed on a video media element, shows a save dialog and saves the frame at (x, y) to disk.
+
+#### `frame.printToPDF(options)`
+
+<!--
+```YAML history
+added:
+  - pr-url: https://github.com/electron/electron/pull/52439
+```
+-->
+
+* `options` [PrintToPDFOptions](structures/print-to-pdf-options.md?inline)
+
+Returns `Promise<Buffer>` - Resolves with the generated PDF data.
+
+Prints the frame's web page as PDF.
+
+Unlike [`webContents.printToPDF`](web-contents.md#contentsprinttopdfoptions),
+this method prints only the contents of the frame it is called on. This can be
+used to print an individual `<iframe>` from the main process.
+
+The `landscape` will be ignored if `@page` CSS at-rule is used in the web page.
+
+An example of printing an iframe to PDF:
+
+```js
+const { app, BrowserWindow } = require('electron')
+
+const fs = require('node:fs')
+const os = require('node:os')
+const path = require('node:path')
+
+app.whenReady().then(() => {
+  const win = new BrowserWindow()
+  win.loadFile('page-with-iframe.html')
+
+  win.webContents.on('did-finish-load', () => {
+    const pdfPath = path.join(os.homedir(), 'Desktop', 'iframe.pdf')
+    const iframe = win.webContents.mainFrame.frames[0]
+    iframe
+      .printToPDF({})
+      .then((data) => {
+        fs.writeFile(pdfPath, data, (error) => {
+          if (error) throw error
+          console.log(`Wrote PDF successfully to ${pdfPath}`)
+        })
+      })
+      .catch((error) => {
+        console.log(`Failed to write PDF to ${pdfPath}: `, error)
+      })
+  })
+})
+```
+
+See [Page.printToPdf](https://chromedevtools.github.io/devtools-protocol/tot/Page/#method-printToPDF) for more information.
 
 ### Instance Properties
 
@@ -210,6 +315,11 @@ not used again.
 
 A `string` representing the frame name.
 
+#### `frame.frameToken` _Readonly_
+
+A `string` which uniquely identifies the frame within its associated renderer
+process. This is equivalent to [`webFrame.frameToken`](web-frame.md#webframeframetoken-readonly).
+
 #### `frame.osProcessId` _Readonly_
 
 An `Integer` representing the operating system `pid` of the process which owns this frame.
@@ -231,6 +341,14 @@ A `string` representing the [visibility state](https://developer.mozilla.org/en-
 
 See also how the [Page Visibility API](browser-window.md#page-visibility) is affected by other Electron APIs.
 
+#### `frame.detached` _Readonly_
+
+A `Boolean` representing whether the frame is detached from the frame tree. If a frame is accessed
+while the corresponding page is running any [`pagehide`][pagehide] or [`unload`][unload] listeners, it may become detached as the
+newly navigated page replaced it in the frame tree.
+
 [SCA]: https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API/Structured_clone_algorithm
 [`postMessage`]: https://developer.mozilla.org/en-US/docs/Web/API/Window/postMessage
 [`MessagePortMain`]: message-port-main.md
+[pagehide]: https://developer.mozilla.org/en-US/docs/Web/API/Window/pagehide_event
+[unload]: https://developer.mozilla.org/en-US/docs/Web/API/Window/unload_event

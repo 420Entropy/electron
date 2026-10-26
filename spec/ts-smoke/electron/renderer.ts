@@ -1,17 +1,31 @@
-
+import { crashReporter, nativeImage, shell } from 'electron/common';
 import { ipcRenderer, webFrame } from 'electron/renderer';
-import { clipboard, crashReporter, shell } from 'electron/common';
 
 // In renderer process (web page).
 // https://github.com/electron/electron/blob/main/docs/api/ipc-renderer.md
+
+(async () => {
+  console.log(await ipcRenderer.invoke('ping-pong')); // prints "pong"
+})();
+
 console.log(ipcRenderer.sendSync('synchronous-message', 'ping')); // prints "pong"
 
-ipcRenderer.on('asynchronous-reply', (event, arg: any) => {
+ipcRenderer.on('test', () => {});
+ipcRenderer.off('test', () => {});
+ipcRenderer.once('test', () => {});
+ipcRenderer.addListener('test', () => {});
+ipcRenderer.removeListener('test', () => {});
+ipcRenderer.removeAllListeners('test');
+
+ipcRenderer.on('asynchronous-reply', (event, arg: string) => {
   console.log(arg); // prints "pong"
   event.sender.send('another-message', 'Hello World!');
 });
 
 ipcRenderer.send('asynchronous-message', 'ping');
+
+// @ts-expect-error Removed API
+ipcRenderer.sendTo(1, 'test', 'Hello World!');
 
 // web-frame
 // https://github.com/electron/electron/blob/main/docs/api/web-frame.md
@@ -25,10 +39,10 @@ console.log(webFrame.getZoomLevel());
 webFrame.setVisualZoomLevelLimits(50, 200);
 
 webFrame.setSpellCheckProvider('en-US', {
-  spellCheck (words, callback) {
+  spellCheck(words, callback) {
     setTimeout(() => {
       const spellchecker = require('spellchecker');
-      const misspelled = words.filter(x => spellchecker.isMisspelled(x));
+      const misspelled = words.filter((x) => spellchecker.isMisspelled(x));
       callback(misspelled);
     }, 0);
   }
@@ -44,22 +58,6 @@ webFrame.executeJavaScript('return true;', true).then((result: boolean) => conso
 console.log(webFrame.getResourceUsage());
 webFrame.clearCache();
 
-// clipboard
-// https://github.com/electron/electron/blob/main/docs/api/clipboard.md
-
-clipboard.writeText('Example String');
-clipboard.writeText('Example String', 'selection');
-console.log(clipboard.readText('selection'));
-console.log(clipboard.availableFormats());
-clipboard.clear();
-
-clipboard.write({
-  html: '<html></html>',
-  text: 'Hello World!',
-  bookmark: 'Bookmark name',
-  image: clipboard.readImage()
-});
-
 // crash-reporter
 // https://github.com/electron/electron/blob/main/docs/api/crash-reporter.md
 
@@ -73,69 +71,47 @@ crashReporter.start({
 // desktopCapturer
 // https://github.com/electron/electron/blob/main/docs/api/desktop-capturer.md
 
-getSources({ types: ['window', 'screen'] }).then(sources => {
-  for (let i = 0; i < sources.length; ++i) {
-    if (sources[i].name === 'Electron') {
-      (navigator as any).webkitGetUserMedia({
-        audio: false,
-        video: {
-          mandatory: {
-            chromeMediaSource: 'desktop',
-            chromeMediaSourceId: sources[i].id,
-            minWidth: 1280,
-            maxWidth: 1280,
-            minHeight: 720,
-            maxHeight: 720
+getSources({ types: ['window', 'screen'] }).then((sources) => {
+  for (const source of sources) {
+    if (source.name === 'Electron') {
+      (navigator as any).webkitGetUserMedia(
+        {
+          audio: false,
+          video: {
+            mandatory: {
+              chromeMediaSource: 'desktop',
+              chromeMediaSourceId: source.id,
+              minWidth: 1280,
+              maxWidth: 1280,
+              minHeight: 720,
+              maxHeight: 720
+            }
           }
-        }
-      }, gotStream, getUserMediaError);
+        },
+        gotStream,
+        getUserMediaError
+      );
       return;
     }
   }
 });
 
-function getSources (options: Electron.SourcesOptions) {
+function getSources(options: Electron.SourcesOptions) {
   return ipcRenderer.invoke('get-sources', options) as Promise<Electron.DesktopCapturerSource[]>;
 }
 
-function gotStream (stream: any) {
-  (document.querySelector('video') as HTMLVideoElement).src = URL.createObjectURL(stream);
+function gotStream(stream: any) {
+  document.querySelector('video')!.src = URL.createObjectURL(stream);
 }
 
-function getUserMediaError (error: Error) {
+function getUserMediaError(error: Error) {
   console.log('getUserMediaError', error);
 }
-
-// File object
-// https://github.com/electron/electron/blob/main/docs/api/file-object.md
-
-/*
-<div id="holder">
-  Drag your file here
-</div>
-*/
-
-const holder = document.getElementById('holder');
-
-holder.ondragover = function () {
-  return false;
-};
-
-holder.ondragleave = holder.ondragend = function () {
-  return false;
-};
-
-holder.ondrop = function (e) {
-  e.preventDefault();
-  const file = e.dataTransfer.files[0];
-  console.log('File you dragged here is', file.path);
-  return false;
-};
 
 // nativeImage
 // https://github.com/electron/electron/blob/main/docs/api/native-image.md
 
-const image = clipboard.readImage();
+const image = nativeImage.createFromPath('/Users/somebody/images/icon.png');
 console.log(image.getSize());
 
 // https://github.com/electron/electron/blob/main/docs/api/process.md
@@ -181,7 +157,9 @@ webview.addEventListener('ipc-message', function (event) {
   console.log(event.channel); // Prints "pong"
 });
 webview.send('ping');
-webview.capturePage().then(image => { console.log(image); });
+webview.capturePage().then((image) => {
+  console.log(image);
+});
 
 const opened = webview.isDevToolsOpened();
 console.log('isDevToolsOpened', opened);

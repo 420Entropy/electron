@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 
-from __future__ import print_function
 import ast
+import argparse
+import json
 import os
-import pprint
 import re
 import subprocess
 import sys
@@ -29,19 +29,19 @@ def run_node_configure(target_cpu):
 
 def read_node_config_gypi():
   config_gypi = os.path.join(NODE_DIR, 'config.gypi')
-  with open(config_gypi, 'r') as f:
-    content = f.read()
+  with open(config_gypi, 'r', encoding='utf-8') as file_in:
+    content = file_in.read()
     return ast.literal_eval(content)
 
 def read_electron_args():
   all_gn = os.path.join(ELECTRON_DIR, 'build', 'args', 'all.gn')
   args = {}
-  with open(all_gn, 'r') as f:
-    for line in f:
+  with open(all_gn, 'r', encoding='utf-8') as file_in:
+    for line in file_in:
       if line.startswith('#'):
         continue
-      m = re.match('([\w_]+) = (.+)', line)
-      if m == None:
+      m = re.match(r'(\w+) = (.+)', line)
+      if m is None:
         continue
       args[m.group(1)] = m.group(2)
   return args
@@ -61,9 +61,24 @@ def main(target_file, target_cpu):
   v['node_module_version'] = int(args['node_module_version'])
   # Used by certain versions of node-gyp.
   v['build_v8_with_gn'] = 'false'
+  # One config.gypi ships in the headers for every platform, so per-OS values
+  # for native module builds are expressed as gyp conditions rather than baked.
+  v.pop('clang', None)
+  v.setdefault('conditions', []).append(['OS=="mac"', {'clang%': 1}])
+  # Evaluated after common.gypi's own conditions so it wins; keeps native
+  # modules loadable on macOS 13.0 - 13.4, which Chromium still supports.
+  config.setdefault('target_defaults', {}).setdefault(
+      'target_conditions', []).append(
+          ['OS=="mac"', {'xcode_settings': {'MACOSX_DEPLOYMENT_TARGET': '13.0'}}])
 
-  with open(target_file, 'w+') as f:
-    f.write(pprint.pformat(config, indent=2))
+  # JSON rather than pprint: node-gyp reads this file by swapping quote
+  # characters, which only round-trips the condition strings in this form.
+  with open(target_file, 'w+', encoding='utf-8') as file_out:
+    file_out.write(json.dumps(config, indent=2, sort_keys=True))
 
 if __name__ == '__main__':
-  sys.exit(main(sys.argv[1], sys.argv[2]))
+  parser = argparse.ArgumentParser()
+  parser.add_argument('target_file')
+  parser.add_argument('target_cpu')
+  parsed = parser.parse_args()
+  sys.exit(main(parsed.target_file, parsed.target_cpu))

@@ -4,17 +4,24 @@
 
 #include "shell/browser/extensions/electron_extensions_api_client.h"
 
+#include <map>
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
-#include "electron/buildflags/buildflags.h"
+#include "components/value_store/value_store_factory.h"
+#include "extensions/browser/api/cookies/cookies_api_delegate.h"
+#include "extensions/browser/api/storage/settings_namespace.h"
 #include "extensions/browser/guest_view/extensions_guest_view_manager_delegate.h"
 #include "extensions/browser/guest_view/mime_handler_view/mime_handler_view_guest_delegate.h"
 #include "printing/buildflags/buildflags.h"
 #include "shell/browser/api/electron_api_web_contents.h"
 #include "shell/browser/extensions/api/management/electron_management_api_delegate.h"
+#include "shell/browser/extensions/api/storage/electron_sync_value_store_cache.h"
 #include "shell/browser/extensions/electron_extension_web_contents_observer.h"
 #include "shell/browser/extensions/electron_messaging_delegate.h"
+#include "shell/common/gin_helper/handle.h"
 #include "v8/include/v8.h"
 
 #if BUILDFLAG(ENABLE_PRINTING)
@@ -22,18 +29,12 @@
 #include "shell/browser/printing/print_view_manager_electron.h"
 #endif
 
-#if BUILDFLAG(ENABLE_PDF_VIEWER)
-#include "components/pdf/browser/pdf_web_contents_helper.h"  // nogncheck
-#include "shell/browser/electron_pdf_web_contents_helper_client.h"
-#endif
-
 namespace extensions {
 
 class ElectronGuestViewManagerDelegate
     : public ExtensionsGuestViewManagerDelegate {
  public:
-  explicit ElectronGuestViewManagerDelegate(content::BrowserContext* context)
-      : ExtensionsGuestViewManagerDelegate(context) {}
+  ElectronGuestViewManagerDelegate() = default;
   ~ElectronGuestViewManagerDelegate() override = default;
 
   // disable copy
@@ -65,16 +66,74 @@ class ElectronMimeHandlerViewGuestDelegate
   // MimeHandlerViewGuestDelegate.
   bool HandleContextMenu(content::RenderFrameHost& render_frame_host,
                          const content::ContextMenuParams& params) override {
-    // TODO(nornagon): surface this event to JS
-    LOG(INFO) << "HCM";
+    auto* web_contents =
+        content::WebContents::FromRenderFrameHost(&render_frame_host);
+    if (!web_contents)
+      return true;
+
+    electron::api::WebContents* api_web_contents =
+        electron::api::WebContents::From(
+            web_contents->GetOutermostWebContents());
+    if (api_web_contents)
+      api_web_contents->HandleContextMenu(render_frame_host, params);
     return true;
   }
+
   void RecordLoadMetric(bool in_main_frame,
-                        const std::string& mime_type) override {}
+                        const std::string& mime_type,
+                        content::BrowserContext* browser_context) override {}
+};
+
+class ElectronCookiesApiDelegate : public CookiesApiDelegate {
+ public:
+  ElectronCookiesApiDelegate() = default;
+  ~ElectronCookiesApiDelegate() override = default;
+
+  // disable copy
+  ElectronCookiesApiDelegate(const ElectronCookiesApiDelegate&) = delete;
+  ElectronCookiesApiDelegate& operator=(const ElectronCookiesApiDelegate&) =
+      delete;
+
+  // CookiesApiDelegate:
+  std::vector<CookieStoreContext> GetCookieStoreContexts(
+      content::BrowserContext& context,
+      bool include_incognito) override {
+    // A session is its own cookie store and has no off-the-record sibling.
+    std::vector<int> tab_ids;
+    for (const auto& contents :
+         electron::api::WebContents::GetWebContentsList()) {
+      if (contents && contents->web_contents() &&
+          contents->web_contents()->GetBrowserContext() == &context) {
+        tab_ids.push_back(contents->ID());
+      }
+    }
+
+    // Only stores with an open tab are listed.
+    std::vector<CookieStoreContext> cookie_stores;
+    if (!tab_ids.empty()) {
+      cookie_stores.push_back(
+          {raw_ref<content::BrowserContext>(context), std::move(tab_ids)});
+    }
+    return cookie_stores;
+  }
 };
 
 ElectronExtensionsAPIClient::ElectronExtensionsAPIClient() = default;
 ElectronExtensionsAPIClient::~ElectronExtensionsAPIClient() = default;
+
+void ElectronExtensionsAPIClient::AddAdditionalValueStoreCaches(
+    content::BrowserContext* context,
+    const scoped_refptr<value_store::ValueStoreFactory>& factory,
+    SettingsChangedCallback observer,
+    std::map<settings_namespace::Namespace,
+             raw_ptr<ValueStoreCache, CtnExperimental>>* caches) {
+  // Add support for chrome.storage.sync. There is no sync service in
+  // Electron, so the cache is backed by a second local store, the same as
+  // Chrome when sync is disabled. chrome.storage.managed stays unsupported
+  // because there is no policy source to read from.
+  (*caches)[settings_namespace::SYNC] =
+      new ElectronSyncValueStoreCache(factory);
+}
 
 MessagingDelegate* ElectronExtensionsAPIClient::GetMessagingDelegate() {
   if (!messaging_delegate_)
@@ -86,15 +145,17 @@ void ElectronExtensionsAPIClient::AttachWebContentsHelpers(
     content::WebContents* web_contents) const {
 #if BUILDFLAG(ENABLE_PRINTING)
   electron::PrintViewManagerElectron::CreateForWebContents(web_contents);
-#endif
-
-#if BUILDFLAG(ENABLE_PDF_VIEWER)
-  pdf::PDFWebContentsHelper::CreateForWebContentsWithClient(
-      web_contents, std::make_unique<ElectronPDFWebContentsHelperClient>());
+  printing::CreateCompositeClientIfNeeded(web_contents, std::string());
 #endif
 
   extensions::ElectronExtensionWebContentsObserver::CreateForWebContents(
       web_contents);
+}
+
+CookiesApiDelegate* ElectronExtensionsAPIClient::GetCookiesApiDelegate() {
+  if (!cookies_api_delegate_)
+    cookies_api_delegate_ = std::make_unique<ElectronCookiesApiDelegate>();
+  return cookies_api_delegate_.get();
 }
 
 ManagementAPIDelegate*
@@ -109,9 +170,8 @@ ElectronExtensionsAPIClient::CreateMimeHandlerViewGuestDelegate(
 }
 
 std::unique_ptr<guest_view::GuestViewManagerDelegate>
-ElectronExtensionsAPIClient::CreateGuestViewManagerDelegate(
-    content::BrowserContext* context) const {
-  return std::make_unique<ElectronGuestViewManagerDelegate>(context);
+ElectronExtensionsAPIClient::CreateGuestViewManagerDelegate() const {
+  return std::make_unique<ElectronGuestViewManagerDelegate>();
 }
 
 }  // namespace extensions

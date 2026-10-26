@@ -8,8 +8,6 @@
 #include <map>
 #include <string>
 
-#include "build/build_config.h"
-
 namespace base {
 class Time;
 }
@@ -45,7 +43,7 @@ class Delegate {
                                   const std::string& update_url) {}
 
  protected:
-  virtual ~Delegate() {}
+  virtual ~Delegate() = default;
 };
 
 class AutoUpdater {
@@ -62,13 +60,16 @@ class AutoUpdater {
   static Delegate* GetDelegate();
   static void SetDelegate(Delegate* delegate);
 
-  static std::string GetFeedURL();
+  static std::string& GetFeedURL();
   // FIXME(zcbenz): We should not do V8 in this file, this method should only
   // accept C++ struct as parameter, and atom_api_auto_updater.cc is responsible
   // for parsing the parameter from JavaScript.
   static void SetFeedURL(gin::Arguments* args);
   static void CheckForUpdates();
   static void QuitAndInstall();
+
+  static bool IsVersionAllowedForUpdate(const std::string& current_version,
+                                        const std::string& target_version);
 
  private:
   static Delegate* delegate_;

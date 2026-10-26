@@ -5,19 +5,14 @@
 #include "shell/app/electron_crash_reporter_client.h"
 
 #include <map>
-#include <memory>
 #include <string>
 
-#include "base/command_line.h"
 #include "base/environment.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
-#include "base/logging.h"
 #include "base/path_service.h"
-#include "base/strings/string_split.h"
 #include "base/strings/utf_string_conversions.h"
 #include "build/build_config.h"
-#include "chrome/common/chrome_paths.h"
 #include "components/crash/core/common/crash_keys.h"
 #include "components/upload_list/crash_upload_list.h"
 #include "content/public/common/content_switches.h"
@@ -29,12 +24,15 @@
 #include "components/version_info/version_info_values.h"
 #endif
 
-#if BUILDFLAG(IS_POSIX)
-#include "base/debug/dump_without_crashing.h"
-#endif
-
 #if BUILDFLAG(IS_WIN)
+#include <windows.h>
+
+#include <vector>
+
+#include "base/base_paths.h"
+#include "base/strings/strcat_win.h"
 #include "base/strings/string_util_win.h"
+#include "base/win/registry.h"
 #endif
 
 namespace {
@@ -53,11 +51,11 @@ void ElectronCrashReporterClient::Create() {
   // By setting the BREAKPAD_DUMP_LOCATION environment variable, an alternate
   // location to write crash dumps can be set.
   auto env = base::Environment::Create();
-  std::string alternate_crash_dump_location;
   base::FilePath crash_dumps_dir_path;
-  if (env->GetVar("BREAKPAD_DUMP_LOCATION", &alternate_crash_dump_location)) {
+  if (std::optional<std::string> alternate_crash_dump_location =
+          env->GetVar("BREAKPAD_DUMP_LOCATION")) {
     crash_dumps_dir_path =
-        base::FilePath::FromUTF8Unsafe(alternate_crash_dump_location);
+        base::FilePath::FromUTF8Unsafe(alternate_crash_dump_location.value());
   }
   if (!crash_dumps_dir_path.empty()) {
     electron::ScopedAllowBlockingForElectron allow_blocking;
@@ -101,26 +99,6 @@ void ElectronCrashReporterClient::SetCrashReporterClientIdFromGUID(
     const std::string& client_guid) {
   crash_keys::SetMetricsClientIdFromGUID(client_guid);
 }
-void ElectronCrashReporterClient::GetProductNameAndVersion(
-    const char** product_name,
-    const char** version) {
-  DCHECK(product_name);
-  DCHECK(version);
-  *product_name = ELECTRON_PRODUCT_NAME;
-  *version = ELECTRON_VERSION_STRING;
-}
-
-void ElectronCrashReporterClient::GetProductNameAndVersion(
-    std::string* product_name,
-    std::string* version,
-    std::string* channel) {
-  const char* c_product_name;
-  const char* c_version;
-  GetProductNameAndVersion(&c_product_name, &c_version);
-  *product_name = c_product_name;
-  *version = c_version;
-  *channel = "";
-}
 
 base::FilePath ElectronCrashReporterClient::GetReporterLogFilename() {
   return base::FilePath(CrashUploadList::kReporterLogFilename);
@@ -128,6 +106,33 @@ base::FilePath ElectronCrashReporterClient::GetReporterLogFilename() {
 #endif
 
 #if BUILDFLAG(IS_WIN)
+namespace {
+
+// Copied from crashpad's crashpad_wer.dll by //electron:electron_wer and
+// shipped in the assets directory (the executable's directory by default) as
+// <exe name>_wer.dll, so an app that renames electron.exe to myapp.exe must
+// rename the helper to myapp_wer.dll.
+constexpr base::FilePath::CharType kWerHelperSuffix[] =
+    FILE_PATH_LITERAL("_wer.dll");
+
+// Windows Error Reporting only loads runtime exception helper modules that
+// are listed (by full path, as a value name) under this key in HKCU or HKLM.
+constexpr wchar_t kWerHelperRegistryKey[] =
+    L"Software\\Microsoft\\Windows\\Windows Error Reporting"
+    L"\\RuntimeExceptionHelperModules";
+
+base::FilePath GetWerHelperPath() {
+  base::FilePath exe, assets_dir;
+  if (!base::PathService::Get(base::FILE_EXE, &exe) ||
+      !base::PathService::Get(base::DIR_ASSETS, &assets_dir)) {
+    return {};
+  }
+  return assets_dir.Append(base::StrCat(
+      {exe.BaseName().RemoveExtension().value(), kWerHelperSuffix}));
+}
+
+}  // namespace
+
 void ElectronCrashReporterClient::GetProductNameAndVersion(
     const std::wstring& exe_path,
     std::wstring* product_name,
@@ -136,6 +141,54 @@ void ElectronCrashReporterClient::GetProductNameAndVersion(
     std::wstring* channel_name) {
   *product_name = base::UTF8ToWide(ELECTRON_PRODUCT_NAME);
   *version = base::UTF8ToWide(ELECTRON_VERSION_STRING);
+}
+
+std::wstring ElectronCrashReporterClient::GetWerRuntimeExceptionModule() {
+  // Called once per process during crashpad initialization, including in
+  // sandboxed children, so do not touch the disk here; registering a path
+  // that does not exist is harmless (WER only loads listed, existing DLLs).
+  return GetWerHelperPath().value();
+}
+
+// static
+void ElectronCrashReporterClient::RegisterWerHelperModuleForCurrentUser() {
+  electron::ScopedAllowBlockingForElectron allow_blocking;
+  const base::FilePath path = GetWerHelperPath();
+  if (path.empty() || !base::PathExists(path))
+    return;
+
+  base::win::RegKey key;
+  if (key.Create(HKEY_CURRENT_USER, kWerHelperRegistryKey,
+                 KEY_QUERY_VALUE | KEY_SET_VALUE) != ERROR_SUCCESS) {
+    return;
+  }
+
+  // Installers that version the install directory (e.g. Squirrel's
+  // app-x.y.z folders) leave one value behind per update. Prune entries for
+  // sibling copies of the helper under this app's install root that no longer
+  // exist on disk; other apps' entries are left alone.
+  const base::FilePath install_root = path.DirName().DirName();
+  std::vector<std::wstring> stale;
+  for (base::win::RegistryValueIterator it(HKEY_CURRENT_USER,
+                                           kWerHelperRegistryKey);
+       it.Valid(); ++it) {
+    base::FilePath registered(it.Name());
+    if (registered != path &&
+        base::FilePath::CompareEqualIgnoreCase(registered.BaseName().value(),
+                                               path.BaseName().value()) &&
+        base::FilePath::CompareEqualIgnoreCase(
+            registered.DirName().DirName().value(), install_root.value()) &&
+        !base::PathExists(registered)) {
+      stale.emplace_back(it.Name());
+    }
+  }
+  for (const std::wstring& name : stale)
+    key.DeleteValue(name.c_str());
+
+  if (!key.HasValue(path.value().c_str())) {
+    // The value's data is ignored by WER; only the name matters.
+    key.WriteValue(path.value().c_str(), DWORD{0});
+  }
 }
 #endif
 
@@ -180,21 +233,20 @@ bool ElectronCrashReporterClient::ReportingIsEnforcedByPolicy(
 }
 #endif
 
-bool ElectronCrashReporterClient::GetShouldRateLimit() {
+bool ElectronCrashReporterClient::ShouldRateLimitUploads() {
   return rate_limit_;
 }
 
-bool ElectronCrashReporterClient::GetShouldCompressUploads() {
+bool ElectronCrashReporterClient::ShouldCompressUploads() {
   return compress_uploads_;
 }
 
-void ElectronCrashReporterClient::GetProcessSimpleAnnotations(
-    std::map<std::string, std::string>* annotations) {
-  for (auto&& pair : global_annotations_) {
-    (*annotations)[pair.first] = pair.second;
-  }
-  (*annotations)["prod"] = ELECTRON_PRODUCT_NAME;
-  (*annotations)["ver"] = ELECTRON_VERSION_STRING;
+std::map<std::string, std::string>
+ElectronCrashReporterClient::GetExtraProcessAnnotations() {
+  std::map<std::string, std::string> annotations = global_annotations_;
+  annotations["prod"] = ELECTRON_PRODUCT_NAME;
+  annotations["ver"] = ELECTRON_VERSION_STRING;
+  return annotations;
 }
 
 #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_MAC)
@@ -207,10 +259,14 @@ std::string ElectronCrashReporterClient::GetUploadUrl() {
   return upload_url_;
 }
 
+void ElectronCrashReporterClient::GetProductInfo(ProductInfo* product_info) {
+  *product_info = ProductInfo(ELECTRON_PRODUCT_NAME, ELECTRON_VERSION_STRING,
+                              /*channel=*/"");
+}
+
 bool ElectronCrashReporterClient::EnableBreakpadForProcess(
     const std::string& process_type) {
   return process_type == switches::kRendererProcess ||
-         process_type == switches::kPpapiPluginProcess ||
          process_type == switches::kZygoteProcess ||
          process_type == switches::kGpuProcess ||
          process_type == switches::kUtilityProcess || process_type == "node";

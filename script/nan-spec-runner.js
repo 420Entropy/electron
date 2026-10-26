@@ -1,31 +1,32 @@
-const cp = require('child_process');
-const fs = require('fs');
-const path = require('path');
+const minimist = require('minimist');
+
+const cp = require('node:child_process');
+const fs = require('node:fs');
+const path = require('node:path');
 
 const BASE = path.resolve(__dirname, '../..');
 const NAN_DIR = path.resolve(BASE, 'third_party', 'nan');
-const NPX_CMD = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+const NODE_GYP_BIN = path.join(NAN_DIR, 'node_modules', 'node-gyp', 'bin', 'node-gyp.js');
 
 const utils = require('./lib/utils');
-const { YARN_VERSION } = require('./yarn');
+const { YARN_SCRIPT_PATH } = require('./yarn');
 
-if (!process.mainModule) {
+if (!require.main) {
   throw new Error('Must call the nan spec runner directly');
 }
 
-const args = require('minimist')(process.argv.slice(2), {
+const args = minimist(process.argv.slice(2), {
   string: ['only']
 });
 
-async function main () {
+async function main() {
   const outDir = utils.getOutDir({ shouldLog: true });
   const nodeDir = path.resolve(BASE, 'out', outDir, 'gen', 'node_headers');
   const env = {
+    npm_config_msvs_version: '2022',
     ...process.env,
     npm_config_nodedir: nodeDir,
-    npm_config_msvs_version: '2019',
-    npm_config_arch: process.env.NPM_CONFIG_ARCH,
-    npm_config_yes: 'true'
+    npm_config_arch: process.env.NPM_CONFIG_ARCH
   };
 
   const clangDir = path.resolve(BASE, 'third_party', 'llvm-build', 'Release+Asserts', 'bin');
@@ -36,34 +37,40 @@ async function main () {
   const platformFlags = [];
   if (process.platform === 'darwin') {
     const sdkPath = path.resolve(BASE, 'out', outDir, 'sdk', 'xcode_links');
-    const sdks = (await fs.promises.readdir(sdkPath)).filter(fileName => fileName.endsWith('.sdk'));
-    const sdkToUse = sdks[0];
-    if (!sdkToUse) {
+    const sdks = (await fs.promises.readdir(sdkPath)).filter((f) => f.endsWith('.sdk'));
+
+    if (!sdks.length) {
       console.error('Could not find an SDK to use for the NAN tests');
       process.exit(1);
     }
 
-    if (sdks.length) {
-      console.warn(`Multiple SDKs found in the xcode_links directory - using ${sdkToUse}`);
+    const sdkToUse = sdks.sort((a, b) => {
+      const getVer = (s) => s.match(/(\d+)\.?(\d*)/)?.[0] || '0';
+      return getVer(b).localeCompare(getVer(a), undefined, { numeric: true });
+    })[0];
+
+    if (sdks.length > 1) {
+      console.warn(`Multiple SDKs found - using ${sdkToUse}`);
     }
 
-    platformFlags.push(
-      `-isysroot ${path.resolve(sdkPath, sdkToUse)}`
-    );
+    platformFlags.push(`-isysroot ${path.resolve(sdkPath, sdkToUse)}`);
   }
 
-  // TODO(ckerr) this is cribbed from read obj/electron/electron_app.ninja.
-  // Maybe it would be better to have this script literally open up that
-  // file and pull cflags_cc from it instead of using bespoke code here?
-  // I think it's unlikely to work; but if it does, it would be more futureproof
+  const cflags = ['-Wno-trigraphs', '-fPIC', ...platformFlags].join(' ');
+
   const cxxflags = [
-    '-std=c++17',
+    '-std=c++20',
+    '-Wno-trigraphs',
+    '-fno-exceptions',
+    '-fno-rtti',
     '-nostdinc++',
-    `-I"${path.resolve(BASE, 'buildtools', 'third_party', 'libc++')}"`,
-    `-isystem"${path.resolve(BASE, 'buildtools', 'third_party', 'libc++', 'trunk', 'include')}"`,
-    `-isystem"${path.resolve(BASE, 'buildtools', 'third_party', 'libc++abi', 'trunk', 'include')}"`,
+    `-isystem "${path.resolve(BASE, 'buildtools', 'third_party', 'libc++')}"`,
+    `-isystem "${path.resolve(BASE, 'third_party', 'libc++', 'src', 'include')}"`,
+    `-isystem "${path.resolve(BASE, 'third_party', 'libc++abi', 'src', 'include')}"`,
+    ' -fvisibility-inlines-hidden',
     '-fPIC',
     '-D_LIBCPP_ABI_NAMESPACE=Cr',
+    '-D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_EXTENSIVE',
     ...platformFlags
   ].join(' ');
 
@@ -78,46 +85,57 @@ async function main () {
 
   if (process.platform !== 'win32') {
     env.CC = cc;
-    env.CFLAGS = cxxflags;
+    env.CFLAGS = cflags;
     env.CXX = cxx;
-    env.LD = ld;
     env.CXXFLAGS = cxxflags;
+    env.LD = ld;
     env.LDFLAGS = ldflags;
   }
 
-  const { status: buildStatus } = cp.spawnSync(NPX_CMD, ['node-gyp', 'rebuild', '--verbose', '--directory', 'test', '-j', 'max'], {
-    env,
-    cwd: NAN_DIR,
-    stdio: 'inherit'
-  });
-
-  if (buildStatus !== 0) {
-    console.error('Failed to build nan test modules');
-    return process.exit(buildStatus);
-  }
-
-  const { status: installStatus } = cp.spawnSync(NPX_CMD, [`yarn@${YARN_VERSION}`, 'install'], {
-    env,
-    cwd: NAN_DIR,
-    stdio: 'inherit'
-  });
-  if (installStatus !== 0) {
+  const { status: installStatus, signal: installSignal } = cp.spawnSync(
+    process.execPath,
+    [YARN_SCRIPT_PATH, 'install'],
+    {
+      env,
+      cwd: NAN_DIR,
+      stdio: 'inherit'
+    }
+  );
+  if (installStatus !== 0 || installSignal != null) {
     console.error('Failed to install nan node_modules');
-    return process.exit(installStatus);
+    return process.exit(installStatus !== 0 ? installStatus : installSignal);
   }
 
-  const onlyTests = args.only && args.only.split(',');
+  const { status: buildStatus, signal } = cp.spawnSync(
+    process.execPath,
+    [NODE_GYP_BIN, 'rebuild', '--verbose', '--directory', 'test', '-j', 'max'],
+    {
+      env,
+      cwd: NAN_DIR,
+      stdio: 'inherit'
+    }
+  );
+  if (buildStatus !== 0 || signal != null) {
+    console.error('Failed to build nan test modules');
+    return process.exit(buildStatus !== 0 ? buildStatus : signal);
+  }
 
-  const DISABLED_TESTS = [
-    'nannew-test.js',
-    'buffer-test.js'
-  ];
-  const testsToRun = fs.readdirSync(path.resolve(NAN_DIR, 'test', 'js'))
-    .filter(test => !DISABLED_TESTS.includes(test))
-    .filter(test => {
-      return !onlyTests || onlyTests.includes(test) || onlyTests.includes(test.replace('.js', '')) || onlyTests.includes(test.replace('-test.js', ''));
+  const onlyTests = args.only?.split(',');
+
+  // buffer-test allocates an external backing store outside the V8 sandbox.
+  const DISABLED_TESTS = new Set(['buffer-test.js']);
+  const testsToRun = fs
+    .readdirSync(path.resolve(NAN_DIR, 'test', 'js'))
+    .filter((test) => !DISABLED_TESTS.has(test))
+    .filter((test) => {
+      return (
+        !onlyTests ||
+        onlyTests.includes(test) ||
+        onlyTests.includes(test.replace('.js', '')) ||
+        onlyTests.includes(test.replace('-test.js', ''))
+      );
     })
-    .map(test => `test/js/${test}`);
+    .map((test) => `test/js/${test}`);
 
   const testChild = cp.spawn(utils.getAbsoluteElectronExec(), ['node_modules/.bin/tap', ...testsToRun], {
     env: {

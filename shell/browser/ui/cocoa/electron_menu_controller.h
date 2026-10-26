@@ -9,7 +9,6 @@
 #import <Cocoa/Cocoa.h>
 
 #include "base/functional/callback.h"
-#include "base/mac/scoped_nsobject.h"
 #include "base/memory/weak_ptr.h"
 
 namespace electron {
@@ -26,10 +25,10 @@ class ElectronMenuModel;
     : NSObject <NSMenuDelegate, NSSharingServiceDelegate> {
  @protected
   base::WeakPtr<electron::ElectronMenuModel> model_;
-  base::scoped_nsobject<NSMenu> menu_;
+  NSMenu* __strong menu_;
   BOOL isMenuOpen_;
   BOOL useDefaultAccelerator_;
-  base::OnceClosure closeCallback;
+  base::OnceClosure popupCloseCallback;
 }
 
 // Builds a NSMenu from the pre-built model (must not be nil). Changes made
@@ -37,7 +36,7 @@ class ElectronMenuModel;
 - (id)initWithModel:(electron::ElectronMenuModel*)model
     useDefaultAccelerator:(BOOL)use;
 
-- (void)setCloseCallback:(base::OnceClosure)callback;
+- (void)setPopupCloseCallback:(base::OnceClosure)callback;
 
 // Populate current NSMenu with |model|.
 - (void)populateWithModel:(electron::ElectronMenuModel*)model;
@@ -52,12 +51,15 @@ class ElectronMenuModel;
 // default initializer was used, then this will create the menu on first call.
 - (NSMenu*)menu;
 
-- (base::scoped_nsobject<NSMenuItem>)
-    makeMenuItemForIndex:(NSInteger)index
-               fromModel:(electron::ElectronMenuModel*)model;
+- (NSMenuItem*)makeMenuItemForIndex:(NSInteger)index
+                          fromModel:(electron::ElectronMenuModel*)model;
 
 // Whether the menu is currently open.
 - (BOOL)isMenuOpen;
+
+// Recursively refreshes the menu tree starting from |menu|, applying the
+// model state (enabled, checked, hidden etc) to each menu item.
+- (void)refreshMenuTree:(NSMenu*)menu;
 
 // NSMenuDelegate methods this class implements. Subclasses should call super
 // if extending the behavior.

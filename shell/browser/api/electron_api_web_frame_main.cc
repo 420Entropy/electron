@@ -4,32 +4,96 @@
 
 #include "shell/browser/api/electron_api_web_frame_main.h"
 
+#include "mojo/public/cpp/bindings/callback_helpers.h"
+
 #include <string>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include "base/containers/map_util.h"
+#include "base/feature_list.h"
+#include "base/functional/callback_helpers.h"
 #include "base/logging.h"
 #include "base/no_destructor.h"
+#include "base/strings/strcat.h"
+#include "content/browser/renderer_host/frame_tree_node.h"         // nogncheck
 #include "content/browser/renderer_host/render_frame_host_impl.h"  // nogncheck
+#include "content/browser/renderer_host/render_process_host_impl.h"  // nogncheck
+#include "content/public/browser/frame_tree_node_id.h"
 #include "content/public/browser/render_frame_host.h"
+#include "content/public/browser/web_contents.h"
 #include "content/public/common/isolated_world_ids.h"
-#include "electron/shell/common/api/api.mojom.h"
 #include "gin/object_template_builder.h"
+#include "gin/persistent.h"
+#include "mojo/public/cpp/bindings/callback_helpers.h"
+#include "printing/buildflags/buildflags.h"
 #include "services/service_manager/public/cpp/interface_provider.h"
 #include "shell/browser/api/message_port.h"
 #include "shell/browser/browser.h"
 #include "shell/browser/javascript_environment.h"
+#include "shell/common/api/api.mojom.h"
 #include "shell/common/gin_converters/blink_converter.h"
 #include "shell/common/gin_converters/frame_converter.h"
 #include "shell/common/gin_converters/gurl_converter.h"
+#include "shell/common/gin_converters/serialized_value_converter.h"
+#include "shell/common/gin_converters/std_converter.h"
 #include "shell/common/gin_converters/value_converter.h"
 #include "shell/common/gin_helper/dictionary.h"
 #include "shell/common/gin_helper/error_thrower.h"
+#include "shell/common/gin_helper/handle.h"
 #include "shell/common/gin_helper/object_template_builder.h"
 #include "shell/common/gin_helper/promise.h"
+#include "shell/common/gin_helper/wrappable_pointer_tags.h"
 #include "shell/common/node_includes.h"
-#include "shell/common/v8_value_serializer.h"
+#include "shell/common/node_util.h"
+#include "shell/common/v8_util.h"
+
+#if BUILDFLAG(ENABLE_PRINTING)
+#include "shell/browser/printing/print_to_pdf.h"
+#endif
+#include "third_party/abseil-cpp/absl/container/flat_hash_map.h"
+#include "third_party/blink/public/mojom/frame/media_player_action.mojom.h"
+#include "ui/gfx/geometry/point.h"
+#include "v8/include/cppgc/allocation.h"
+#include "v8/include/v8-cppgc.h"
+
+namespace {
+
+using LifecycleState = content::RenderFrameHostImpl::LifecycleStateImpl;
+
+// RenderFrameCreated is called for speculative frames which may not be
+// used in certain cross-origin navigations. Invoking
+// RenderFrameHost::GetLifecycleState currently crashes when called for
+// speculative frames so we need to filter it out for now. Check
+// https://crbug.com/1183639 for details on when this can be removed.
+[[nodiscard]] LifecycleState GetLifecycleState(
+    const content::RenderFrameHost* rfh) {
+  const auto* rfh_impl = static_cast<const content::RenderFrameHostImpl*>(rfh);
+  return rfh_impl->lifecycle_state();
+}
+
+// RenderFrameHost (RFH) exists as a child of a FrameTreeNode. When a
+// cross-origin navigation occurs, the FrameTreeNode swaps RFHs. After
+// swapping, the old RFH will be marked for deletion and run any unload
+// listeners. If an IPC is sent during an unload/beforeunload listener,
+// it's possible that it arrives after the RFH swap and has been
+// detached from the FrameTreeNode.
+[[nodiscard]] bool IsDetachedFrameHost(const content::RenderFrameHost* rfh) {
+  if (!rfh)
+    return true;
+
+  // During cross-origin navigation, a RFH may be swapped out of its
+  // FrameTreeNode with a new RFH. In these cases, it's marked for
+  // deletion. As this pending deletion RFH won't be following future
+  // swaps, we need to indicate that its been detached.
+  // Also covers CommitPending: the old RFH is no longer current but still
+  // kActive, and embedder callbacks (focus/blur) can run in that window.
+  const auto* rfh_impl = static_cast<const content::RenderFrameHostImpl*>(rfh);
+  return GetLifecycleState(rfh) == LifecycleState::kRunningUnloadHandlers ||
+         rfh_impl->frame_tree_node()->current_frame_host() != rfh_impl;
+}
+
+}  // namespace
 
 namespace gin {
 
@@ -55,59 +119,154 @@ struct Converter<blink::mojom::PageVisibilityState> {
 
 namespace electron::api {
 
-typedef std::unordered_map<int, WebFrameMain*> WebFrameMainIdMap;
+// These maps are non-owning lookup indices. cppgc objects cannot be stored as
+// raw pointers outside the heap, and strong Persistents would retain frames
+// after their lifecycle ends, so use weak handles that clear on collection.
+// FrameTreeNodeId -> WebFrameMain*
+// Using FrameTreeNode allows us to track frame across navigations. This
+// is most similar to how <iframe> works.
+using FrameTreeNodeIdMap =
+    absl::flat_hash_map<content::FrameTreeNodeId,
+                        cppgc::WeakPersistent<WebFrameMain>>;
 
-WebFrameMainIdMap& GetWebFrameMainMap() {
-  static base::NoDestructor<WebFrameMainIdMap> instance;
+// Token -> WebFrameMain*
+// Maps exact RFH to a WebFrameMain instance.
+using FrameTokenMap = std::map<content::GlobalRenderFrameHostToken,
+                               cppgc::WeakPersistent<WebFrameMain>>;
+
+namespace {
+
+FrameTreeNodeIdMap& GetFrameTreeNodeIdMap() {
+  static base::NoDestructor<FrameTreeNodeIdMap> instance;
+  return *instance;
+}
+FrameTokenMap& GetFrameTokenMap() {
+  static base::NoDestructor<FrameTokenMap> instance;
   return *instance;
 }
 
+}  // namespace
+
 // static
-WebFrameMain* WebFrameMain::FromFrameTreeNodeId(int frame_tree_node_id) {
-  WebFrameMainIdMap& frame_map = GetWebFrameMainMap();
-  auto iter = frame_map.find(frame_tree_node_id);
-  auto* web_frame = iter == frame_map.end() ? nullptr : iter->second;
-  return web_frame;
+WebFrameMain* WebFrameMain::FromFrameTreeNodeId(
+    content::FrameTreeNodeId frame_tree_node_id) {
+  return base::FindPtrOrNull(GetFrameTreeNodeIdMap(), frame_tree_node_id);
+}
+
+// static
+WebFrameMain* WebFrameMain::FromFrameToken(
+    content::GlobalRenderFrameHostToken frame_token) {
+  return base::FindPtrOrNull(GetFrameTokenMap(), frame_token);
 }
 
 // static
 WebFrameMain* WebFrameMain::FromRenderFrameHost(content::RenderFrameHost* rfh) {
-  return rfh ? FromFrameTreeNodeId(rfh->GetFrameTreeNodeId()) : nullptr;
+  if (!rfh)
+    return nullptr;
+  return FromFrameToken(rfh->GetGlobalFrameToken());
 }
 
-gin::WrapperInfo WebFrameMain::kWrapperInfo = {gin::kEmbedderNativeGin};
+content::RenderFrameHost* WebFrameMain::render_frame_host() const {
+  return render_frame_disposed_
+             ? nullptr
+             : content::RenderFrameHost::FromFrameToken(frame_token_);
+}
+
+gin::WrapperInfo WebFrameMain::kWrapperInfo =
+    electron::MakeWrapperInfo(electron::kElectronWebFrameMain);
 
 WebFrameMain::WebFrameMain(content::RenderFrameHost* rfh)
-    : frame_tree_node_id_(rfh->GetFrameTreeNodeId()), render_frame_(rfh) {
-  GetWebFrameMainMap().emplace(frame_tree_node_id_, this);
+    : frame_tree_node_id_(rfh->GetFrameTreeNodeId()),
+      frame_token_(rfh->GetGlobalFrameToken()),
+      render_frame_detached_(IsDetachedFrameHost(rfh)) {
+  // Detached RFH should not insert itself in FTN lookup since it has been
+  // swapped already.
+  if (!render_frame_detached_) {
+    auto& map = GetFrameTreeNodeIdMap();
+    auto [it, inserted] = map.try_emplace(frame_tree_node_id_, this);
+    if (!inserted) {
+      WebFrameMain* stale = it->second.Get();
+      it->second = this;
+      // A live entry here was never told its frame went away; dispose it
+      // rather than leave two live instances for one node.
+      if (stale)
+        stale->MarkRenderFrameDisposed();
+    }
+  }
+
+  const auto [_, inserted] = GetFrameTokenMap().emplace(frame_token_, this);
+  DCHECK(inserted);
+
+  // WebFrameMain should only be created for active or unloading frames.
+  DCHECK(GetLifecycleState(rfh) == LifecycleState::kActive ||
+         GetLifecycleState(rfh) == LifecycleState::kRunningUnloadHandlers);
 }
 
-WebFrameMain::~WebFrameMain() {
-  Destroyed();
-}
+WebFrameMain::~WebFrameMain() = default;
 
 void WebFrameMain::Destroyed() {
+  if (FromFrameTreeNodeId(frame_tree_node_id_) == this) {
+    // WebFrameMain initialized as detached doesn't support FTN lookup and
+    // shouldn't erase the entry.
+    DCHECK(!render_frame_detached_ || render_frame_disposed_);
+    GetFrameTreeNodeIdMap().erase(frame_tree_node_id_);
+  }
+
   MarkRenderFrameDisposed();
-  GetWebFrameMainMap().erase(frame_tree_node_id_);
-  Unpin();
+}
+
+// static
+void WebFrameMain::DestroyAllForWebContents(
+    content::WebContents* web_contents) {
+  // The token map covers every live instance (the FTN-id map does not).
+  // Collect first; Destroyed() mutates both maps.
+  std::vector<content::GlobalRenderFrameHostToken> tokens;
+  for (const auto& [token, web_frame] : GetFrameTokenMap()) {
+    if (web_frame && content::WebContents::FromFrameTreeNodeId(
+                         web_frame->frame_tree_node_id_) == web_contents) {
+      tokens.push_back(token);
+    }
+  }
+  for (const auto& token : tokens) {
+    if (WebFrameMain* web_frame = FromFrameToken(token))
+      web_frame->Destroyed();
+  }
 }
 
 void WebFrameMain::MarkRenderFrameDisposed() {
-  render_frame_ = nullptr;
+  render_frame_detached_ = true;
   render_frame_disposed_ = true;
+  weak_factory_.Invalidate();
   TeardownMojoConnection();
+
+  if (FromFrameTreeNodeId(frame_tree_node_id_) != this) {
+    GetFrameTokenMap().erase(frame_token_);
+    keep_alive_.Clear();
+  }
 }
 
+// Should only be called when swapping frames.
 void WebFrameMain::UpdateRenderFrameHost(content::RenderFrameHost* rfh) {
-  // Should only be called when swapping frames.
+  // From() may already have adopted |rfh| before RenderFrameHostChanged ran.
+  if (!render_frame_disposed_ && frame_token_ == rfh->GetGlobalFrameToken())
+    return;
+
+  GetFrameTokenMap().erase(frame_token_);
+
+  // Ensure that RFH being swapped in doesn't already exist as its own
+  // WebFrameMain instance.
+  frame_token_ = rfh->GetGlobalFrameToken();
+  const auto [_, inserted] = GetFrameTokenMap().emplace(frame_token_, this);
+  DCHECK(inserted);
+
   render_frame_disposed_ = false;
-  render_frame_ = rfh;
+  render_frame_detached_ = false;
   TeardownMojoConnection();
   MaybeSetupMojoConnection();
 }
 
 bool WebFrameMain::CheckRenderFrame() const {
-  if (render_frame_disposed_) {
+  if (!HasRenderFrame()) {
     v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
     v8::HandleScope scope(isolate);
     gin_helper::ErrorThrower(isolate).ThrowError(
@@ -124,7 +283,7 @@ v8::Local<v8::Promise> WebFrameMain::ExecuteJavaScript(
   v8::Local<v8::Promise> handle = promise.GetHandle();
 
   // Optional userGesture parameter
-  bool user_gesture;
+  bool user_gesture = false;
   if (!args->PeekNext().IsEmpty()) {
     if (args->PeekNext()->IsBoolean()) {
       args->GetNext(&user_gesture);
@@ -132,8 +291,6 @@ v8::Local<v8::Promise> WebFrameMain::ExecuteJavaScript(
       args->ThrowTypeError("userGesture must be a boolean");
       return handle;
     }
-  } else {
-    user_gesture = false;
   }
 
   if (render_frame_disposed_) {
@@ -142,10 +299,10 @@ v8::Local<v8::Promise> WebFrameMain::ExecuteJavaScript(
     return handle;
   }
 
-  static_cast<content::RenderFrameHostImpl*>(render_frame_)
+  static_cast<content::RenderFrameHostImpl*>(render_frame_host())
       ->ExecuteJavaScriptForTests(
           code, user_gesture, true /* resolve_promises */,
-          content::ISOLATED_WORLD_ID_GLOBAL,
+          /*honor_js_content_settings=*/true, content::ISOLATED_WORLD_ID_GLOBAL,
           base::BindOnce(
               [](gin_helper::Promise<base::Value> promise,
                  blink::mojom::JavaScriptExecutionResultType type,
@@ -164,28 +321,134 @@ v8::Local<v8::Promise> WebFrameMain::ExecuteJavaScript(
   return handle;
 }
 
+v8::Local<v8::Promise> WebFrameMain::PrintToPDF(gin::Arguments* args) {
+  v8::Isolate* isolate = args->isolate();
+#if BUILDFLAG(ENABLE_PRINTING)
+  v8::Local<v8::Value> options;
+  args->GetNext(&options);
+  // Jobs queue per frame tree, keyed by its top frame (or this one if that is
+  // already gone).
+  const int frame_tree =
+      HasRenderFrame()
+          ? render_frame_host()->GetMainFrame()->GetFrameTreeNodeId().value()
+          : FrameTreeNodeID().value();
+  return electron::PrintToPDF(
+      isolate, frame_tree,
+      base::BindRepeating(
+          [](cppgc::WeakPersistent<WebFrameMain> self)
+              -> content::RenderFrameHost* {
+            return self && self->HasRenderFrame() ? self->render_frame_host()
+                                                  : nullptr;
+          },
+          cppgc::WeakPersistent<WebFrameMain>(this)),
+      {"Render frame was disposed before WebFrameMain could be accessed"},
+      options);
+#else
+  gin_helper::Promise<v8::Local<v8::Value>> promise(isolate);
+  v8::Local<v8::Promise> handle = promise.GetHandle();
+  promise.RejectWithErrorMessage("Printing feature is disabled");
+  return handle;
+#endif
+}
+
+void WebFrameMain::CopyVideoFrameAt(int x, int y) {
+  if (!CheckRenderFrame())
+    return;
+  auto location = gfx::Point(x, y);
+  auto action = blink::mojom::MediaPlayerAction(
+      blink::mojom::MediaPlayerActionType::kCopyVideoFrame,
+      /*enable=*/true);
+  return render_frame_host()->ExecuteMediaPlayerActionAtLocation(location,
+                                                                 action);
+}
+
+void WebFrameMain::SaveVideoFrameAs(int x, int y) {
+  if (!CheckRenderFrame())
+    return;
+  auto location = gfx::Point(x, y);
+  auto action = blink::mojom::MediaPlayerAction(
+      blink::mojom::MediaPlayerActionType::kSaveVideoFrameAs,
+      /*enable=*/true);
+  return render_frame_host()->ExecuteMediaPlayerActionAtLocation(location,
+                                                                 action);
+}
+
 bool WebFrameMain::Reload() {
   if (!CheckRenderFrame())
     return false;
-  return render_frame_->Reload();
+  return render_frame_host()->Reload();
 }
 
-void WebFrameMain::Send(v8::Isolate* isolate,
-                        bool internal,
-                        const std::string& channel,
-                        v8::Local<v8::Value> args) {
-  blink::CloneableMessage message;
-  if (!gin::ConvertFromV8(isolate, args, &message)) {
-    isolate->ThrowException(v8::Exception::Error(
-        gin::StringToV8(isolate, "Failed to serialize arguments")));
+bool WebFrameMain::IsDestroyed() const {
+  return render_frame_disposed_;
+}
+
+bool ReadIPCSendArguments(gin::Arguments* args,
+                          std::string_view source,
+                          std::string* channel,
+                          electron::SerializedValue* message) {
+  v8::Isolate* isolate = args->isolate();
+  v8::Local<v8::Value> channel_value;
+  if (!args->GetNext(&channel_value) || !channel_value->IsString()) {
+    gin_helper::ErrorThrower(isolate).ThrowTypeError(
+        "Missing required channel argument");
+    return false;
+  }
+  *channel = gin::V8ToString(isolate, channel_value);
+  v8::LocalVector<v8::Value> rest(isolate);
+  v8::Local<v8::Value> next;
+  while (args->GetNext(&next))
+    rest.push_back(next);
+  v8::TryCatch try_catch(isolate);
+  if (!gin::ConvertFromV8(isolate,
+                          v8::Array::New(isolate, rest.data(), rest.size()),
+                          message)) {
+    // e.g. a DataCloneError for an argument that cannot be serialized.
+    std::string reason = "Failed to serialize arguments";
+    if (try_catch.HasCaught()) {
+      v8::Local<v8::String> exception;
+      if (try_catch.Exception()
+              ->ToString(isolate->GetCurrentContext())
+              .ToLocal(&exception)) {
+        reason = gin::V8ToString(isolate, exception);
+      }
+      try_catch.Reset();
+    }
+    WarnIPCSendFailed(isolate, source, reason);
+    return false;
+  }
+  return true;
+}
+
+void WarnIPCSendFailed(v8::Isolate* isolate,
+                       std::string_view source,
+                       std::string_view reason) {
+  util::EmitWarning(isolate,
+                    base::StrCat({"Error sending from ", source, ": ", reason}),
+                    "electron");
+}
+
+void WebFrameMain::Send(gin::Arguments* args) {
+  std::string channel;
+  electron::SerializedValue message;
+  if (!ReadIPCSendArguments(args, "webFrameMain", &channel, &message))
+    return;
+  DeliverMessage(args->isolate(), false, "webFrameMain", channel,
+                 std::move(message));
+}
+
+void WebFrameMain::DeliverMessage(v8::Isolate* isolate,
+                                  bool internal,
+                                  std::string_view source,
+                                  const std::string& channel,
+                                  electron::SerializedValue message) {
+  if (!HasRenderFrame()) {
+    WarnIPCSendFailed(
+        isolate, source,
+        "Render frame was disposed before WebFrameMain could be accessed");
     return;
   }
-
-  if (!CheckRenderFrame())
-    return;
-
-  GetRendererApi()->Message(internal, channel, std::move(message),
-                            0 /* sender_id */);
+  GetRendererApi()->Message(internal, channel, std::move(message));
 }
 
 const mojo::Remote<mojom::ElectronRenderer>& WebFrameMain::GetRendererApi() {
@@ -204,22 +467,93 @@ void WebFrameMain::MaybeSetupMojoConnection() {
 
   if (!renderer_api_) {
     pending_receiver_ = renderer_api_.BindNewPipeAndPassReceiver();
-    renderer_api_.set_disconnect_handler(base::BindOnce(
-        &WebFrameMain::OnRendererConnectionError, weak_factory_.GetWeakPtr()));
+    v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
+    renderer_api_.set_disconnect_handler(
+        base::BindOnce(&WebFrameMain::OnRendererConnectionError,
+                       gin::WrapPersistent(weak_factory_.GetWeakCell(
+                           isolate->GetCppHeap()->GetAllocationHandle()))));
   }
 
-  DCHECK(render_frame_);
+  content::RenderFrameHost* rfh = render_frame_host();
+  DCHECK(rfh);
 
   // Wait for RenderFrame to be created in renderer before accessing remote.
-  if (pending_receiver_ && render_frame_ &&
-      render_frame_->IsRenderFrameLive()) {
-    render_frame_->GetRemoteInterfaces()->GetInterface(
-        std::move(pending_receiver_));
+  if (pending_receiver_ && rfh && rfh->IsRenderFrameLive()) {
+    rfh->GetRemoteInterfaces()->GetInterface(std::move(pending_receiver_));
   }
+}
+
+// static
+base::OnceCallback<void(bool, electron::SerializedValue, const std::string&)>
+WebFrameMain::BindPromiseToReply(
+    gin_helper::Promise<v8::Local<v8::Value>> promise) {
+  auto [on_reply, on_drop] = base::SplitOnceCallback(base::BindOnce(
+      [](gin_helper::Promise<v8::Local<v8::Value>> promise, bool replied,
+         bool success, electron::SerializedValue result,
+         const std::string& error) {
+        if (!replied) {
+          promise.RejectWithErrorMessage(kFrameDisposedError);
+          return;
+        }
+        if (!success && !error.empty()) {
+          promise.RejectWithErrorMessage(error);
+          return;
+        }
+        v8::Isolate* isolate = promise.isolate();
+        v8::HandleScope handle_scope(isolate);
+        v8::Context::Scope context_scope(promise.GetContext());
+        v8::Local<v8::Value> value = gin::ConvertToV8(isolate, result);
+        if (success)
+          promise.Resolve(value);
+        else
+          promise.Reject(value);
+      },
+      std::move(promise)));
+  return mojo::WrapCallbackWithDropHandler(
+      base::BindOnce(std::move(on_reply), true),
+      base::BindOnce(std::move(on_drop), false, false,
+                     electron::SerializedValue(), std::string()));
+}
+
+v8::Local<v8::Promise> WebFrameMain::TransferSharedTexture(
+    v8::Isolate* isolate,
+    v8::Local<v8::Value> transfer,
+    const std::string& texture_id,
+    v8::Local<v8::Value> args) {
+  gin_helper::Promise<v8::Local<v8::Value>> promise(isolate);
+  v8::Local<v8::Promise> handle = promise.GetHandle();
+  electron::SerializedValue serialized_transfer, serialized_args;
+  if (!electron::SerializeV8Value(isolate, transfer, &serialized_transfer) ||
+      !electron::SerializeV8Value(isolate, args, &serialized_args)) {
+    promise.RejectWithErrorMessage("Failed to serialize arguments");
+    return handle;
+  }
+  mojom::ElectronFrame* frame = GetFrameApi();
+  if (!frame) {
+    promise.RejectWithErrorMessage(
+        "Render frame was disposed before WebFrameMain could be accessed");
+    return handle;
+  }
+  frame->ReceiveSharedTexture(std::move(serialized_transfer), texture_id,
+                              std::move(serialized_args),
+                              BindPromiseToReply(std::move(promise)));
+  return handle;
+}
+
+mojom::ElectronFrame* WebFrameMain::GetFrameApi() {
+  if (!HasRenderFrame() || !render_frame_host()->IsRenderFrameLive())
+    return nullptr;
+  if (!frame_api_ || !frame_api_.is_connected()) {
+    frame_api_.reset();
+    render_frame_host()->GetRemoteAssociatedInterfaces()->GetInterface(
+        &frame_api_);
+  }
+  return frame_api_.get();
 }
 
 void WebFrameMain::TeardownMojoConnection() {
   renderer_api_.reset();
+  frame_api_.reset();
   pending_receiver_.reset();
 }
 
@@ -227,10 +561,21 @@ void WebFrameMain::OnRendererConnectionError() {
   TeardownMojoConnection();
 }
 
+[[nodiscard]] bool WebFrameMain::HasRenderFrame() const {
+  if (render_frame_disposed_)
+    return false;
+
+  // If RFH is a nullptr, this instance of WebFrameMain is dangling and wasn't
+  // properly deleted.
+  CHECK(render_frame_host());
+
+  return true;
+}
+
 void WebFrameMain::PostMessage(v8::Isolate* isolate,
                                const std::string& channel,
                                v8::Local<v8::Value> message_value,
-                               absl::optional<v8::Local<v8::Value>> transfer) {
+                               std::optional<v8::Local<v8::Value>> transfer) {
   blink::TransferableMessage transferable_message;
   if (!electron::SerializeV8Value(isolate, message_value,
                                   &transferable_message)) {
@@ -238,7 +583,7 @@ void WebFrameMain::PostMessage(v8::Isolate* isolate,
     return;
   }
 
-  std::vector<gin::Handle<MessagePort>> wrapped_ports;
+  v8::LocalVector<v8::Value> wrapped_ports(isolate);
   if (transfer && !transfer.value()->IsUndefined()) {
     if (!gin::ConvertFromV8(isolate, *transfer, &wrapped_ports)) {
       isolate->ThrowException(v8::Exception::Error(
@@ -260,64 +605,79 @@ void WebFrameMain::PostMessage(v8::Isolate* isolate,
                                        std::move(transferable_message));
 }
 
-int WebFrameMain::FrameTreeNodeID() const {
+bool WebFrameMain::Detached() const {
+  return render_frame_detached_;
+}
+
+content::FrameTreeNodeId WebFrameMain::FrameTreeNodeID() const {
   return frame_tree_node_id_;
 }
 
 std::string WebFrameMain::Name() const {
   if (!CheckRenderFrame())
-    return std::string();
-  return render_frame_->GetFrameName();
+    return {};
+  return render_frame_host()->GetFrameName();
+}
+
+std::string WebFrameMain::FrameToken() const {
+  if (!CheckRenderFrame())
+    return "";
+  const blink::LocalFrameToken& frame_token =
+      render_frame_host()->GetFrameToken();
+  return frame_token.ToString();
 }
 
 base::ProcessId WebFrameMain::OSProcessID() const {
   if (!CheckRenderFrame())
-    return -1;
-  base::ProcessHandle process_handle =
-      render_frame_->GetProcess()->GetProcess().Handle();
-  return base::GetProcId(process_handle);
+    return base::kNullProcessId;
+
+  const auto& process = render_frame_host()->GetProcess()->GetProcess();
+  if (!process.IsValid())
+    return base::kNullProcessId;
+
+  return process.Pid();
 }
 
-int WebFrameMain::ProcessID() const {
+int32_t WebFrameMain::ProcessID() const {
   if (!CheckRenderFrame())
     return -1;
-  return render_frame_->GetProcess()->GetID();
+  return render_frame_host()->GetProcess()->GetID().GetUnsafeValue();
 }
 
 int WebFrameMain::RoutingID() const {
   if (!CheckRenderFrame())
     return -1;
-  return render_frame_->GetRoutingID();
+  return render_frame_host()->GetRoutingID();
 }
 
 GURL WebFrameMain::URL() const {
   if (!CheckRenderFrame())
-    return GURL::EmptyGURL();
-  return render_frame_->GetLastCommittedURL();
+    return {};
+  return render_frame_host()->GetLastCommittedURL();
 }
 
 std::string WebFrameMain::Origin() const {
   if (!CheckRenderFrame())
-    return std::string();
-  return render_frame_->GetLastCommittedOrigin().Serialize();
+    return {};
+  return render_frame_host()->GetLastCommittedOrigin().Serialize();
 }
 
 blink::mojom::PageVisibilityState WebFrameMain::VisibilityState() const {
   if (!CheckRenderFrame())
     return blink::mojom::PageVisibilityState::kHidden;
-  return render_frame_->GetVisibilityState();
+  return render_frame_host()->GetVisibilityState();
 }
 
 content::RenderFrameHost* WebFrameMain::Top() const {
   if (!CheckRenderFrame())
     return nullptr;
-  return render_frame_->GetMainFrame();
+  return render_frame_host()->GetMainFrame();
 }
 
 content::RenderFrameHost* WebFrameMain::Parent() const {
   if (!CheckRenderFrame())
     return nullptr;
-  return render_frame_->GetParent();
+  return render_frame_host()->GetParent();
 }
 
 std::vector<content::RenderFrameHost*> WebFrameMain::Frames() const {
@@ -325,9 +685,9 @@ std::vector<content::RenderFrameHost*> WebFrameMain::Frames() const {
   if (!CheckRenderFrame())
     return frame_hosts;
 
-  render_frame_->ForEachRenderFrameHost(
+  render_frame_host()->ForEachRenderFrameHost(
       [&frame_hosts, this](content::RenderFrameHost* rfh) {
-        if (rfh->GetParent() == render_frame_)
+        if (rfh && rfh->GetParent() == render_frame_host())
           frame_hosts.push_back(rfh);
       });
 
@@ -339,7 +699,7 @@ std::vector<content::RenderFrameHost*> WebFrameMain::FramesInSubtree() const {
   if (!CheckRenderFrame())
     return frame_hosts;
 
-  render_frame_->ForEachRenderFrameHost(
+  render_frame_host()->ForEachRenderFrameHost(
       [&frame_hosts](content::RenderFrameHost* rfh) {
         frame_hosts.push_back(rfh);
       });
@@ -347,69 +707,191 @@ std::vector<content::RenderFrameHost*> WebFrameMain::FramesInSubtree() const {
   return frame_hosts;
 }
 
+std::string_view WebFrameMain::LifecycleStateForTesting() const {
+  if (!HasRenderFrame())
+    return {};
+  if (const char* str =
+          content::RenderFrameHostImpl::LifecycleStateImplToString(
+              GetLifecycleState(render_frame_host())))
+    return str;
+  return {};
+}
+
+v8::Local<v8::Promise> WebFrameMain::CollectDocumentJSCallStack(
+    gin::Arguments* args) {
+  gin_helper::Promise<base::Value> promise(args->isolate());
+  v8::Local<v8::Promise> handle = promise.GetHandle();
+
+  if (!HasRenderFrame()) {
+    promise.RejectWithErrorMessage(
+        "Render frame was disposed before WebFrameMain could be accessed");
+    return handle;
+  }
+
+  if (!base::FeatureList::IsEnabled(
+          blink::features::kDocumentPolicyIncludeJSCallStacksInCrashReports)) {
+    promise.RejectWithErrorMessage(
+        "DocumentPolicyIncludeJSCallStacksInCrashReports is not enabled");
+    return handle;
+  }
+
+  content::RenderProcessHostImpl* rph_impl =
+      static_cast<content::RenderProcessHostImpl*>(
+          render_frame_host()->GetProcess());
+
+  rph_impl->GetJavaScriptCallStackGeneratorInterface()
+      ->CollectJavaScriptCallStack(base::BindOnce(
+          [](WebFrameMain* frame, gin_helper::Promise<base::Value> promise,
+             const std::string& untrusted_javascript_call_stack,
+             const std::optional<blink::LocalFrameToken>& remote_frame_token) {
+            if (!frame) {
+              promise.RejectWithErrorMessage(
+                  "Render frame was disposed before call stack was "
+                  "received");
+              return;
+            }
+            frame->CollectedJavaScriptCallStack(std::move(promise),
+                                                untrusted_javascript_call_stack,
+                                                remote_frame_token);
+          },
+          gin::WrapPersistent(weak_factory_.GetWeakCell(
+              args->isolate()->GetCppHeap()->GetAllocationHandle())),
+          std::move(promise)));
+
+  return handle;
+}
+
+void WebFrameMain::CollectedJavaScriptCallStack(
+    gin_helper::Promise<base::Value> promise,
+    const std::string& untrusted_javascript_call_stack,
+    const std::optional<blink::LocalFrameToken>& remote_frame_token) {
+  if (!HasRenderFrame()) {
+    promise.RejectWithErrorMessage(
+        "Render frame was disposed before call stack was received");
+    return;
+  }
+
+  const blink::LocalFrameToken& frame_token =
+      render_frame_host()->GetFrameToken();
+  if (remote_frame_token == frame_token) {
+    promise.Resolve(base::Value(untrusted_javascript_call_stack));
+  } else if (!remote_frame_token) {
+    // Failed to collect call stack. See logic in:
+    // third_party/blink/renderer/controller/javascript_call_stack_collector.cc
+    promise.Resolve(base::Value());
+  } else {
+    // Requests for call stacks can be initiated on an old RenderProcessHost
+    // then be received after a frame swap.
+    LOG(ERROR) << "Received call stack from old RPH";
+    promise.Resolve(base::Value());
+  }
+}
+
 void WebFrameMain::DOMContentLoaded() {
   Emit("dom-ready");
 }
 
 // static
-gin::Handle<WebFrameMain> WebFrameMain::New(v8::Isolate* isolate) {
-  return gin::Handle<WebFrameMain>();
+WebFrameMain* WebFrameMain::New(v8::Isolate* isolate) {
+  return nullptr;
 }
 
 // static
-gin::Handle<WebFrameMain> WebFrameMain::From(v8::Isolate* isolate,
-                                             content::RenderFrameHost* rfh) {
-  if (rfh == nullptr)
-    return gin::Handle<WebFrameMain>();
-  auto* web_frame = FromRenderFrameHost(rfh);
+WebFrameMain* WebFrameMain::From(v8::Isolate* isolate,
+                                 content::RenderFrameHost* rfh) {
+  if (!rfh)
+    return nullptr;
+
+  WebFrameMain* web_frame = nullptr;
+  switch (GetLifecycleState(rfh)) {
+    case LifecycleState::kSpeculative:
+    case LifecycleState::kPendingCommit:
+      // RFH is in the process of being swapped. Need to lookup by FTN to avoid
+      // creating dangling WebFrameMain.
+      web_frame = FromFrameTreeNodeId(rfh->GetFrameTreeNodeId());
+      if (!web_frame) {
+        // A WebFrameMain cannot be created for a transient RFH, so initialize
+        // it with the current active RFH and update it when the swap completes.
+        auto* rfh_impl = static_cast<content::RenderFrameHostImpl*>(rfh);
+        rfh = rfh_impl->frame_tree_node()->current_frame_host();
+      }
+      break;
+    case LifecycleState::kPrerendering:
+    case LifecycleState::kActive:
+    case LifecycleState::kInBackForwardCache:
+      // RFH is already assigned to the FrameTreeNode and can safely be looked
+      // up directly.
+      web_frame = FromRenderFrameHost(rfh);
+      if (!web_frame && !IsDetachedFrameHost(rfh)) {
+        // content makes the new RFH current before RenderFrameHostChanged
+        // re-keys the existing instance; adopt it rather than make a second.
+        web_frame = FromFrameTreeNodeId(rfh->GetFrameTreeNodeId());
+        if (web_frame)
+          web_frame->UpdateRenderFrameHost(rfh);
+      }
+      break;
+    case LifecycleState::kRunningUnloadHandlers:
+      // Event/IPC emitted for a frame running unload handlers. Return the exact
+      // RFH so the security origin will be accurate.
+      web_frame = FromRenderFrameHost(rfh);
+      break;
+    case LifecycleState::kReadyToBeDeleted:
+      // RFH is gone
+      return nullptr;
+  }
+
   if (web_frame)
-    return gin::CreateHandle(isolate, web_frame);
+    return web_frame;
 
-  auto handle = gin::CreateHandle(isolate, new WebFrameMain(rfh));
-
-  // Prevent garbage collection of frame until it has been deleted internally.
-  handle->Pin(isolate);
-
-  return handle;
-}
-
-// static
-gin::Handle<WebFrameMain> WebFrameMain::FromOrNull(
-    v8::Isolate* isolate,
-    content::RenderFrameHost* rfh) {
-  if (rfh == nullptr)
-    return gin::Handle<WebFrameMain>();
-  auto* web_frame = FromRenderFrameHost(rfh);
-  if (web_frame)
-    return gin::CreateHandle(isolate, web_frame);
-  return gin::Handle<WebFrameMain>();
+  return cppgc::MakeGarbageCollected<WebFrameMain>(
+      isolate->GetCppHeap()->GetAllocationHandle(), rfh);
 }
 
 // static
 void WebFrameMain::FillObjectTemplate(v8::Isolate* isolate,
                                       v8::Local<v8::ObjectTemplate> templ) {
   gin_helper::ObjectTemplateBuilder(isolate, templ)
-      .SetMethod("executeJavaScript", &WebFrameMain::ExecuteJavaScript)
-      .SetMethod("reload", &WebFrameMain::Reload)
-      .SetMethod("_send", &WebFrameMain::Send)
-      .SetMethod("_postMessage", &WebFrameMain::PostMessage)
-      .SetProperty("frameTreeNodeId", &WebFrameMain::FrameTreeNodeID)
-      .SetProperty("name", &WebFrameMain::Name)
-      .SetProperty("osProcessId", &WebFrameMain::OSProcessID)
-      .SetProperty("processId", &WebFrameMain::ProcessID)
-      .SetProperty("routingId", &WebFrameMain::RoutingID)
-      .SetProperty("url", &WebFrameMain::URL)
-      .SetProperty("origin", &WebFrameMain::Origin)
-      .SetProperty("visibilityState", &WebFrameMain::VisibilityState)
-      .SetProperty("top", &WebFrameMain::Top)
-      .SetProperty("parent", &WebFrameMain::Parent)
-      .SetProperty("frames", &WebFrameMain::Frames)
-      .SetProperty("framesInSubtree", &WebFrameMain::FramesInSubtree)
+      .SetMethod<&WebFrameMain::ExecuteJavaScript>("executeJavaScript")
+      .SetMethod<&WebFrameMain::CollectDocumentJSCallStack>(
+          "collectJavaScriptCallStack")
+      .SetMethod<&WebFrameMain::PrintToPDF>("printToPDF")
+      .SetMethod<&WebFrameMain::CopyVideoFrameAt>("copyVideoFrameAt")
+      .SetMethod<&WebFrameMain::SaveVideoFrameAs>("saveVideoFrameAs")
+      .SetMethod<&WebFrameMain::Reload>("reload")
+      .SetMethod<&WebFrameMain::IsDestroyed>("isDestroyed")
+      .SetMethod<&WebFrameMain::Send>("send")
+      .SetMethod<&WebFrameMain::TransferSharedTexture>("_transferSharedTexture")
+      .SetMethod<&WebFrameMain::PostMessage>("postMessage")
+      .SetProperty<&WebFrameMain::Detached>("detached")
+      .SetProperty<&WebFrameMain::FrameTreeNodeID>("frameTreeNodeId")
+      .SetProperty<&WebFrameMain::Name>("name")
+      .SetProperty<&WebFrameMain::FrameToken>("frameToken")
+      .SetProperty<&WebFrameMain::OSProcessID>("osProcessId")
+      .SetProperty<&WebFrameMain::ProcessID>("processId")
+      .SetProperty<&WebFrameMain::RoutingID>("routingId")
+      .SetProperty<&WebFrameMain::URL>("url")
+      .SetProperty<&WebFrameMain::Origin>("origin")
+      .SetProperty<&WebFrameMain::VisibilityState>("visibilityState")
+      .SetProperty<&WebFrameMain::Top>("top")
+      .SetProperty<&WebFrameMain::Parent>("parent")
+      .SetProperty<&WebFrameMain::Frames>("frames")
+      .SetProperty<&WebFrameMain::FramesInSubtree>("framesInSubtree")
+      .SetProperty<&WebFrameMain::LifecycleStateForTesting>(
+          "_lifecycleStateForTesting")
       .Build();
 }
 
-const char* WebFrameMain::GetTypeName() {
-  return "WebFrameMain";
+const gin::WrapperInfo* WebFrameMain::wrapper_info() const {
+  return &kWrapperInfo;
+}
+
+const char* WebFrameMain::GetHumanReadableName() const {
+  return "Electron / WebFrameMain";
+}
+
+void WebFrameMain::Trace(cppgc::Visitor* visitor) const {
+  gin::Wrappable<WebFrameMain>::Trace(visitor);
+  visitor->Trace(weak_factory_);
 }
 
 }  // namespace electron::api
@@ -417,6 +899,12 @@ const char* WebFrameMain::GetTypeName() {
 namespace {
 
 using electron::api::WebFrameMain;
+
+v8::Local<v8::Value> ToV8OrNull(v8::Isolate* isolate, WebFrameMain* frame) {
+  v8::Local<v8::Value> value;
+  return gin::TryConvertToV8(isolate, frame, &value) ? value
+                                                     : v8::Null(isolate);
+}
 
 v8::Local<v8::Value> FromID(gin_helper::ErrorThrower thrower,
                             int render_process_id,
@@ -428,33 +916,49 @@ v8::Local<v8::Value> FromID(gin_helper::ErrorThrower thrower,
 
   auto* rfh =
       content::RenderFrameHost::FromID(render_process_id, render_frame_id);
+  if (!rfh)
+    return v8::Undefined(thrower.isolate());
 
-  return WebFrameMain::From(thrower.isolate(), rfh).ToV8();
+  return ToV8OrNull(thrower.isolate(),
+                    WebFrameMain::From(thrower.isolate(), rfh));
 }
 
-v8::Local<v8::Value> FromIDOrNull(gin_helper::ErrorThrower thrower,
-                                  int render_process_id,
-                                  int render_frame_id) {
+v8::Local<v8::Value> FromFrameToken(gin_helper::ErrorThrower thrower,
+                                    int render_process_id,
+                                    std::string render_frame_token) {
   if (!electron::Browser::Get()->is_ready()) {
     thrower.ThrowError("WebFrameMain is available only after app ready");
     return v8::Null(thrower.isolate());
   }
 
-  auto* rfh =
-      content::RenderFrameHost::FromID(render_process_id, render_frame_id);
+  auto token = base::Token::FromString(render_frame_token);
+  if (!token)
+    return v8::Null(thrower.isolate());
+  auto unguessable_token =
+      base::UnguessableToken::Deserialize(token->high(), token->low());
+  if (!unguessable_token)
+    return v8::Null(thrower.isolate());
+  auto frame_token = blink::LocalFrameToken(unguessable_token.value());
 
-  return WebFrameMain::FromOrNull(thrower.isolate(), rfh).ToV8();
+  auto* rfh = content::RenderFrameHost::FromFrameToken(
+      content::GlobalRenderFrameHostToken(render_process_id, frame_token));
+  if (!rfh)
+    return v8::Null(thrower.isolate());
+
+  return ToV8OrNull(thrower.isolate(),
+                    WebFrameMain::From(thrower.isolate(), rfh));
 }
 
 void Initialize(v8::Local<v8::Object> exports,
                 v8::Local<v8::Value> unused,
                 v8::Local<v8::Context> context,
                 void* priv) {
-  v8::Isolate* isolate = context->GetIsolate();
-  gin_helper::Dictionary dict(isolate, exports);
-  dict.Set("WebFrameMain", WebFrameMain::GetConstructor(context));
-  dict.SetMethod("fromId", &FromID);
-  dict.SetMethod("fromIdOrNull", &FromIDOrNull);
+  v8::Isolate* const isolate = electron::JavascriptEnvironment::GetIsolate();
+  gin_helper::Dictionary dict{isolate, exports};
+  dict.Set("WebFrameMain", WebFrameMain::GetConstructor(
+                               isolate, context, &WebFrameMain::kWrapperInfo));
+  dict.SetMethod<&FromID>("fromId");
+  dict.SetMethod<&FromFrameToken>("fromFrameToken");
 }
 
 }  // namespace

@@ -9,6 +9,7 @@
 #include <string>
 
 #include "shell/browser/ui/tray_icon.h"
+#include "ui/gfx/image/image_skia.h"
 #include "ui/linux/status_icon_linux.h"
 
 class StatusIconLinuxDbus;
@@ -25,12 +26,13 @@ class TrayIconLinux : public TrayIcon, public ui::StatusIconLinux::Delegate {
   // TrayIcon:
   void SetImage(const gfx::Image& image) override;
   void SetToolTip(const std::string& tool_tip) override;
-  void SetContextMenu(ElectronMenuModel* menu_model) override;
+  void SetContextMenu(raw_ptr<ElectronMenuModel> menu_model) override;
 
   // ui::StatusIconLinux::Delegate
   void OnClick() override;
   bool HasClickAction() override;
   const gfx::ImageSkia& GetImage() const override;
+  const gfx::VectorIcon* GetIcon() const override;
   const std::u16string& GetToolTip() const override;
   ui::MenuModel* GetMenuModel() const override;
   void OnImplInitializationFailed() override;
@@ -46,7 +48,7 @@ class TrayIconLinux : public TrayIcon, public ui::StatusIconLinux::Delegate {
 
   scoped_refptr<StatusIconLinuxDbus> status_icon_dbus_;
   std::unique_ptr<StatusIconGtk> status_icon_gtk_;
-  StatusIconType status_icon_type_;
+  StatusIconType status_icon_type_ = StatusIconType::kDbus;
 
   gfx::ImageSkia image_;
   std::u16string tool_tip_;

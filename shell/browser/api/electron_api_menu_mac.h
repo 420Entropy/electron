@@ -9,23 +9,35 @@
 
 #include <map>
 
+#include "gin/weak_cell.h"
 #import "shell/browser/ui/cocoa/electron_menu_controller.h"
+#include "v8/include/cppgc/persistent.h"
 
-using base::scoped_nsobject;
+namespace electron {
+class NativeWindow;
 
-namespace electron::api {
+namespace api {
+class WebFrameMain;
 
 class MenuMac : public Menu {
- protected:
+ public:
+  // Make public for cppgc::MakeGarbageCollected.
   explicit MenuMac(gin::Arguments* args);
   ~MenuMac() override;
 
+  void Trace(cppgc::Visitor*) const override;
+
+ protected:
+  // Menu
   void PopupAt(BaseWindow* window,
+               std::optional<WebFrameMain*> frame,
                int x,
                int y,
                int positioning_item,
+               ui::mojom::MenuSourceType source_type,
                base::OnceClosure callback) override;
   void PopupOnUI(const base::WeakPtr<NativeWindow>& native_window,
+                 cppgc::WeakPersistent<WebFrameMain> frame,
                  int32_t window_id,
                  int x,
                  int y,
@@ -35,19 +47,16 @@ class MenuMac : public Menu {
   std::u16string GetAcceleratorTextAtForTesting(int index) const override;
 
  private:
-  friend class Menu;
-
   void ClosePopupOnUI(int32_t window_id);
   void OnClosed(int32_t window_id, base::OnceClosure callback);
 
-  scoped_nsobject<ElectronMenuController> menu_controller_;
-
   // window ID -> open context menu
-  std::map<int32_t, scoped_nsobject<ElectronMenuController>> popup_controllers_;
+  std::map<int32_t, ElectronMenuController*> popup_controllers_;
 
-  base::WeakPtrFactory<MenuMac> weak_factory_{this};
+  gin::WeakCellFactory<MenuMac> weak_cell_factory_{this};
 };
 
-}  // namespace electron::api
+}  // namespace api
+}  // namespace electron
 
 #endif  // ELECTRON_SHELL_BROWSER_API_ELECTRON_API_MENU_MAC_H_

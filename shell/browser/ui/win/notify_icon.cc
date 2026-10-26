@@ -6,18 +6,18 @@
 
 #include <objbase.h>
 
+#include <utility>
+
 #include "base/logging.h"
-#include "base/strings/string_number_conversions.h"
 #include "base/strings/string_util_win.h"
 #include "base/strings/utf_string_conversions.h"
-#include "base/win/windows_version.h"
+#include "shell/browser/ui/electron_menu_model.h"
 #include "shell/browser/ui/win/notify_icon_host.h"
-#include "third_party/skia/include/core/SkBitmap.h"
+#include "ui/base/mojom/menu_source_type.mojom.h"
 #include "ui/display/screen.h"
 #include "ui/display/win/screen_win.h"
 #include "ui/gfx/geometry/point.h"
 #include "ui/gfx/geometry/rect.h"
-#include "ui/gfx/image/image.h"
 #include "ui/views/controls/menu/menu_runner.h"
 
 namespace {
@@ -52,11 +52,10 @@ NotifyIcon::NotifyIcon(NotifyIconHost* host,
     : host_(host), icon_id_(id), window_(window), message_id_(message) {
   guid_ = guid;
   is_using_guid_ = guid != GUID_DEFAULT;
-  NOTIFYICONDATA icon_data;
-  InitIconData(&icon_data);
+  NOTIFYICONDATA icon_data = InitIconData();
   icon_data.uFlags |= NIF_MESSAGE;
   icon_data.uCallbackMessage = message_id_;
-  BOOL result = Shell_NotifyIcon(NIM_ADD, &icon_data);
+  const BOOL result = Shell_NotifyIcon(NIM_ADD, &icon_data);
   // This can happen if the explorer process isn't running when we try to
   // create the icon for some reason (for example, at startup).
   if (!result)
@@ -66,45 +65,57 @@ NotifyIcon::NotifyIcon(NotifyIconHost* host,
 NotifyIcon::~NotifyIcon() {
   // Remove our icon.
   host_->Remove(this);
-  NOTIFYICONDATA icon_data;
-  InitIconData(&icon_data);
+  NOTIFYICONDATA icon_data = InitIconData();
   Shell_NotifyIcon(NIM_DELETE, &icon_data);
 }
 
 void NotifyIcon::HandleClickEvent(int modifiers,
                                   bool left_mouse_click,
-                                  bool double_button_click) {
+                                  bool double_button_click,
+                                  bool middle_button_click) {
   gfx::Rect bounds = GetBounds();
 
   if (left_mouse_click) {
     if (double_button_click)  // double left click
       NotifyDoubleClicked(bounds, modifiers);
     else  // single left click
-      NotifyClicked(bounds,
-                    display::Screen::GetScreen()->GetCursorScreenPoint(),
+      NotifyClicked(bounds, display::Screen::Get()->GetCursorScreenPoint(),
                     modifiers);
     return;
+  } else if (middle_button_click) {  // single middle click
+    NotifyMiddleClicked(bounds, modifiers);
   } else if (!double_button_click) {  // single right click
     if (menu_model_)
-      PopUpContextMenu(gfx::Point(), menu_model_);
+      PopUpContextMenu(gfx::Point(), menu_model_->GetWeakPtr(), {});
     else
       NotifyRightClicked(bounds, modifiers);
   }
 }
 
 void NotifyIcon::HandleMouseMoveEvent(int modifiers) {
-  gfx::Point cursorPos = display::Screen::GetScreen()->GetCursorScreenPoint();
+  gfx::Point cursorPos = display::Screen::Get()->GetCursorScreenPoint();
   // Omit event fired when tray icon is created but cursor is outside of it.
   if (GetBounds().Contains(cursorPos))
     NotifyMouseMoved(cursorPos, modifiers);
 }
 
+void NotifyIcon::HandleMouseEntered(int modifiers) {
+  gfx::Point cursor_pos = display::Screen::Get()->GetCursorScreenPoint();
+  NotifyMouseEntered(cursor_pos, modifiers);
+}
+
+void NotifyIcon::HandleMouseExited(int modifiers) {
+  gfx::Point cursor_pos = display::Screen::Get()->GetCursorScreenPoint();
+  NotifyMouseExited(cursor_pos, modifiers);
+}
+
 void NotifyIcon::ResetIcon() {
-  NOTIFYICONDATA icon_data;
-  InitIconData(&icon_data);
   // Delete any previously existing icon.
+  NOTIFYICONDATA icon_data = InitIconData();
   Shell_NotifyIcon(NIM_DELETE, &icon_data);
-  InitIconData(&icon_data);
+
+  // Update the icon.
+  icon_data = InitIconData();
   icon_data.uFlags |= NIF_MESSAGE;
   icon_data.uCallbackMessage = message_id_;
   icon_data.hIcon = icon_.get();
@@ -112,6 +123,10 @@ void NotifyIcon::ResetIcon() {
   // Shell_NotifyIcon() to set the image for the status icon it creates.
   if (icon_data.hIcon)
     icon_data.uFlags |= NIF_ICON;
+  if (!tool_tip_.empty()) {
+    icon_data.uFlags |= NIF_TIP;
+    base::wcslcpy(icon_data.szTip, tool_tip_);
+  }
   // Re-add our icon.
   BOOL result = Shell_NotifyIcon(NIM_ADD, &icon_data);
   if (!result)
@@ -119,11 +134,10 @@ void NotifyIcon::ResetIcon() {
 }
 
 void NotifyIcon::SetImage(HICON image) {
-  icon_ = base::win::ScopedHICON(CopyIcon(image));
+  icon_ = base::win::ScopedGDIObject<HICON>(CopyIcon(image));
 
   // Create the icon.
-  NOTIFYICONDATA icon_data;
-  InitIconData(&icon_data);
+  NOTIFYICONDATA icon_data = InitIconData();
   icon_data.uFlags |= NIF_ICON;
   icon_data.hIcon = image;
   BOOL result = Shell_NotifyIcon(NIM_MODIFY, &icon_data);
@@ -138,21 +152,20 @@ void NotifyIcon::SetPressedImage(HICON image) {
 
 void NotifyIcon::SetToolTip(const std::string& tool_tip) {
   // Create the icon.
-  NOTIFYICONDATA icon_data;
-  InitIconData(&icon_data);
+  NOTIFYICONDATA icon_data = InitIconData();
+  tool_tip_ = base::UTF8ToWide(tool_tip);
   icon_data.uFlags |= NIF_TIP;
-  wcsncpy_s(icon_data.szTip, base::UTF8ToWide(tool_tip).c_str(), _TRUNCATE);
+  base::wcslcpy(icon_data.szTip, tool_tip_);
   BOOL result = Shell_NotifyIcon(NIM_MODIFY, &icon_data);
   if (!result)
     LOG(WARNING) << "Unable to set tooltip for status tray icon";
 }
 
 void NotifyIcon::DisplayBalloon(const BalloonOptions& options) {
-  NOTIFYICONDATA icon_data;
-  InitIconData(&icon_data);
+  NOTIFYICONDATA icon_data = InitIconData();
   icon_data.uFlags |= NIF_INFO;
-  wcsncpy_s(icon_data.szInfoTitle, base::as_wcstr(options.title), _TRUNCATE);
-  wcsncpy_s(icon_data.szInfo, base::as_wcstr(options.content), _TRUNCATE);
+  base::wcslcpy(icon_data.szInfoTitle, base::AsWStringView(options.title));
+  base::wcslcpy(icon_data.szInfo, base::AsWStringView(options.content));
   icon_data.uTimeout = 0;
   icon_data.hBalloonIcon = options.icon;
   icon_data.dwInfoFlags = ConvertIconType(options.icon_type);
@@ -172,8 +185,7 @@ void NotifyIcon::DisplayBalloon(const BalloonOptions& options) {
 }
 
 void NotifyIcon::RemoveBalloon() {
-  NOTIFYICONDATA icon_data;
-  InitIconData(&icon_data);
+  NOTIFYICONDATA icon_data = InitIconData();
   icon_data.uFlags |= NIF_INFO;
 
   BOOL result = Shell_NotifyIcon(NIM_MODIFY, &icon_data);
@@ -182,8 +194,7 @@ void NotifyIcon::RemoveBalloon() {
 }
 
 void NotifyIcon::Focus() {
-  NOTIFYICONDATA icon_data;
-  InitIconData(&icon_data);
+  NOTIFYICONDATA icon_data = InitIconData();
 
   BOOL result = Shell_NotifyIcon(NIM_SETFOCUS, &icon_data);
   if (!result)
@@ -191,7 +202,8 @@ void NotifyIcon::Focus() {
 }
 
 void NotifyIcon::PopUpContextMenu(const gfx::Point& pos,
-                                  ElectronMenuModel* menu_model) {
+                                  base::WeakPtr<ElectronMenuModel> menu_model,
+                                  base::ScopedClosureRunner retain_menu) {
   // Returns if context menu isn't set.
   if (menu_model == nullptr && menu_model_ == nullptr)
     return;
@@ -207,14 +219,20 @@ void NotifyIcon::PopUpContextMenu(const gfx::Point& pos,
   // Show menu at mouse's position by default.
   gfx::Rect rect(pos, gfx::Size());
   if (pos.IsOrigin())
-    rect.set_origin(display::Screen::GetScreen()->GetCursorScreenPoint());
+    rect.set_origin(display::Screen::Get()->GetCursorScreenPoint());
 
-  menu_runner_ = std::make_unique<views::MenuRunner>(
-      menu_model != nullptr ? menu_model : menu_model_,
-      views::MenuRunner::HAS_MNEMONICS);
+  if (menu_model) {
+    popup_menu_retain_ = std::move(retain_menu);
+    menu_runner_ = std::make_unique<views::MenuRunner>(
+        menu_model.get(), views::MenuRunner::HAS_MNEMONICS);
+  } else {
+    popup_menu_retain_.RunAndReset();
+    menu_runner_ = std::make_unique<views::MenuRunner>(
+        menu_model_, views::MenuRunner::HAS_MNEMONICS);
+  }
   menu_runner_->RunMenuAt(nullptr, nullptr, rect,
                           views::MenuAnchorPosition::kTopLeft,
-                          ui::MENU_SOURCE_MOUSE);
+                          ui::mojom::MenuSourceType::kMouse);
 }
 
 void NotifyIcon::CloseContextMenu() {
@@ -223,13 +241,12 @@ void NotifyIcon::CloseContextMenu() {
   }
 }
 
-void NotifyIcon::SetContextMenu(ElectronMenuModel* menu_model) {
-  menu_model_ = menu_model;
+void NotifyIcon::SetContextMenu(raw_ptr<ElectronMenuModel> menu_model) {
+  menu_model_ = std::move(menu_model);
 }
 
 gfx::Rect NotifyIcon::GetBounds() {
-  NOTIFYICONIDENTIFIER icon_id;
-  memset(&icon_id, 0, sizeof(NOTIFYICONIDENTIFIER));
+  NOTIFYICONIDENTIFIER icon_id = {};
   icon_id.uID = icon_id_;
   icon_id.hWnd = window_;
   icon_id.cbSize = sizeof(NOTIFYICONIDENTIFIER);
@@ -239,18 +256,20 @@ gfx::Rect NotifyIcon::GetBounds() {
 
   RECT rect = {0};
   Shell_NotifyIconGetRect(&icon_id, &rect);
-  return display::win::ScreenWin::ScreenToDIPRect(window_, gfx::Rect(rect));
+  return display::win::GetScreenWin()->ScreenToDIPRect(window_,
+                                                       gfx::Rect{rect});
 }
 
-void NotifyIcon::InitIconData(NOTIFYICONDATA* icon_data) {
-  memset(icon_data, 0, sizeof(NOTIFYICONDATA));
-  icon_data->cbSize = sizeof(NOTIFYICONDATA);
-  icon_data->hWnd = window_;
-  icon_data->uID = icon_id_;
+NOTIFYICONDATA NotifyIcon::InitIconData() const {
+  NOTIFYICONDATA icon_data = {};
+  icon_data.cbSize = sizeof(NOTIFYICONDATA);
+  icon_data.hWnd = window_;
+  icon_data.uID = icon_id_;
   if (is_using_guid_) {
-    icon_data->uFlags = NIF_GUID;
-    icon_data->guidItem = guid_;
+    icon_data.uFlags = NIF_GUID;
+    icon_data.guidItem = guid_;
   }
+  return icon_data;
 }
 
 }  // namespace electron

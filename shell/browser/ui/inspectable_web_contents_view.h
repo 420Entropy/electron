@@ -6,30 +6,41 @@
 #ifndef ELECTRON_SHELL_BROWSER_UI_INSPECTABLE_WEB_CONTENTS_VIEW_H_
 #define ELECTRON_SHELL_BROWSER_UI_INSPECTABLE_WEB_CONTENTS_VIEW_H_
 
+#include <memory>
 #include <string>
-#include <vector>
 
-#include "shell/common/api/api.mojom.h"
-#include "ui/gfx/native_widget_types.h"
+#include "base/memory/raw_ptr.h"
+#include "chrome/browser/devtools/devtools_contents_resizing_strategy.h"
+#include "ui/gfx/geometry/rect.h"
+#include "ui/views/view.h"
 
 class DevToolsContentsResizingStrategy;
 
-#if defined(TOOLKIT_VIEWS)
+namespace content {
+struct ContextMenuParams;
+}  // namespace content
+
+namespace gfx {
+class RoundedCornersF;
+}  // namespace gfx
+
 namespace views {
-class View;
-}
-#endif
+class WebView;
+class Widget;
+class WidgetDelegate;
+}  // namespace views
 
 namespace electron {
 
+class DevToolsContextMenu;
 class InspectableWebContents;
 class InspectableWebContentsViewDelegate;
 
-class InspectableWebContentsView {
+class InspectableWebContentsView : public views::View {
  public:
   explicit InspectableWebContentsView(
       InspectableWebContents* inspectable_web_contents);
-  virtual ~InspectableWebContentsView();
+  ~InspectableWebContentsView() override;
 
   InspectableWebContents* inspectable_web_contents() {
     return inspectable_web_contents_;
@@ -41,33 +52,51 @@ class InspectableWebContentsView {
   }
   InspectableWebContentsViewDelegate* GetDelegate() const { return delegate_; }
 
-#if defined(TOOLKIT_VIEWS) && !BUILDFLAG(IS_MAC)
-  // Returns the container control, which has devtools view attached.
-  virtual views::View* GetView() = 0;
+  void SetCornerRadii(const gfx::RoundedCornersF& corner_radii);
 
-  // Returns the web view control, which can be used by the
-  // GetInitiallyFocusedView() to set initial focus to web view.
-  virtual views::View* GetWebView() = 0;
-#else
-  virtual gfx::NativeView GetNativeView() const = 0;
-#endif
+  void ShowDevTools(bool activate);
+  void ActivateDevTools();
+  void CloseDevTools();
+  bool IsDevToolsViewShowing();
+  bool IsDevToolsViewFocused();
+  void SetIsDocked(bool docked, bool activate);
+  void SetContentsResizingStrategy(
+      const DevToolsContentsResizingStrategy& strategy);
+  void SetTitle(const std::u16string& title);
+  const std::u16string GetTitle();
 
-  virtual void ShowDevTools(bool activate) = 0;
-  // Hide the DevTools view.
-  virtual void CloseDevTools() = 0;
-  virtual bool IsDevToolsViewShowing() = 0;
-  virtual bool IsDevToolsViewFocused() = 0;
-  virtual void SetIsDocked(bool docked, bool activate) = 0;
-  virtual void SetContentsResizingStrategy(
-      const DevToolsContentsResizingStrategy& strategy) = 0;
-  virtual void SetTitle(const std::u16string& title) = 0;
+  // Shows a native context menu for the DevTools frontend, anchored to
+  // whichever widget hosts the DevTools view (the detached DevTools window
+  // when undocked, otherwise the window containing this view).
+  void ShowDevToolsContextMenu(const content::ContextMenuParams& params);
 
- protected:
-  // Owns us.
-  InspectableWebContents* inspectable_web_contents_;
+  // views::View:
+  void Layout(PassKey) override;
+
+  views::View* GetContentsView() const;
 
  private:
-  InspectableWebContentsViewDelegate* delegate_ = nullptr;  // weak references.
+  void SetContentsViewBounds(const gfx::Rect& bounds);
+
+  // Owns us.
+  raw_ptr<InspectableWebContents> inspectable_web_contents_;
+
+  raw_ptr<InspectableWebContentsViewDelegate> delegate_ =
+      nullptr;  // weak references.
+
+  std::unique_ptr<views::Widget> devtools_window_;
+  raw_ptr<views::WebView> devtools_window_web_view_ = nullptr;
+  raw_ptr<views::WebView> contents_web_view_ = nullptr;
+  raw_ptr<views::View> no_contents_view_ = nullptr;
+  raw_ptr<views::WebView> devtools_web_view_ = nullptr;
+
+  // The currently showing (or most recently closed) DevTools context menu.
+  std::unique_ptr<DevToolsContextMenu> context_menu_;
+
+  DevToolsContentsResizingStrategy strategy_;
+  bool devtools_visible_ = false;
+  raw_ptr<views::WidgetDelegate> devtools_window_delegate_ = nullptr;
+  std::u16string title_;
 };
 
 }  // namespace electron

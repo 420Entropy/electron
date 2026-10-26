@@ -4,7 +4,6 @@
 
 #include <string>
 
-#include "shell/common/gin_converters/callback_converter.h"
 #include "shell/common/gin_converters/file_path_converter.h"
 #include "shell/common/gin_converters/guid_converter.h"
 #include "shell/common/gin_converters/gurl_converter.h"
@@ -13,6 +12,7 @@
 #include "shell/common/gin_helper/promise.h"
 #include "shell/common/node_includes.h"
 #include "shell/common/platform_util.h"
+#include "v8/include/v8-microtask-queue.h"
 
 #if BUILDFLAG(IS_WIN)
 #include "base/win/scoped_com_initializer.h"
@@ -24,7 +24,7 @@ namespace gin {
 template <>
 struct Converter<base::win::ShortcutOperation> {
   static bool FromV8(v8::Isolate* isolate,
-                     v8::Handle<v8::Value> val,
+                     v8::Local<v8::Value> val,
                      base::win::ShortcutOperation* out) {
     std::string operation;
     if (!ConvertFromV8(isolate, val, &operation))
@@ -51,21 +51,20 @@ void OnOpenFinished(gin_helper::Promise<void> promise,
   if (error.empty())
     promise.Resolve();
   else
-    promise.RejectWithErrorMessage(error.c_str());
+    promise.RejectWithErrorMessage(error);
 }
 
-v8::Local<v8::Promise> OpenExternal(const GURL& url, gin::Arguments* args) {
+v8::Local<v8::Promise> OpenExternal(const GURL& url,
+                                    gin::Arguments* const args) {
   gin_helper::Promise<void> promise(args->isolate());
   v8::Local<v8::Promise> handle = promise.GetHandle();
 
   platform_util::OpenExternalOptions options;
-  if (args->Length() >= 2) {
-    gin::Dictionary obj(nullptr);
-    if (args->GetNext(&obj)) {
-      obj.Get("activate", &options.activate);
-      obj.Get("workingDirectory", &options.working_dir);
-      obj.Get("logUsage", &options.log_usage);
-    }
+  gin_helper::Dictionary obj;
+  if (args->GetNext(&obj)) {
+    obj.Get("activate", &options.activate);
+    obj.Get("workingDirectory", &options.working_dir);
+    obj.Get("logUsage", &options.log_usage);
   }
 
   platform_util::OpenExternal(
@@ -109,14 +108,23 @@ v8::Local<v8::Promise> TrashItem(v8::Isolate* isolate,
 #if BUILDFLAG(IS_WIN)
 
 bool WriteShortcutLink(const base::FilePath& shortcut_path,
-                       gin_helper::Arguments* args) {
+                       gin::Arguments* const args) {
   base::win::ShortcutOperation operation =
       base::win::ShortcutOperation::kCreateAlways;
-  args->GetNext(&operation);
   gin::Dictionary options = gin::Dictionary::CreateEmpty(args->isolate());
-  if (!args->GetNext(&options)) {
-    args->ThrowError();
-    return false;
+
+  v8::Local<v8::Value> peek = args->PeekNext();
+  if (peek->IsObject()) {
+    if (!args->GetNext(&options)) {
+      args->ThrowError();
+      return false;
+    }
+  } else {
+    args->GetNext(&operation);
+    if (!args->GetNext(&options)) {
+      args->ThrowError();
+      return false;
+    }
   }
 
   base::win::ShortcutProperties properties;
@@ -148,7 +156,7 @@ bool WriteShortcutLink(const base::FilePath& shortcut_path,
 v8::Local<v8::Value> ReadShortcutLink(gin_helper::ErrorThrower thrower,
                                       const base::FilePath& path) {
   using base::win::ShortcutProperties;
-  gin::Dictionary options = gin::Dictionary::CreateEmpty(thrower.isolate());
+  auto options = gin::Dictionary::CreateEmpty(thrower.isolate());
   electron::ScopedAllowBlockingForElectron allow_blocking;
   base::win::ScopedCOMInitializer com_initializer;
   base::win::ShortcutProperties properties;
@@ -164,7 +172,8 @@ v8::Local<v8::Value> ReadShortcutLink(gin_helper::ErrorThrower thrower,
   options.Set("icon", properties.icon);
   options.Set("iconIndex", properties.icon_index);
   options.Set("appUserModelId", properties.app_id);
-  options.Set("toastActivatorClsid", properties.toast_activator_clsid);
+  if (properties.options & ShortcutProperties::PROPERTIES_TOAST_ACTIVATOR_CLSID)
+    options.Set("toastActivatorClsid", properties.toast_activator_clsid);
   return gin::ConvertToV8(thrower.isolate(), options);
 }
 #endif
@@ -173,15 +182,16 @@ void Initialize(v8::Local<v8::Object> exports,
                 v8::Local<v8::Value> unused,
                 v8::Local<v8::Context> context,
                 void* priv) {
-  gin_helper::Dictionary dict(context->GetIsolate(), exports);
-  dict.SetMethod("showItemInFolder", &platform_util::ShowItemInFolder);
-  dict.SetMethod("openPath", &OpenPath);
-  dict.SetMethod("openExternal", &OpenExternal);
-  dict.SetMethod("trashItem", &TrashItem);
-  dict.SetMethod("beep", &platform_util::Beep);
+  v8::Isolate* const isolate = v8::Isolate::GetCurrent();
+  gin_helper::Dictionary dict{isolate, exports};
+  dict.SetMethod<&platform_util::ShowItemInFolder>("showItemInFolder");
+  dict.SetMethod<&OpenPath>("openPath");
+  dict.SetMethod<&OpenExternal>("openExternal");
+  dict.SetMethod<&TrashItem>("trashItem");
+  dict.SetMethod<&platform_util::Beep>("beep");
 #if BUILDFLAG(IS_WIN)
-  dict.SetMethod("writeShortcutLink", &WriteShortcutLink);
-  dict.SetMethod("readShortcutLink", &ReadShortcutLink);
+  dict.SetMethod<&WriteShortcutLink>("writeShortcutLink");
+  dict.SetMethod<&ReadShortcutLink>("readShortcutLink");
 #endif
 }
 

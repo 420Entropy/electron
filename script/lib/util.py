@@ -1,32 +1,22 @@
 #!/usr/bin/env python3
 
-from __future__ import print_function
 import contextlib
 import errno
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
-# Python 3 / 2 compat import
-try:
-  from urllib.request import urlopen
-except ImportError:
-  from urllib2 import urlopen
+from urllib.request import urlopen
 import zipfile
 
-# from lib.config import is_verbose_mode
-def is_verbose_mode():
-  return False
+from lib.config import verbose_mode_print
 
 ELECTRON_DIR = os.path.abspath(
   os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 )
-TS_NODE = os.path.join(ELECTRON_DIR, 'node_modules', '.bin', 'ts-node')
 SRC_DIR = os.path.abspath(os.path.join(__file__, '..', '..', '..', '..'))
-
-if sys.platform in ['win32', 'cygwin']:
-  TS_NODE += '.cmd'
 
 @contextlib.contextmanager
 def scoped_cwd(path):
@@ -40,9 +30,8 @@ def scoped_cwd(path):
 
 def download(text, url, path):
   safe_mkdir(os.path.dirname(path))
-  with open(path, 'wb') as local_file:
-    print("Downloading %s to %s" % (url, path))
-    web_file = urlopen(url)
+  with open(path, 'wb') as local_file, urlopen(url) as web_file:
+    print(f"Downloading {url} to {path}")
     info = web_file.info()
     if hasattr(info, 'getheader'):
       file_size = int(info.getheaders("Content-Length")[0])
@@ -63,31 +52,87 @@ def download(text, url, path):
 
       if not ci:
         percent = downloaded_size * 100. / file_size
-        status = "\r%s  %10d  [%3.1f%%]" % (text, downloaded_size, percent)
+        status = f"\r{text}  {downloaded_size:10d}  [{percent:3.1f}%]"
         print(status, end=' ')
 
     if ci:
-      print("%s done." % (text))
+      print(f"{text} done.")
     else:
       print()
   return path
 
 
+# Deflate level 6 is ~1.7x faster than level 9 on the multi-GB debug info
+# archives this is used for (pdb.zip, dsym-snapshot.zip, debug.zip), and the
+# output is only ~0.4% larger.
+ZIP_COMPRESSION_LEVEL = 6
+
 def make_zip(zip_file_path, files, dirs):
   safe_unlink(zip_file_path)
   if sys.platform == 'darwin':
     allfiles = files + dirs
-    execute(['zip', '-r', '-y', zip_file_path] + allfiles)
+    execute(['zip', '-r', '-y', f'-{ZIP_COMPRESSION_LEVEL}', zip_file_path]
+            + allfiles)
   else:
-    zip_file = zipfile.ZipFile(zip_file_path, "w", zipfile.ZIP_DEFLATED,
-                               allowZip64=True)
-    for filename in files:
-      zip_file.write(filename, filename)
-    for dirname in dirs:
-      for root, _, filenames in os.walk(dirname):
-        for f in filenames:
-          zip_file.write(os.path.join(root, f))
-    zip_file.close()
+    with zipfile.ZipFile(zip_file_path, "w",
+                         zipfile.ZIP_DEFLATED,
+                         allowZip64=True,
+                         compresslevel=ZIP_COMPRESSION_LEVEL) as zip_file:
+      for filename in files:
+        zip_file.write(filename, filename)
+      for dirname in dirs:
+        for root, _, filenames in os.walk(dirname):
+          for f in filenames:
+            zip_file.write(os.path.join(root, f))
+      zip_file.close()
+
+
+# xz preset for dsym.tar.xz. The default preset (-6) is ~5x slower than -3
+# for ~12% smaller output on DWARF; on the 5-core macOS CI runners that is
+# the difference between a ~6 minute and a ~30 minute "Zip Symbols" step.
+XZ_PRESET = '-3'
+
+
+def make_tar_xz(tar_file_path, files, dirs):
+  safe_unlink(tar_file_path)
+  allfiles = files + dirs
+  # xz is single threaded by default, which takes 30+ minutes for the ~7GB of
+  # dSYMs this is used for. Multi-threaded xz splits the input into
+  # independently compressed blocks (~1% larger, still a standard .xz stream
+  # that any xz decoder can read) and scales ~linearly with core count.
+  #
+  # Prefer piping an uncompressed tar stream through the xz binary: it is the
+  # only path that reliably multi-threads. macOS's bsdtar accepts
+  # --options xz:threads=0 but its liblzma still emits a single block (i.e.
+  # one thread), and GNU tar only threads via XZ_OPT.
+  xz = shutil.which('xz')
+  if xz:
+    with open(tar_file_path, 'wb') as out, \
+         subprocess.Popen(['tar', '-cf', '-'] + allfiles,
+                          stdout=subprocess.PIPE) as tar, \
+         subprocess.Popen([xz, '-T0', XZ_PRESET, '-c'],
+                          stdin=tar.stdout, stdout=out) as xz_proc:
+      tar.stdout.close()
+      xz_rc = xz_proc.wait()
+      tar_rc = tar.wait()
+    if tar_rc != 0 or xz_rc != 0:
+      raise RuntimeError(
+          f'tar | xz failed (tar={tar_rc}, xz={xz_rc}) for {tar_file_path}')
+    return
+  tar_version = subprocess.run(['tar', '--version'], capture_output=True,
+                               text=True, check=False).stdout
+  if 'bsdtar' in tar_version:
+    # bsdtar's xz filter is configured via --options; a thread count of 0
+    # means "one per CPU" (where liblzma supports it).
+    args = ['tar', '--options',
+            f'xz:threads=0,xz:compression-level={XZ_PRESET[1:]}',
+            '-cJf', tar_file_path]
+    env = None
+  else:
+    # GNU tar shells out to the xz binary, which reads XZ_OPT.
+    args = ['tar', '-cJf', tar_file_path]
+    env = dict(os.environ, XZ_OPT=f'-T0 {XZ_PRESET}')
+  execute(args + allfiles, env=env)
 
 
 def rm_rf(path):
@@ -116,13 +161,11 @@ def safe_mkdir(path):
 def execute(argv, env=None, cwd=None):
   if env is None:
     env = os.environ
-  if is_verbose_mode():
-    print(' '.join(argv))
+  verbose_mode_print(' '.join(argv))
   try:
     output = subprocess.check_output(argv, stderr=subprocess.STDOUT,
                                      env=env, cwd=cwd)
-    if is_verbose_mode():
-      print(output)
+    verbose_mode_print(output.decode('utf-8').strip())
     return output
   except subprocess.CalledProcessError as e:
     print(e.output)
@@ -133,8 +176,8 @@ def get_electron_branding():
   SOURCE_ROOT = os.path.abspath(os.path.join(__file__, '..', '..', '..'))
   branding_file_path = os.path.join(
     SOURCE_ROOT, 'shell', 'app', 'BRANDING.json')
-  with open(branding_file_path) as f:
-    return json.load(f)
+  with open(branding_file_path, encoding='utf-8') as file_in:
+    return json.load(file_in)
 
 
 cached_electron_version = None
@@ -163,7 +206,7 @@ def azput(prefix, key_prefix, files):
   print(output)
 
 def get_out_dir():
-  out_dir = 'Debug'
+  out_dir = 'Default'
   override = os.environ.get('ELECTRON_OUT_DIR')
   if override is not None:
     out_dir = override
@@ -178,36 +221,74 @@ def get_electron_exec():
   out_dir = get_out_dir()
 
   if sys.platform == 'darwin':
-    return '{0}/Electron.app/Contents/MacOS/Electron'.format(out_dir)
+    return f'{out_dir}/Electron.app/Contents/MacOS/Electron'
   if sys.platform == 'win32':
-    return '{0}/electron.exe'.format(out_dir)
+    return f'{out_dir}/electron.exe'
   if sys.platform == 'linux':
-    return '{0}/electron'.format(out_dir)
+    return f'{out_dir}/electron'
 
   raise Exception(
-      "get_electron_exec: unexpected platform '{0}'".format(sys.platform))
+      f"get_electron_exec: unexpected platform '{sys.platform}'")
 
 def get_buildtools_executable(name):
   buildtools = os.path.realpath(os.path.join(ELECTRON_DIR, '..', 'buildtools'))
-  chromium_platform = {
-    'darwin': 'mac',
-    'linux': 'linux64',
-    'linux2': 'linux64',
-    'win32': 'win',
-    'cygwin': 'win',
-  }[sys.platform]
+
+  if sys.platform == 'darwin':
+    chromium_platform = 'mac_arm64' if platform.machine() == 'arm64' else 'mac'
+  elif sys.platform in ['win32', 'cygwin']:
+    chromium_platform = 'win'
+  elif sys.platform in ['linux', 'linux2']:
+    chromium_platform = 'linux64'
+  else:
+    raise Exception(f"Unsupported platform: {sys.platform}")
+  
+  if name == 'clang-format':
+    chromium_platform += '-format'
+
   path = os.path.join(buildtools, chromium_platform, name)
   if sys.platform == 'win32':
     path += '.exe'
   return path
 
-def get_linux_binaries():
-  return [
-    'chrome-sandbox',
-    'chrome_crashpad_handler',
-    get_electron_branding()['project_name'],
-    'libEGL.so',
-    'libGLESv2.so',
-    'libffmpeg.so',
-    'libvk_swiftshader.so',
-  ]
+def get_chromium_buildtools_path_value():
+  def find_depot_tools_on_path():
+    cmd = 'where' if sys.platform == 'win32' else 'which'
+    try:
+      depot_tools_path = subprocess.check_output(
+        [cmd, 'gclient'],
+        stderr=subprocess.DEVNULL, encoding='utf-8'
+      ).strip()
+      return os.path.dirname(depot_tools_path)
+    except subprocess.CalledProcessError:
+      return None
+
+  def check_for_build_tools():
+    try:
+      depot_tools_path = subprocess.check_output(
+        'electron-build-tools show depotdir',
+        shell=True, stderr=subprocess.DEVNULL, encoding='utf-8'
+      ).strip()
+      return depot_tools_path
+    except subprocess.CalledProcessError:
+      return None
+
+  depot_tools_path = check_for_build_tools()
+  if depot_tools_path is None:
+    depot_tools_path = find_depot_tools_on_path()
+
+  if depot_tools_path is None:
+    raise RuntimeError("Couldn't find depot_tools, ensure it's on your PATH")
+
+  sys.path.append(depot_tools_path)
+  # If CHROMIUM_BUILDTOOLS_PATH is in the environment variables, remove it
+  # so we can see if we're on a version of depot_tools which doesn't need it
+  CHROMIUM_BUILDTOOLS_PATH = os.environ.pop('CHROMIUM_BUILDTOOLS_PATH', None)
+  try:
+    from gclient_paths import GetBuildtoolsPath # pylint: disable=import-outside-toplevel
+    if GetBuildtoolsPath() is None:
+      return CHROMIUM_BUILDTOOLS_PATH or os.path.join(SRC_DIR, 'buildtools')
+  finally:
+    if CHROMIUM_BUILDTOOLS_PATH:
+      os.environ['CHROMIUM_BUILDTOOLS_PATH'] = CHROMIUM_BUILDTOOLS_PATH
+
+  return None

@@ -6,15 +6,15 @@
 
 #include <string>
 
+#include "base/apple/bundle_locations.h"
+#include "base/apple/foundation_util.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
-#include "base/mac/bundle_locations.h"
-#include "base/mac/foundation_util.h"
-#include "base/mac/scoped_nsautorelease_pool.h"
 #include "base/path_service.h"
 #include "base/strings/sys_string_conversions.h"
 #include "content/browser/mac_helpers.h"
 #include "content/public/common/content_paths.h"
+#include "shell/browser/electron_child_process_host_flags.h"
 #include "shell/browser/mac/electron_application.h"
 #include "shell/common/application_info.h"
 #include "shell/common/mac/main_application_bundle.h"
@@ -34,15 +34,13 @@ base::FilePath GetHelperAppPath(const base::FilePath& frameworks_path,
   base::PathService::Get(base::FILE_EXE, &path);
 
   std::string helper_name = "Helper";
-  if (base::EndsWith(path.value(), content::kMacHelperSuffix_renderer,
-                     base::CompareCase::SENSITIVE)) {
+  if (const auto& val = path.value();
+      val.ends_with(content::kMacHelperSuffix_renderer)) {
     helper_name += content::kMacHelperSuffix_renderer;
-  } else if (base::EndsWith(path.value(), content::kMacHelperSuffix_gpu,
-                            base::CompareCase::SENSITIVE)) {
+  } else if (val.ends_with(content::kMacHelperSuffix_gpu)) {
     helper_name += content::kMacHelperSuffix_gpu;
-  } else if (base::EndsWith(path.value(), content::kMacHelperSuffix_plugin,
-                            base::CompareCase::SENSITIVE)) {
-    helper_name += content::kMacHelperSuffix_plugin;
+  } else if (val.ends_with(kElectronMacHelperSuffixPlugin)) {
+    helper_name += kElectronMacHelperSuffixPlugin;
   }
 
   return frameworks_path.Append(name + " " + helper_name + ".app")
@@ -54,7 +52,7 @@ base::FilePath GetHelperAppPath(const base::FilePath& frameworks_path,
 }  // namespace
 
 void ElectronMainDelegate::OverrideFrameworkBundlePath() {
-  base::mac::SetOverrideFrameworkBundlePath(
+  base::apple::SetOverrideFrameworkBundlePath(
       GetFrameworksPath().Append(ELECTRON_PRODUCT_NAME " Framework.framework"));
 }
 
@@ -66,18 +64,21 @@ void ElectronMainDelegate::OverrideChildProcessPath() {
     helper_path = GetHelperAppPath(frameworks_path, GetApplicationName());
   if (!base::PathExists(helper_path))
     LOG(FATAL) << "Unable to find helper app";
-  base::PathService::Override(content::CHILD_PROCESS_EXE, helper_path);
+  base::PathService::OverrideAndCreateIfNeeded(
+      content::CHILD_PROCESS_EXE, helper_path, /*is_absolute=*/true,
+      /*create=*/false);
 }
 
 void ElectronMainDelegate::SetUpBundleOverrides() {
-  base::mac::ScopedNSAutoreleasePool pool;
-  NSBundle* bundle = MainApplicationBundle();
-  std::string base_bundle_id =
-      base::SysNSStringToUTF8([bundle bundleIdentifier]);
-  NSString* team_id = [bundle objectForInfoDictionaryKey:@"ElectronTeamID"];
-  if (team_id)
-    base_bundle_id = base::SysNSStringToUTF8(team_id) + "." + base_bundle_id;
-  base::mac::SetBaseBundleID(base_bundle_id.c_str());
+  @autoreleasepool {
+    NSBundle* bundle = MainApplicationBundle();
+    std::string base_bundle_id =
+        base::SysNSStringToUTF8([bundle bundleIdentifier]);
+    NSString* team_id = [bundle objectForInfoDictionaryKey:@"ElectronTeamID"];
+    if (team_id)
+      base_bundle_id = base::SysNSStringToUTF8(team_id) + "." + base_bundle_id;
+    base::apple::SetBaseBundleIDOverride(base_bundle_id);
+  }
 }
 
 void RegisterAtomCrApp() {

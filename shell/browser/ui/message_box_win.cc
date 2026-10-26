@@ -8,10 +8,12 @@
 
 #include <commctrl.h>
 
-#include <map>
 #include <vector>
 
-#include "base/containers/contains.h"
+#include "base/containers/flat_map.h"
+#include "base/containers/flat_set.h"
+#include "base/logging.h"
+#include "base/memory/raw_ptr_exclusion.h"
 #include "base/no_destructor.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
@@ -20,8 +22,8 @@
 #include "shell/browser/browser.h"
 #include "shell/browser/native_window_views.h"
 #include "shell/browser/ui/win/dialog_thread.h"
-#include "ui/gfx/icon_util.h"
 #include "ui/gfx/image/image_skia.h"
+#include "ui/gfx/win/icon_util.h"
 
 namespace electron {
 
@@ -41,8 +43,8 @@ struct DialogResult {
 // Note that the HWND is stored in a unique_ptr, because the pointer of HWND
 // will be passed between threads and we need to ensure the memory of HWND is
 // not changed while dialogs map is modified.
-std::map<int, std::unique_ptr<HWND>>& GetDialogsMap() {
-  static base::NoDestructor<std::map<int, std::unique_ptr<HWND>>> dialogs;
+base::flat_map<int, std::unique_ptr<HWND>>& GetDialogsMap() {
+  static base::NoDestructor<base::flat_map<int, std::unique_ptr<HWND>>> dialogs;
   return *dialogs;
 }
 
@@ -75,6 +77,17 @@ struct CommonButtonID {
   int button;
   int id;
 };
+
+struct TaskDialogCallbackData {
+  // Storage for the dialog's HWND, shared with CloseMessageBox across threads
+  // under GetHWNDLock(). Null when the caller does not track the HWND.
+  // Not a raw_ptr<> because it points at an HWND owned elsewhere.
+  RAW_PTR_EXCLUSION HWND* target = nullptr;
+  // The button IDs created for this dialog. Clicks for any other ID
+  // are treated as external/injected and ignored.
+  base::flat_set<int> button_ids;
+};
+
 CommonButtonID GetCommonID(const std::wstring& button) {
   std::wstring lower = base::ToLowerASCII(button);
   if (lower == L"ok")
@@ -95,7 +108,7 @@ CommonButtonID GetCommonID(const std::wstring& button) {
 // Determine whether the buttons are common buttons, if so map common ID
 // to button ID.
 void MapToCommonID(const std::vector<std::wstring>& buttons,
-                   std::map<int, int>* id_map,
+                   base::flat_map<int, int>* id_map,
                    TASKDIALOG_COMMON_BUTTON_FLAGS* button_flags,
                    std::vector<TASKDIALOG_BUTTON>* dialog_buttons) {
   for (size_t i = 0; i < buttons.size(); ++i) {
@@ -119,19 +132,33 @@ void MapToCommonID(const std::vector<std::wstring>& buttons,
 // is possible for CloseMessageBox to be called before or all after the dialog
 // window is created.
 HRESULT CALLBACK
-TaskDialogCallback(HWND hwnd, UINT msg, WPARAM, LPARAM, LONG_PTR data) {
+TaskDialogCallback(HWND hwnd, UINT msg, WPARAM w_param, LPARAM, LONG_PTR data) {
+  auto* callback_data = reinterpret_cast<TaskDialogCallbackData*>(data);
   if (msg == TDN_CREATED) {
-    HWND* target = reinterpret_cast<HWND*>(data);
-    // Lock since CloseMessageBox might be called.
-    base::AutoLock lock(GetHWNDLock());
-    if (*target == kHwndCancel) {
-      // The dialog is cancelled before it is created, close it directly.
-      ::PostMessage(hwnd, WM_CLOSE, 0, 0);
-    } else if (*target == kHwndReserve) {
-      // Otherwise save the hwnd.
-      *target = hwnd;
-    } else {
-      NOTREACHED();
+    if (HWND* target = callback_data->target) {
+      // Lock since CloseMessageBox might be called.
+      base::AutoLock lock(GetHWNDLock());
+      if (*target == kHwndCancel) {
+        // The dialog is cancelled before it is created, close it directly.
+        ::PostMessage(hwnd, WM_CLOSE, 0, 0);
+      } else if (*target == kHwndReserve) {
+        // Otherwise save the hwnd.
+        *target = hwnd;
+      } else {
+        NOTREACHED();
+      }
+    }
+  } else if (msg == TDN_BUTTON_CLICKED) {
+    // Ignore clicks for button IDs that we never created. Some software
+    // (e.g. file-dialog enhancers) enumerates dialog (0x8002) windows and sends
+    // messages with colliding IDs, which would dismiss our message box.
+    // Returning S_FALSE keeps it open. IDCANCEL is
+    // always honored so Esc and the title-bar close keep working under
+    // TDF_ALLOW_DIALOG_CANCELLATION.
+    const int clicked_id = static_cast<int>(w_param);
+    if (clicked_id != IDCANCEL &&
+        !callback_data->button_ids.contains(clicked_id)) {
+      return S_FALSE;
     }
   }
   return S_OK;
@@ -156,15 +183,27 @@ DialogResult ShowTaskDialogWstr(gfx::AcceleratedWidget parent,
 
   TASKDIALOGCONFIG config = {0};
   config.cbSize = sizeof(config);
-  config.hInstance = GetModuleHandle(NULL);
+  config.hInstance = GetModuleHandle(nullptr);
   config.dwFlags = flags;
 
-  if (parent) {
+  if (parent && ::IsWindowEnabled(parent)) {
     config.hwndParent = parent;
+    config.dwFlags |= TDF_POSITION_RELATIVE_TO_WINDOW;
   }
 
-  if (default_id > 0)
-    config.nDefaultButton = kIDStart + default_id;
+  if (default_id >= 0 &&
+      base::checked_cast<size_t>(default_id) < buttons.size()) {
+    if (!no_link) {
+      auto common = GetCommonID(buttons[default_id]);
+      if (common.button != -1) {
+        config.nDefaultButton = common.id;
+      } else {
+        config.nDefaultButton = kIDStart + default_id;
+      }
+    } else {
+      config.nDefaultButton = kIDStart + default_id;
+    }
+  }
 
   // TaskDialogIndirect doesn't allow empty name, if we set empty title it
   // will show "electron.exe" in title.
@@ -176,7 +215,7 @@ DialogResult ShowTaskDialogWstr(gfx::AcceleratedWidget parent,
     config.pszWindowTitle = base::as_wcstr(title);
   }
 
-  base::win::ScopedHICON hicon;
+  base::win::ScopedGDIObject<HICON> hicon;
   if (!icon.isNull()) {
     hicon = IconUtil::CreateHICONFromSkBitmap(*icon.bitmap());
     config.dwFlags |= TDF_USE_HICON_MAIN;
@@ -215,7 +254,7 @@ DialogResult ShowTaskDialogWstr(gfx::AcceleratedWidget parent,
 
   // Iterate through the buttons, put common buttons in dwCommonButtons
   // and custom buttons in pButtons.
-  std::map<int, int> id_map;
+  base::flat_map<int, int> id_map;
   std::vector<TASKDIALOG_BUTTON> dialog_buttons;
   if (no_link) {
     for (size_t i = 0; i < buttons.size(); ++i)
@@ -231,23 +270,36 @@ DialogResult ShowTaskDialogWstr(gfx::AcceleratedWidget parent,
       config.dwFlags |= TDF_USE_COMMAND_LINKS;  // custom buttons as links.
   }
 
-  // Pass a callback to receive the HWND of the message box.
-  if (hwnd) {
-    config.pfCallback = &TaskDialogCallback;
-    config.lpCallbackData = reinterpret_cast<LONG_PTR>(hwnd);
-  }
+  // Always register a callback, it receives the HWND of the message box (when
+  // the caller tracks it) and rejects button clicks for IDs we never created,
+  // so an external process cannot dismiss the dialog.
+  TaskDialogCallbackData callback_data;
+  callback_data.target = hwnd;
+  for (const auto& id_and_index : id_map)
+    callback_data.button_ids.insert(id_and_index.first);
+  for (const auto& button : dialog_buttons)
+    callback_data.button_ids.insert(button.nButtonID);
+  // With no buttons configured, TaskDialogIndirect shows an implicit OK button
+  // (e.g. ShowErrorBox), so allow its click through.
+  if (callback_data.button_ids.empty())
+    callback_data.button_ids.insert(IDOK);
+  config.pfCallback = &TaskDialogCallback;
+  config.lpCallbackData = reinterpret_cast<LONG_PTR>(&callback_data);
 
   int id = 0;
   BOOL verification_flag_checked = FALSE;
   TaskDialogIndirect(&config, &id, nullptr, &verification_flag_checked);
 
   int button_id;
-  if (id_map.find(id) != id_map.end())  // common button.
+  if (id_map.contains(id)) {
+    // common button.
     button_id = id_map[id];
-  else if (id >= kIDStart)  // custom button.
+  } else if (id >= kIDStart && callback_data.button_ids.contains(id)) {
+    // custom button.
     button_id = id - kIDStart;
-  else
+  } else {
     button_id = cancel_id;
+  }
 
   return {button_id, static_cast<bool>(verification_flag_checked)};
 }
@@ -289,7 +341,7 @@ void ShowMessageBox(const MessageBoxSettings& settings,
   // kHwndReserve in the dialogs map for now.
   HWND* hwnd = nullptr;
   if (settings.id) {
-    if (base::Contains(GetDialogsMap(), *settings.id))
+    if (GetDialogsMap().contains(*settings.id))
       CloseMessageBox(*settings.id);
     auto it = GetDialogsMap().emplace(*settings.id,
                                       std::make_unique<HWND>(kHwndReserve));
@@ -304,7 +356,7 @@ void ShowMessageBox(const MessageBoxSettings& settings,
   dialog_thread::Run(base::BindOnce(&ShowTaskDialogUTF8, settings,
                                     parent_widget, base::Unretained(hwnd)),
                      base::BindOnce(
-                         [](MessageBoxCallback callback, absl::optional<int> id,
+                         [](MessageBoxCallback callback, std::optional<int> id,
                             DialogResult result) {
                            if (id)
                              GetDialogsMap().erase(*id);

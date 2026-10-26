@@ -1,10 +1,11 @@
-import { EventEmitter } from 'events';
 import { IpcMainInvokeEvent } from 'electron/main';
 
-export class IpcMainImpl extends EventEmitter {
+import { EventEmitter } from 'events';
+
+export class IpcMainImpl extends EventEmitter implements Electron.IpcMain {
   private _invokeHandlers: Map<string, (e: IpcMainInvokeEvent, ...args: any[]) => void> = new Map();
 
-  constructor () {
+  constructor() {
     super();
 
     // Do not throw exception when channel name is "error".
@@ -16,19 +17,19 @@ export class IpcMainImpl extends EventEmitter {
       throw new Error(`Attempted to register a second handler for '${method}'`);
     }
     if (typeof fn !== 'function') {
-      throw new Error(`Expected handler to be a function, but found type '${typeof fn}'`);
+      throw new TypeError(`Expected handler to be a function, but found type '${typeof fn}'`);
     }
     this._invokeHandlers.set(method, fn);
-  }
+  };
 
   handleOnce: Electron.IpcMain['handleOnce'] = (method, fn) => {
     this.handle(method, (e, ...args) => {
       this.removeHandler(method);
       return fn(e, ...args);
     });
-  }
+  };
 
-  removeHandler (method: string) {
+  removeHandler(method: string) {
     this._invokeHandlers.delete(method);
   }
 }

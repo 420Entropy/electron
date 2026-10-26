@@ -29,7 +29,7 @@ be updated accordingly.
 In macOS 10.14 Mojave, Apple introduced a new [system-wide dark mode][system-wide-dark-mode]
 for all macOS computers. If your Electron app has a dark mode, you can make it
 follow the system-wide dark mode setting using
-[the `nativeTheme` api](../api/native-theme.md).
+[the `nativeTheme` API](../api/native-theme.md).
 
 In macOS 10.15 Catalina, Apple introduced a new "automatic" dark mode option
 for all macOS computers. In order for the `nativeTheme.shouldUseDarkColors` and
@@ -50,7 +50,7 @@ of this theming, due to the use of the macOS 10.14 SDK.
 This example demonstrates an Electron application that derives its theme colors from the
 `nativeTheme`. Additionally, it provides theme toggle and reset controls using IPC channels.
 
-```javascript fiddle='docs/fiddles/features/dark-mode'
+```fiddle docs/fiddles/features/dark-mode
 
 ```
 
@@ -75,7 +75,6 @@ Starting with the `index.html` file:
     <button id="reset-to-system">Reset to System Theme</button>
 
     <script src="renderer.js"></script>
-  </body>
 </body>
 </html>
 ```
@@ -116,7 +115,7 @@ Now the renderer process can communicate with the main process securely and perf
 
 The `renderer.js` file is responsible for controlling the `<button>` functionality.
 
-```js title='renderer.js'
+```js title='renderer.js' @ts-expect-error=[2,7]
 document.getElementById('toggle-dark-mode').addEventListener('click', async () => {
   const isDarkMode = await window.darkMode.toggle()
   document.getElementById('theme-source').innerHTML = isDarkMode ? 'Dark' : 'Light'
@@ -136,7 +135,8 @@ Finally, the `main.js` file represents the main process and contains the actual 
 
 ```js
 const { app, BrowserWindow, ipcMain, nativeTheme } = require('electron')
-const path = require('path')
+
+const path = require('node:path')
 
 const createWindow = () => {
   const win = new BrowserWindow({
@@ -199,7 +199,7 @@ Run the example using Electron Fiddle and then click the "Toggle Dark Mode" butt
 
 [system-wide-dark-mode]: https://developer.apple.com/design/human-interface-guidelines/macos/visual-design/dark-mode/
 [electron-forge]: https://www.electronforge.io/
-[electron-packager]: https://github.com/electron/electron-packager
-[packager-darwindarkmode-api]: https://electron.github.io/electron-packager/main/interfaces/electronpackager.options.html#darwindarkmodesupport
+[electron-packager]: https://github.com/electron/packager
+[packager-darwindarkmode-api]: https://electron.github.io/packager/main/interfaces/electronpackager.options.html#darwindarkmodesupport
 [prefers-color-scheme]: https://developer.mozilla.org/en-US/docs/Web/CSS/@media/prefers-color-scheme
 [event-listeners]: https://developer.mozilla.org/en-US/docs/Web/API/EventTarget/addEventListener

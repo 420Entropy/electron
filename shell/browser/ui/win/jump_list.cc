@@ -2,14 +2,17 @@
 // Use of this source code is governed by the MIT license that can be
 // found in the LICENSE file.
 
+// FIXME(samuelmaddock): refactor this class to use modern
+// Microsoft::WRL::ComPtr
+
 #include "shell/browser/ui/win/jump_list.h"
 
 #include <propkey.h>  // for PKEY_* constants
 
-#include "base/cxx17_backports.h"
 #include "base/logging.h"
 #include "base/win/scoped_co_mem.h"
 #include "base/win/scoped_propvariant.h"
+#include "base/win/shlwapi.h"
 #include "base/win/win_util.h"
 
 namespace {
@@ -43,7 +46,7 @@ bool AppendTask(const JumpListItem& item, IObjectCollection* collection) {
 
   CComQIPtr<IPropertyStore> property_store(link);
   if (!base::win::SetStringValueForPropertyStore(property_store, PKEY_Title,
-                                                 item.title.c_str()))
+                                                 item.title))
     return false;
 
   return SUCCEEDED(collection->AddObject(link));
@@ -66,7 +69,7 @@ bool AppendFile(const JumpListItem& item, IObjectCollection* collection) {
   DCHECK(collection);
 
   CComPtr<IShellItem> file;
-  if (SUCCEEDED(SHCreateItemFromParsingName(item.path.value().c_str(), NULL,
+  if (SUCCEEDED(SHCreateItemFromParsingName(item.path.value().c_str(), nullptr,
                                             IID_PPV_ARGS(&file))))
     return SUCCEEDED(collection->AddObject(file));
 
@@ -135,7 +138,7 @@ void ConvertRemovedJumpListItems(IObjectArray* in,
   DCHECK(out);
 
   UINT removed_count;
-  if (SUCCEEDED(in->GetCount(&removed_count) && (removed_count > 0))) {
+  if (SUCCEEDED(in->GetCount(&removed_count)) && removed_count > 0) {
     out->reserve(removed_count);
     JumpListItem item;
     IShellItem* shell_item;
@@ -254,8 +257,8 @@ JumpListResult JumpList::AppendCategory(const JumpListCategory& category) {
           if (AppendSeparator(collection))
             ++appended_count;
         } else {
-          LOG(ERROR) << "Can't append separator to Jump List category "
-                     << "'" << category.name << "'. "
+          LOG(ERROR) << "Can't append separator to Jump List category " << "'"
+                     << category.name << "'. "
                      << "Separators are only allowed in the standard 'Tasks' "
                         "Jump List category.";
           result = JumpListResult::kCustomCategorySeparatorError;
@@ -293,18 +296,18 @@ JumpListResult JumpList::AppendCategory(const JumpListCategory& category) {
     HRESULT hr = destinations_->AppendCategory(category.name.c_str(), items);
     if (FAILED(hr)) {
       if (hr == static_cast<HRESULT>(0x80040F03)) {
-        LOG(ERROR) << "Failed to append custom category "
-                   << "'" << category.name << "' "
+        LOG(ERROR) << "Failed to append custom category " << "'"
+                   << category.name << "' "
                    << "to Jump List due to missing file type registration.";
         result = JumpListResult::kMissingFileTypeRegistrationError;
       } else if (hr == E_ACCESSDENIED) {
-        LOG(ERROR) << "Failed to append custom category "
-                   << "'" << category.name << "' "
+        LOG(ERROR) << "Failed to append custom category " << "'"
+                   << category.name << "' "
                    << "to Jump List due to system privacy settings.";
         result = JumpListResult::kCustomCategoryAccessDeniedError;
       } else {
-        LOG(ERROR) << "Failed to append custom category "
-                   << "'" << category.name << "' to Jump List.";
+        LOG(ERROR) << "Failed to append custom category " << "'"
+                   << category.name << "' to Jump List.";
         if (result == JumpListResult::kSuccess)
           result = JumpListResult::kGenericError;
       }

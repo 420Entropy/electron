@@ -6,24 +6,43 @@
 #define ELECTRON_SHELL_BROWSER_NET_ELECTRON_URL_LOADER_FACTORY_H_
 
 #include <map>
+#include <optional>
 #include <string>
 #include <utility>
-#include <vector>
 
-#include "mojo/public/cpp/bindings/pending_receiver.h"
+#include "base/memory/self_deleting.h"
+#include "base/memory/weak_ptr.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
-#include "mojo/public/cpp/bindings/receiver_set.h"
+#include "mojo/public/cpp/bindings/receiver.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "net/url_request/url_request_job_factory.h"
 #include "services/network/public/cpp/resource_request.h"
 #include "services/network/public/cpp/self_deleting_url_loader_factory.h"
 #include "services/network/public/mojom/url_loader.mojom.h"
 #include "services/network/public/mojom/url_loader_factory.mojom.h"
-#include "services/network/public/mojom/url_response_head.mojom.h"
-#include "shell/common/gin_helper/dictionary.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "services/network/public/mojom/url_response_head.mojom-forward.h"
+#include "v8/include/v8-array-buffer.h"
+
+namespace gin {
+class Arguments;
+}  // namespace gin
+
+namespace gin_helper {
+class Dictionary;
+}  // namespace gin_helper
+
+namespace mojo {
+template <typename T>
+class PendingReceiver;
+}  // namespace mojo
 
 namespace electron {
+
+namespace api {
+class SimpleURLLoaderWrapper;
+}
+
+class ElectronBrowserContext;
 
 // Old Protocol API can only serve one type of response for one scheme.
 enum class ProtocolType {
@@ -41,8 +60,19 @@ using ProtocolHandler =
                                  StartLoadingCallback)>;
 
 // scheme => (type, handler).
-using HandlersMap =
-    std::map<std::string, std::pair<ProtocolType, ProtocolHandler>>;
+using HandlersMap = std::
+    map<std::string, std::pair<ProtocolType, ProtocolHandler>, std::less<>>;
+
+// Per-scheme factories are reached directly from the renderer's factory
+// bundle, bypassing CorsURLLoader, so they apply its checks themselves.
+bool IsCorsDisabledSchemeRequest(const network::ResourceRequest& request);
+void FailCorsDisabledSchemeRequest(
+    mojo::PendingRemote<network::mojom::URLLoaderClient> client);
+bool IsCrossOriginNoCorsRequest(const network::ResourceRequest& request);
+// For sinks that build their own response head.
+mojo::PendingRemote<network::mojom::URLLoaderClient>
+WrapClientForOpaqueResponse(
+    mojo::PendingRemote<network::mojom::URLLoaderClient> client);
 
 // Implementation of URLLoaderFactory.
 class ElectronURLLoaderFactory : public network::SelfDeletingURLLoaderFactory {
@@ -70,14 +100,10 @@ class ElectronURLLoaderFactory : public network::SelfDeletingURLLoaderFactory {
 
     // network::mojom::URLLoader:
     void FollowRedirect(
-        const std::vector<std::string>& removed_headers,
-        const net::HttpRequestHeaders& modified_headers,
-        const net::HttpRequestHeaders& modified_cors_exempt_headers,
-        const absl::optional<GURL>& new_url) override;
+        network::HttpRequestHeadersUpdateParams headers_update_params,
+        const std::optional<GURL>& new_url) override;
     void SetPriority(net::RequestPriority priority,
                      int32_t intra_priority_value) override {}
-    void PauseReadingBodyFromNet() override {}
-    void ResumeReadingBodyFromNet() override {}
 
     void OnTargetFactoryError();
     void DeleteThis();
@@ -97,7 +123,8 @@ class ElectronURLLoaderFactory : public network::SelfDeletingURLLoaderFactory {
 
   static mojo::PendingRemote<network::mojom::URLLoaderFactory> Create(
       ProtocolType type,
-      const ProtocolHandler& handler);
+      const ProtocolHandler& handler,
+      base::WeakPtr<ElectronBrowserContext> browser_context);
 
   // network::mojom::URLLoaderFactory:
   void CreateLoaderAndStart(
@@ -118,17 +145,21 @@ class ElectronURLLoaderFactory : public network::SelfDeletingURLLoaderFactory {
       const net::MutableNetworkTrafficAnnotationTag& traffic_annotation,
       mojo::PendingRemote<network::mojom::URLLoaderFactory> target_factory,
       ProtocolType type,
+      base::WeakPtr<ElectronBrowserContext> browser_context,
       gin::Arguments* args);
 
   // disable copy
   ElectronURLLoaderFactory(const ElectronURLLoaderFactory&) = delete;
   ElectronURLLoaderFactory& operator=(const ElectronURLLoaderFactory&) = delete;
 
- private:
   ElectronURLLoaderFactory(
       ProtocolType type,
       const ProtocolHandler& handler,
-      mojo::PendingReceiver<network::mojom::URLLoaderFactory> factory_receiver);
+      base::WeakPtr<ElectronBrowserContext> browser_context,
+      mojo::PendingReceiver<network::mojom::URLLoaderFactory> factory_receiver,
+      base::SelfDeletingPassKey key);
+
+ private:
   ~ElectronURLLoaderFactory() override;
 
   static void OnComplete(
@@ -146,13 +177,22 @@ class ElectronURLLoaderFactory : public network::SelfDeletingURLLoaderFactory {
       network::mojom::URLResponseHeadPtr head,
       const network::ResourceRequest& original_request,
       const base::FilePath& path,
-      const gin_helper::Dictionary& opts);
+      const gin_helper::Dictionary& opts,
+      bool tag_response_opaque);
   static void StartLoadingHttp(
       mojo::PendingRemote<network::mojom::URLLoaderClient> client,
       mojo::PendingReceiver<network::mojom::URLLoader> loader,
       const network::ResourceRequest& original_request,
       const net::MutableNetworkTrafficAnnotationTag& traffic_annotation,
-      const gin_helper::Dictionary& dict);
+      base::WeakPtr<ElectronBrowserContext> browser_context,
+      const gin_helper::Dictionary& dict,
+      bool tag_response_opaque);
+  static void StartLoadingRelay(
+      mojo::PendingRemote<network::mojom::URLLoaderClient> client,
+      mojo::PendingReceiver<network::mojom::URLLoader> loader,
+      network::mojom::URLResponseHeadPtr head,
+      api::SimpleURLLoaderWrapper* fetch_loader,
+      std::string prefix);
   static void StartLoadingStream(
       mojo::PendingRemote<network::mojom::URLLoaderClient> client,
       mojo::PendingReceiver<network::mojom::URLLoader> loader,
@@ -167,6 +207,7 @@ class ElectronURLLoaderFactory : public network::SelfDeletingURLLoaderFactory {
 
   ProtocolType type_;
   ProtocolHandler handler_;
+  base::WeakPtr<ElectronBrowserContext> browser_context_;
 };
 
 }  // namespace electron

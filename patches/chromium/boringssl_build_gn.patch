@@ -6,27 +6,28 @@ Subject: boringssl BUILD.gn
 Build BoringSSL with some extra functions that nodejs needs.
 
 diff --git a/third_party/boringssl/BUILD.gn b/third_party/boringssl/BUILD.gn
-index 40073723173388015f0c78899214ba155e7cdc53..72978c43a522e5716ba06e8b989710cc99bd8773 100644
+index f4e51bfcfc4dbad4b70a39e7db0f22c3b32cc399..07ef26289ecf11acfdf901a100559ff6e005a8b9 100644
 --- a/third_party/boringssl/BUILD.gn
 +++ b/third_party/boringssl/BUILD.gn
-@@ -44,6 +44,20 @@ config("no_asm_config") {
+@@ -47,6 +47,21 @@ all_sources = bcm_internal_headers + bcm_sources + crypto_internal_headers +
+               crypto_sources + ssl_internal_headers + ssl_sources + pki_sources
+ all_headers = crypto_headers + ssl_headers + pki_headers + pki_internal_headers
  
- all_sources = crypto_sources + ssl_sources
- all_headers = crypto_headers + ssl_headers
 +if (is_electron_build) {
 +  # Needed to build a nodejs-compatible boringssl.
 +  all_sources += [
-+    "src/decrepit/evp/evp_do_all.c",
-+    "src/decrepit/xts/xts.c",
++    "decrepit/evp/evp_do_all.cc",
++    "decrepit/xts/xts.cc",
 +  ]
 +
 +  all_sources += [
-+    "src/decrepit/blowfish/blowfish.c",
-+    "src/decrepit/cfb/cfb.c",
-+    "src/decrepit/ripemd/internal.h",
-+    "src/decrepit/ripemd/ripemd.c",
++    "decrepit/blowfish/blowfish.cc",
++    "decrepit/cfb/cfb.cc",
++    "decrepit/ripemd/internal.h",
++    "decrepit/ripemd/ripemd.cc",
 +  ]
 +}
- 
- # Windows' assembly is built with NASM. The other platforms use the platform
- # assembler. Exclude Windows ARM64 because NASM targets x86 and x64 only.
++
+ if (enable_rust) {
+   rust_bindgen_generator("raw_bssl_sys_bindings") {
+     output_name = "bindgen"

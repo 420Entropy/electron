@@ -1,3 +1,14 @@
+export const navigationHistorySyncMethods = new Set([
+  'canGoBack',
+  'canGoForward',
+  'canGoToOffset',
+  'clearHistory',
+  'goBack',
+  'goForward',
+  'goToIndex',
+  'goToOffset'
+]);
+
 // Public-facing API methods.
 export const syncMethods = new Set([
   'getURL',
@@ -8,14 +19,6 @@ export const syncMethods = new Set([
   'stop',
   'reload',
   'reloadIgnoringCache',
-  'canGoBack',
-  'canGoForward',
-  'canGoToOffset',
-  'clearHistory',
-  'goBack',
-  'goForward',
-  'goToIndex',
-  'goToOffset',
   'isCrashed',
   'setUserAgent',
   'getUserAgent',
@@ -31,11 +34,15 @@ export const syncMethods = new Set([
   'redo',
   'cut',
   'copy',
+  'centerSelection',
   'paste',
   'pasteAndMatchStyle',
   'delete',
   'selectAll',
   'unselect',
+  'scrollToTop',
+  'scrollToBottom',
+  'adjustSelection',
   'replace',
   'replaceMisspelling',
   'findInPage',
@@ -46,17 +53,14 @@ export const syncMethods = new Set([
   'showDefinitionForSelection',
   'getZoomFactor',
   'getZoomLevel',
+  'getZoomMode',
   'setZoomFactor',
-  'setZoomLevel'
+  'setZoomLevel',
+  'setZoomMode',
+  ...navigationHistorySyncMethods
 ]);
 
-export const properties = new Set([
-  'audioMuted',
-  'userAgent',
-  'zoomLevel',
-  'zoomFactor',
-  'frameRate'
-]);
+export const properties = new Set(['audioMuted', 'userAgent', 'zoomLevel', 'zoomFactor', 'zoomMode', 'frameRate']);
 
 export const asyncMethods = new Set([
   'capturePage',
@@ -68,7 +72,6 @@ export const asyncMethods = new Set([
   'send',
   'sendToFrame',
   'sendInputEvent',
-  'setLayoutZoomLevelLimits',
   'setVisualZoomLevelLimits',
   'print',
   'printToPDF'

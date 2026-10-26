@@ -9,8 +9,8 @@
 #include <vector>
 
 #include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "base/strings/sys_string_conversions.h"
-#include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 
 #import <StoreKit/StoreKit.h>
@@ -24,6 +24,7 @@
 @interface InAppPurchaseProduct : NSObject <SKProductsRequestDelegate> {
  @private
   in_app_purchase::InAppPurchaseProductsCallback callback_;
+  InAppPurchaseProduct __strong* self_;
 }
 
 - (id)initWithCallback:(in_app_purchase::InAppPurchaseProductsCallback)callback;
@@ -43,6 +44,7 @@
     (in_app_purchase::InAppPurchaseProductsCallback)callback {
   if ((self = [super init])) {
     callback_ = std::move(callback);
+    self_ = self;
   }
 
   return self;
@@ -67,9 +69,6 @@
  */
 - (void)productsRequest:(SKProductsRequest*)request
      didReceiveResponse:(SKProductsResponse*)response {
-  // Release request object.
-  [request release];
-
   // Get the products.
   NSArray* products = response.products;
 
@@ -84,8 +83,7 @@
   // Send the callback to the browser thread.
   content::GetUIThreadTaskRunner({})->PostTask(
       FROM_HERE, base::BindOnce(std::move(callback_), converted));
-
-  [self release];
+  self_ = nil;
 }
 
 /**
@@ -114,8 +112,7 @@
  */
 - (in_app_purchase::ProductSubscriptionPeriod)
     skProductSubscriptionPeriodToStruct:
-        (SKProductSubscriptionPeriod*)productSubscriptionPeriod
-    API_AVAILABLE(macosx(10.13.2)) {
+        (SKProductSubscriptionPeriod*)productSubscriptionPeriod {
   in_app_purchase::ProductSubscriptionPeriod productSubscriptionPeriodStruct;
 
   productSubscriptionPeriodStruct.numberOfUnits =
@@ -140,7 +137,7 @@
  * @param productDiscount - The SKProductDiscount object to convert.
  */
 - (in_app_purchase::ProductDiscount)skProductDiscountToStruct:
-    (SKProductDiscount*)productDiscount API_AVAILABLE(macosx(10.13.2)) {
+    (SKProductDiscount*)productDiscount {
   in_app_purchase::ProductDiscount productDiscountStruct;
 
   if (productDiscount.paymentMode == SKProductDiscountPaymentModePayAsYouGo) {
@@ -157,8 +154,8 @@
 
   if (productDiscount.priceLocale != nil) {
     productDiscountStruct.priceLocale =
-        [[self formatPrice:productDiscount.price
-                 withLocal:productDiscount.priceLocale] UTF8String];
+        base::SysNSStringToUTF8([self formatPrice:productDiscount.price
+                                        withLocal:productDiscount.priceLocale]);
   }
 
   if (productDiscount.subscriptionPeriod != nil) {
@@ -166,14 +163,10 @@
         skProductSubscriptionPeriodToStruct:productDiscount.subscriptionPeriod];
   }
 
-  if (@available(macOS 10.14.4, *)) {
-    productDiscountStruct.type = (int)productDiscount.type;
-    if (productDiscount.identifier != nil) {
-      productDiscountStruct.identifier =
-          [productDiscount.identifier UTF8String];
-    }
-    productDiscountStruct.price = [productDiscount.price doubleValue];
-  }
+  productDiscountStruct.type = (int)productDiscount.type;
+  productDiscountStruct.identifier =
+      base::SysNSStringToUTF8(productDiscount.identifier);
+  productDiscountStruct.price = [productDiscount.price doubleValue];
 
   return productDiscountStruct;
 }
@@ -187,28 +180,14 @@
   in_app_purchase::Product productStruct;
 
   // Product Identifier
-  if (product.productIdentifier != nil) {
-    productStruct.productIdentifier = [product.productIdentifier UTF8String];
-  }
+  productStruct.productIdentifier =
+      base::SysNSStringToUTF8(product.productIdentifier);
 
   // Product Attributes
-  if (product.localizedDescription != nil) {
-    productStruct.localizedDescription =
-        [product.localizedDescription UTF8String];
-  }
-  if (product.localizedTitle != nil) {
-    productStruct.localizedTitle = [product.localizedTitle UTF8String];
-  }
-  if (product.contentVersion != nil) {
-    productStruct.contentVersion = [product.contentVersion UTF8String];
-  }
-  if (product.contentLengths != nil) {
-    productStruct.contentLengths.reserve([product.contentLengths count]);
-
-    for (NSNumber* contentLength in product.contentLengths) {
-      productStruct.contentLengths.push_back([contentLength longLongValue]);
-    }
-  }
+  productStruct.localizedDescription =
+      base::SysNSStringToUTF8(product.localizedDescription);
+  productStruct.localizedTitle =
+      base::SysNSStringToUTF8(product.localizedTitle);
 
   // Pricing Information
   if (product.price != nil) {
@@ -216,74 +195,57 @@
 
     if (product.priceLocale != nil) {
       productStruct.formattedPrice =
-          [[self formatPrice:product.price
-                   withLocal:product.priceLocale] UTF8String];
+          base::SysNSStringToUTF8([self formatPrice:product.price
+                                          withLocal:product.priceLocale]);
 
       // Currency Information
-      if (product.priceLocale.currencyCode != nil) {
-        productStruct.currencyCode =
-            [product.priceLocale.currencyCode UTF8String];
-      }
+      productStruct.currencyCode =
+          base::SysNSStringToUTF8(product.priceLocale.currencyCode);
     }
   }
-  if (@available(macOS 10.13.2, *)) {
-    if (product.introductoryPrice != nil) {
-      productStruct.introductoryPrice =
-          [self skProductDiscountToStruct:product.introductoryPrice];
-    }
-    if (product.subscriptionPeriod != nil) {
-      productStruct.subscriptionPeriod =
-          [self skProductSubscriptionPeriodToStruct:product.subscriptionPeriod];
-    }
-  }
-  if (@available(macOS 10.14, *)) {
-    if (product.subscriptionGroupIdentifier != nil) {
-      productStruct.subscriptionGroupIdentifier =
-          [product.subscriptionGroupIdentifier UTF8String];
-    }
-  }
-  if (@available(macOS 10.14.4, *)) {
-    if (product.discounts != nil) {
-      productStruct.discounts.reserve([product.discounts count]);
 
-      for (SKProductDiscount* discount in product.discounts) {
-        productStruct.discounts.push_back(
-            [self skProductDiscountToStruct:discount]);
-      }
+  if (product.introductoryPrice != nil) {
+    productStruct.introductoryPrice =
+        [self skProductDiscountToStruct:product.introductoryPrice];
+  }
+  if (product.subscriptionPeriod != nil) {
+    productStruct.subscriptionPeriod =
+        [self skProductSubscriptionPeriodToStruct:product.subscriptionPeriod];
+  }
+
+  productStruct.subscriptionGroupIdentifier =
+      base::SysNSStringToUTF8(product.subscriptionGroupIdentifier);
+
+  if (product.discounts != nil) {
+    productStruct.discounts.reserve([product.discounts count]);
+
+    for (SKProductDiscount* discount in product.discounts) {
+      productStruct.discounts.push_back(
+          [self skProductDiscountToStruct:discount]);
     }
   }
 
   // Downloadable Content Information
-  productStruct.isDownloadable = [product downloadable];
-  if (@available(macOS 10.14, *)) {
-    if (product.downloadContentVersion != nil) {
-      productStruct.downloadContentVersion =
-          [product.downloadContentVersion UTF8String];
-    }
-    if (product.downloadContentLengths != nil) {
-      productStruct.downloadContentLengths.reserve(
-          [product.downloadContentLengths count]);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+  // These hosted content properties are deprecated as of macOS 13 ("Hosted
+  // content is no longer supported."), but they still back the documented
+  // fields of Electron's Product structure.
+  productStruct.isDownloadable = [product isDownloadable];
 
-      for (NSNumber* contentLength in product.downloadContentLengths) {
-        productStruct.downloadContentLengths.push_back(
-            [contentLength longLongValue]);
-      }
-    }
-  } else {
-    if (product.contentVersion != nil) {
-      productStruct.downloadContentVersion =
-          [product.contentVersion UTF8String];
-    }
-    if (product.contentLengths != nil) {
-      productStruct.downloadContentLengths.reserve(
-          [product.contentLengths count]);
+  productStruct.downloadContentVersion =
+      base::SysNSStringToUTF8(product.downloadContentVersion);
 
-      for (NSNumber* contentLength in product.contentLengths) {
-        productStruct.downloadContentLengths.push_back(
-            [contentLength longLongValue]);
-      }
+  if (product.downloadContentLengths != nil) {
+    productStruct.downloadContentLengths.reserve(
+        [product.downloadContentLengths count]);
+
+    for (NSNumber* contentLength in product.downloadContentLengths) {
+      productStruct.downloadContentLengths.push_back(
+          [contentLength longLongValue]);
     }
   }
+#pragma clang diagnostic pop
 
   return productStruct;
 }

@@ -6,11 +6,12 @@
 #define ELECTRON_SHELL_BROWSER_NOTIFICATIONS_MAC_COCOA_NOTIFICATION_H_
 
 #import <Foundation/Foundation.h>
+#import <UserNotifications/UserNotifications.h>
 
-#include <map>
+#include <memory>
 #include <string>
 
-#include "base/mac/scoped_nsobject.h"
+#include "base/files/scoped_temp_file.h"
 #include "shell/browser/notifications/notification.h"
 
 namespace electron {
@@ -24,21 +25,25 @@ class CocoaNotification : public Notification {
   // Notification:
   void Show(const NotificationOptions& options) override;
   void Dismiss() override;
+  void Restore() override;
 
   void NotificationDisplayed();
   void NotificationReplied(const std::string& reply);
-  void NotificationActivated();
-  void NotificationActivated(NSUserNotificationAction* action);
+  void NotificationActivated(int actionIndex);
   void NotificationDismissed();
 
-  NSUserNotification* notification() const { return notification_; }
+  UNNotificationRequest* notification_request() const {
+    return notification_request_;
+  }
 
  private:
   void LogAction(const char* action);
+  void ScheduleNotification(
+      UNMutableNotificationContent* content,
+      std::shared_ptr<base::ScopedTempFile> icon_file = nullptr);
 
-  base::scoped_nsobject<NSUserNotification> notification_;
-  std::map<std::string, unsigned> additional_action_indices_;
-  unsigned action_index_;
+  bool is_restored_ = false;
+  UNNotificationRequest* __strong notification_request_;
 };
 
 }  // namespace electron

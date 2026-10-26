@@ -1,5 +1,11 @@
-const { app, BrowserWindow, ipcMain } = require('electron')
-const path = require('path')
+const { app, BrowserWindow, ipcMain } = require('electron/main')
+const path = require('node:path')
+
+function handleSetTitle (event, title) {
+  const webContents = event.sender
+  const win = BrowserWindow.fromWebContents(webContents)
+  win.setTitle(title)
+}
 
 function createWindow () {
   const mainWindow = new BrowserWindow({
@@ -8,16 +14,11 @@ function createWindow () {
     }
   })
 
-  ipcMain.on('set-title', (event, title) => {
-    const webContents = event.sender
-    const win = BrowserWindow.fromWebContents(webContents)
-    win.setTitle(title)
-  })
-
   mainWindow.loadFile('index.html')
 }
 
 app.whenReady().then(() => {
+  ipcMain.on('set-title', handleSetTitle)
   createWindow()
 
   app.on('activate', function () {

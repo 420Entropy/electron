@@ -2,12 +2,19 @@
 // Use of this source code is governed by the MIT license that can be
 // found in the LICENSE file.
 
+#include "shell/browser/api/electron_api_app.h"
+
 #include <string>
 
 #include "base/path_service.h"
-#include "shell/browser/api/electron_api_app.h"
+#include "base/strings/sys_string_conversions.h"
+#include "electron/mas.h"
+#include "gin/arguments.h"
+#include "shell/browser/app_shim/app_shim_listener.h"
+#include "shell/browser/browser.h"
+#include "shell/common/app_shim_constants.h"
 #include "shell/common/electron_paths.h"
-#include "shell/common/node_includes.h"
+#include "shell/common/gin_helper/dictionary.h"
 #include "shell/common/process_util.h"
 #include "shell/common/thread_restrictions.h"
 
@@ -16,30 +23,14 @@
 
 namespace electron::api {
 
-void App::SetAppLogsPath(gin_helper::ErrorThrower thrower,
-                         absl::optional<base::FilePath> custom_path) {
-  if (custom_path.has_value()) {
-    if (!custom_path->IsAbsolute()) {
-      thrower.ThrowError("Path must be absolute");
-      return;
-    }
-    {
-      ScopedAllowBlockingForElectron allow_blocking;
-      base::PathService::Override(DIR_APP_LOGS, custom_path.value());
-    }
-  } else {
-    NSString* bundle_name =
-        [[[NSBundle mainBundle] infoDictionary] objectForKey:@"CFBundleName"];
-    NSString* logs_path =
-        [NSString stringWithFormat:@"Library/Logs/%@", bundle_name];
-    NSString* library_path =
-        [NSHomeDirectory() stringByAppendingPathComponent:logs_path];
-    {
-      ScopedAllowBlockingForElectron allow_blocking;
-      base::PathService::Override(DIR_APP_LOGS,
-                                  base::FilePath([library_path UTF8String]));
-    }
-  }
+base::FilePath App::GetDefaultAppLogPath() {
+  NSString* bundle_name =
+      [[[NSBundle mainBundle] infoDictionary] objectForKey:@"CFBundleName"];
+  NSString* logs_path =
+      [NSString stringWithFormat:@"Library/Logs/%@", bundle_name];
+  NSString* library_path =
+      [NSHomeDirectory() stringByAppendingPathComponent:logs_path];
+  return base::FilePath{base::SysNSStringToUTF8(library_path)};
 }
 
 void App::SetActivationPolicy(gin_helper::ErrorThrower thrower,
@@ -60,25 +51,46 @@ void App::SetActivationPolicy(gin_helper::ErrorThrower thrower,
   [NSApp setActivationPolicy:activation_policy];
 }
 
-bool App::IsRunningUnderRosettaTranslation() const {
-  node::Environment* env =
-      node::Environment::GetCurrent(JavascriptEnvironment::GetIsolate());
-
-  EmitWarning(env,
-              "The app.runningUnderRosettaTranslation API is deprecated, use "
-              "app.runningUnderARM64Translation instead.",
-              "electron");
-  return IsRunningUnderARM64Translation();
-}
-
 bool App::IsRunningUnderARM64Translation() const {
   int proc_translated = 0;
   size_t size = sizeof(proc_translated);
-  if (sysctlbyname("sysctl.proc_translated", &proc_translated, &size, NULL,
+  if (sysctlbyname("sysctl.proc_translated", &proc_translated, &size, nullptr,
                    0) == -1) {
     return false;
   }
   return proc_translated == 1;
+}
+
+void App::StartAppShimServer(gin::Arguments* args) {
+#if IS_MAS_BUILD()
+  args->ThrowTypeError("App shims are not available in Mac App Store builds");
+#else
+  if (!Browser::Get()->is_ready()) {
+    args->ThrowTypeError(
+        "app.startAppShimServer() can only be called after app is ready");
+    return;
+  }
+  std::string name = app_shim::kDefaultServerName;
+  if (args->Length() > 0) {
+    gin_helper::Dictionary options;
+    v8::Local<v8::Value> name_value;
+    if (!args->GetNext(&options) ||
+        (options.Get("name", &name_value) && !name_value->IsUndefined() &&
+         !options.Get("name", &name))) {
+      args->ThrowTypeError("Invalid options: name must be a string");
+      return;
+    }
+  }
+  std::string error;
+  if (!AppShimListener::Get()->Start(name, &error))
+    args->ThrowTypeError(error);
+#endif
+}
+
+void App::StopAppShimServer() {
+#if !IS_MAS_BUILD()
+  AppShimListener::Get()->Stop();
+#endif
 }
 
 }  // namespace electron::api

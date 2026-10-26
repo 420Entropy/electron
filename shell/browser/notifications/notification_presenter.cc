@@ -6,6 +6,7 @@
 
 #include <algorithm>
 
+#include "base/functional/callback.h"
 #include "shell/browser/notifications/notification.h"
 
 namespace electron {
@@ -13,8 +14,12 @@ namespace electron {
 NotificationPresenter::NotificationPresenter() = default;
 
 NotificationPresenter::~NotificationPresenter() {
-  for (Notification* notification : notifications_)
+  while (!notifications_.empty()) {
+    auto it = notifications_.begin();
+    Notification* notification = *it;
+    notifications_.erase(it);
     delete notification;
+  }
 }
 
 base::WeakPtr<Notification> NotificationPresenter::CreateNotification(
@@ -27,21 +32,47 @@ base::WeakPtr<Notification> NotificationPresenter::CreateNotification(
 }
 
 void NotificationPresenter::RemoveNotification(Notification* notification) {
-  notifications_.erase(notification);
-  delete notification;
+  if (notifications_.erase(notification))
+    delete notification;
 }
 
 void NotificationPresenter::CloseNotificationWithId(
     const std::string& notification_id) {
-  auto it = std::find_if(notifications_.begin(), notifications_.end(),
-                         [&notification_id](const Notification* n) {
-                           return n->notification_id() == notification_id;
-                         });
+  auto it = std::ranges::find_if(
+      notifications_, [&notification_id](const Notification* n) {
+        return n->notification_id() == notification_id;
+      });
   if (it != notifications_.end()) {
     Notification* notification = (*it);
     notification->Dismiss();
-    notifications_.erase(notification);
+    // Dismiss() may already have destroyed |notification|. Look it up by
+    // address rather than erasing by key, which would construct a raw_ptr
+    // from a possibly-freed pointer.
+    if (auto found = notifications_.find(notification);
+        found != notifications_.end()) {
+      notifications_.erase(found);
+    }
   }
+}
+
+void NotificationPresenter::GetDeliveredNotifications(
+    GetDeliveredNotificationsCallback callback) {
+  // Default: return empty list. Overridden on macOS.
+  std::move(callback).Run({});
+}
+
+void NotificationPresenter::RemoveDeliveredNotifications(
+    const std::vector<std::string>& identifiers) {
+  // Default: no-op. Overridden on macOS.
+}
+
+void NotificationPresenter::RemoveAllDeliveredNotifications() {
+  // Default: no-op. Overridden on macOS.
+}
+
+void NotificationPresenter::RemoveDeliveredNotificationsByGroupId(
+    const std::string& group_id) {
+  // Default: no-op. Overridden on macOS.
 }
 
 }  // namespace electron

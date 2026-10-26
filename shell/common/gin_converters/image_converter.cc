@@ -6,6 +6,7 @@
 
 #include "shell/common/api/electron_api_native_image.h"
 #include "shell/common/gin_converters/file_path_converter.h"
+#include "shell/common/gin_helper/handle.h"
 #include "ui/gfx/image/image_skia.h"
 
 namespace gin {
@@ -32,7 +33,7 @@ bool Converter<gfx::Image>::FromV8(v8::Isolate* isolate,
   base::FilePath icon_path;
   if (gin::ConvertFromV8(isolate, val, &icon_path)) {
     native_image =
-        electron::api::NativeImage::CreateFromPath(isolate, icon_path).get();
+        electron::api::NativeImage::CreateFromPath(isolate, icon_path);
     if (native_image->image().IsEmpty())
       return false;
   } else {
@@ -47,8 +48,11 @@ bool Converter<gfx::Image>::FromV8(v8::Isolate* isolate,
 
 v8::Local<v8::Value> Converter<gfx::Image>::ToV8(v8::Isolate* isolate,
                                                  const gfx::Image& val) {
-  return gin::ConvertToV8(isolate,
-                          electron::api::NativeImage::Create(isolate, val));
+  v8::Local<v8::Value> wrapper;
+  if (!gin::TryConvertToV8(
+          isolate, electron::api::NativeImage::Create(isolate, val), &wrapper))
+    return {};
+  return wrapper;
 }
 
 }  // namespace gin

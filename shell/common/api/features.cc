@@ -14,44 +14,20 @@ bool IsBuiltinSpellCheckerEnabled() {
   return BUILDFLAG(ENABLE_BUILTIN_SPELLCHECKER);
 }
 
-bool IsDesktopCapturerEnabled() {
-  return BUILDFLAG(ENABLE_DESKTOP_CAPTURER);
-}
-
-bool IsOffscreenRenderingEnabled() {
-  return BUILDFLAG(ENABLE_OSR);
-}
-
 bool IsPDFViewerEnabled() {
   return BUILDFLAG(ENABLE_PDF_VIEWER);
-}
-
-bool IsRunAsNodeEnabled() {
-  return electron::fuses::IsRunAsNodeEnabled() && BUILDFLAG(ENABLE_RUN_AS_NODE);
-}
-
-bool IsFakeLocationProviderEnabled() {
-  return BUILDFLAG(OVERRIDE_LOCATION_PROVIDER);
-}
-
-bool IsViewApiEnabled() {
-  return BUILDFLAG(ENABLE_VIEWS_API);
-}
-
-bool IsTtsEnabled() {
-  return BUILDFLAG(ENABLE_TTS);
 }
 
 bool IsPrintingEnabled() {
   return BUILDFLAG(ENABLE_PRINTING);
 }
 
-bool IsExtensionsEnabled() {
-  return BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS);
+bool IsPromptAPIEnabled() {
+  return BUILDFLAG(ENABLE_PROMPT_API);
 }
 
-bool IsPictureInPictureEnabled() {
-  return BUILDFLAG(ENABLE_PICTURE_IN_PICTURE);
+bool IsRunAsNodeEnabled() {
+  return electron::fuses::IsRunAsNodeEnabled();
 }
 
 bool IsComponentBuild() {
@@ -66,20 +42,14 @@ void Initialize(v8::Local<v8::Object> exports,
                 v8::Local<v8::Value> unused,
                 v8::Local<v8::Context> context,
                 void* priv) {
-  gin_helper::Dictionary dict(context->GetIsolate(), exports);
-  dict.SetMethod("isBuiltinSpellCheckerEnabled", &IsBuiltinSpellCheckerEnabled);
-  dict.SetMethod("isDesktopCapturerEnabled", &IsDesktopCapturerEnabled);
-  dict.SetMethod("isOffscreenRenderingEnabled", &IsOffscreenRenderingEnabled);
-  dict.SetMethod("isPDFViewerEnabled", &IsPDFViewerEnabled);
-  dict.SetMethod("isRunAsNodeEnabled", &IsRunAsNodeEnabled);
-  dict.SetMethod("isFakeLocationProviderEnabled",
-                 &IsFakeLocationProviderEnabled);
-  dict.SetMethod("isViewApiEnabled", &IsViewApiEnabled);
-  dict.SetMethod("isTtsEnabled", &IsTtsEnabled);
-  dict.SetMethod("isPrintingEnabled", &IsPrintingEnabled);
-  dict.SetMethod("isPictureInPictureEnabled", &IsPictureInPictureEnabled);
-  dict.SetMethod("isComponentBuild", &IsComponentBuild);
-  dict.SetMethod("isExtensionsEnabled", &IsExtensionsEnabled);
+  v8::Isolate* const isolate = v8::Isolate::GetCurrent();
+  gin_helper::Dictionary dict{isolate, exports};
+  dict.SetMethod<&IsBuiltinSpellCheckerEnabled>("isBuiltinSpellCheckerEnabled");
+  dict.SetMethod<&IsPDFViewerEnabled>("isPDFViewerEnabled");
+  dict.SetMethod<&IsPrintingEnabled>("isPrintingEnabled");
+  dict.SetMethod<&IsPromptAPIEnabled>("isPromptAPIEnabled");
+  dict.SetMethod<&IsComponentBuild>("isComponentBuild");
+  dict.SetMethod<&IsRunAsNodeEnabled>("isRunAsNodeEnabled");
 }
 
 }  // namespace

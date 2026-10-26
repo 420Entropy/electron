@@ -22,32 +22,78 @@ There are a few ways that you can set up testing using WebDriver.
 Node.js package for testing with WebDriver. Its ecosystem also includes various plugins
 (e.g. reporter and services) that can help you put together your test setup.
 
+If you already have an existing WebdriverIO setup, it is recommended to update your dependencies and validate your existing configuration with how it is [outlined in the docs](https://webdriver.io/docs/desktop-testing/electron#configuration).
+
 #### Install the test runner
 
-First you need to run the WebdriverIO starter toolkit in your project root directory:
+If you don't use WebdriverIO in your project yet, you can add it by running the starter toolkit in your project root directory:
 
 ```sh npm2yarn
-npx wdio . --yes
+npm init wdio@latest ./
 ```
 
-This installs all necessary packages for you and generates a `wdio.conf.js` configuration file.
+This starts a configuration wizard that helps you put together the right setup, installs all necessary packages, and generates a `wdio.conf.js` configuration file. Make sure to select _"Desktop Testing - of Electron Applications"_ on one of the first questions asking _"What type of testing would you like to do?"_.
 
 #### Connect WDIO to your Electron app
 
-Update the capabilities in your configuration file to point to your Electron app binary:
+After running the configuration wizard, your `wdio.conf.js` should include roughly the following content:
 
-```javascript title='wdio.conf.js'
-export.config = {
+```js title='wdio.conf.js' @ts-nocheck
+export const config = {
   // ...
-  capabilities: [{
-    browserName: 'chrome',
-    'goog:chromeOptions': {
-      binary: '/path/to/your/electron/binary', // Path to your Electron binary.
-      args: [/* cli arguments */] // Optional, perhaps 'app=' + /path/to/your/app/
+  services: ['electron'],
+  capabilities: [
+    {
+      browserName: 'electron',
+      'wdio:electronServiceOptions': {
+        // WebdriverIO can automatically find your bundled application
+        // if you use Electron Forge or electron-builder, otherwise you
+        // can define it here, e.g.:
+        // appBinaryPath: './path/to/bundled/application.exe',
+        appArgs: ['foo', 'bar=baz']
+      }
     }
-  }]
+  ]
   // ...
 }
+```
+
+#### Write your tests
+
+Use the [WebdriverIO API](https://webdriver.io/docs/api) to interact with elements on the screen. The framework provides custom "matchers" that make asserting the state of your application easy, e.g.:
+
+```js @ts-nocheck
+import { browser, $, expect } from '@wdio/globals'
+
+describe('keyboard input', () => {
+  it('should detect keyboard input', async () => {
+    await browser.keys(['y', 'o'])
+    await expect($('keypress-count')).toHaveText('YO')
+  })
+})
+```
+
+Furthermore, WebdriverIO allows you to access Electron APIs to get static information about your application:
+
+```js @ts-nocheck
+import { browser } from '@wdio/globals'
+
+describe('trigger message modal', async () => {
+  it('message modal can be triggered from a test', async () => {
+    await browser.electron.execute(
+      (electron, param1, param2, param3) => {
+        const appWindow = electron.BrowserWindow.getFocusedWindow()
+        electron.dialog.showMessageBox(appWindow, {
+          message: 'Hello World!',
+          detail: `${param1} + ${param2} + ${param3} = ${param1 + param2 + param3}`
+        })
+      },
+      1,
+      2,
+      3
+    )
+  })
+})
 ```
 
 #### Run your tests
@@ -57,6 +103,12 @@ To run your tests:
 ```sh
 $ npx wdio run wdio.conf.js
 ```
+
+WebdriverIO helps launch and shut down the application for you.
+
+#### More documentation
+
+Find more documentation on Mocking Electron APIs and other useful resources in the [official WebdriverIO documentation](https://webdriver.io/docs/desktop-testing/electron).
 
 ### With Selenium
 
@@ -90,8 +142,9 @@ Usage of `selenium-webdriver` with Electron is the same as with
 normal websites, except that you have to manually specify how to connect
 ChromeDriver and where to find the binary of your Electron app:
 
-```js title='test.js'
+```js title='test.js' @ts-expect-error=[1]
 const webdriver = require('selenium-webdriver')
+
 const driver = new webdriver.Builder()
   // The "9515" is the port opened by ChromeDriver.
   .usingServer('http://localhost:9515')
@@ -103,7 +156,7 @@ const driver = new webdriver.Builder()
   })
   .forBrowser('chrome') // note: use .forBrowser('electron') for selenium-webdriver <= 3.6.0
   .build()
-driver.get('http://www.google.com')
+driver.get('https://www.google.com')
 driver.findElement(webdriver.By.name('q')).sendKeys('webdriver')
 driver.findElement(webdriver.By.name('btnG')).click()
 driver.wait(() => {
@@ -123,30 +176,17 @@ support via Electron's support for the [Chrome DevTools Protocol][] (CDP).
 
 ### Install dependencies
 
-You can install Playwright through your preferred Node.js package manager. The Playwright team
-recommends using the `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD` environment variable to avoid
-unnecessary browser downloads when testing an Electron app.
-
-```sh npm2yarn
-PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install --save-dev playwright
-```
-
-Playwright also comes with its own test runner, Playwright Test, which is built for end-to-end
-testing. You can also install it as a dev dependency in your project:
+You can install Playwright through your preferred Node.js package manager. It comes with its
+own [test runner][playwright-intro], which is built for end-to-end testing:
 
 ```sh npm2yarn
 npm install --save-dev @playwright/test
 ```
 
 :::caution Dependencies
-This tutorial was written `playwright@1.16.3` and `@playwright/test@1.16.3`. Check out
+This tutorial was written with `@playwright/test@1.52.0`. Check out
 [Playwright's releases][playwright-releases] page to learn about
 changes that might affect the code below.
-:::
-
-:::info Using third-party test runners
-If you're interested in using an alternative test runner (e.g. Jest or Mocha), check out
-Playwright's [Third-Party Test Runner][playwright-test-runners] guide.
 :::
 
 ### Write your tests
@@ -155,26 +195,24 @@ Playwright launches your app in development mode through the `_electron.launch` 
 To point this API to your Electron app, you can pass the path to your main process
 entry point (here, it is `main.js`).
 
-```js {5}
-const { _electron: electron } = require('playwright')
-const { test } = require('@playwright/test')
+```js {4} @ts-nocheck
+import { test, _electron as electron } from '@playwright/test'
 
 test('launch app', async () => {
-  const electronApp = await electron.launch({ args: ['main.js'] })
+  const electronApp = await electron.launch({ args: ['.'] })
   // close app
   await electronApp.close()
 })
 ```
 
-After that, you will access to an instance of Playwright's `ElectronApp` class. This
+After that, you will have access to an instance of Playwright's `ElectronApp` class. This
 is a powerful class that has access to main process modules for example:
 
-```js {6-11}
-const { _electron: electron } = require('playwright')
-const { test } = require('@playwright/test')
+```js {5-10} @ts-nocheck
+import { test, _electron as electron } from '@playwright/test'
 
 test('get isPackaged', async () => {
-  const electronApp = await electron.launch({ args: ['main.js'] })
+  const electronApp = await electron.launch({ args: ['.'] })
   const isPackaged = await electronApp.evaluate(async ({ app }) => {
     // This runs in Electron's main process, parameter here is always
     // the result of the require('electron') in the main app script.
@@ -189,12 +227,11 @@ test('get isPackaged', async () => {
 It can also create individual [Page][playwright-page] objects from Electron BrowserWindow instances.
 For example, to grab the first BrowserWindow and save a screenshot:
 
-```js {6-7}
-const { _electron: electron } = require('playwright')
-const { test } = require('@playwright/test')
+```js {5-6} @ts-nocheck
+import { test, _electron as electron } from '@playwright/test'
 
 test('save screenshot', async () => {
-  const electronApp = await electron.launch({ args: ['main.js'] })
+  const electronApp = await electron.launch({ args: ['.'] })
   const window = await electronApp.firstWindow()
   await window.screenshot({ path: 'intro.png' })
   // close app
@@ -202,22 +239,21 @@ test('save screenshot', async () => {
 })
 ```
 
-Putting all this together using the PlayWright Test runner, let's create a `example.spec.js`
+Putting all this together using the Playwright test-runner, let's create an `example.spec.js`
 test file with a single test and assertion:
 
-```js title='example.spec.js'
-const { _electron: electron } = require('playwright')
-const { test, expect } = require('@playwright/test')
+```js title='example.spec.js' @ts-nocheck
+import { test, expect, _electron as electron } from '@playwright/test'
 
 test('example test', async () => {
   const electronApp = await electron.launch({ args: ['.'] })
   const isPackaged = await electronApp.evaluate(async ({ app }) => {
     // This runs in Electron's main process, parameter here is always
     // the result of the require('electron') in the main app script.
-    return app.isPackaged;
-  });
+    return app.isPackaged
+  })
 
-  expect(isPackaged).toBe(false);
+  expect(isPackaged).toBe(false)
 
   // Wait for the first BrowserWindow to open
   // and return its Page object
@@ -226,7 +262,7 @@ test('example test', async () => {
 
   // close app
   await electronApp.close()
-});
+})
 ```
 
 Then, run Playwright Test using `npx playwright test`. You should see the test pass in your
@@ -243,6 +279,7 @@ Running 1 test using 1 worker
 :::info
 Playwright Test will automatically run any files matching the `.*(test|spec)\.(js|ts|mjs)` regex.
 You can customize this match in the [Playwright Test configuration options][playwright-test-config].
+It also works with TypeScript out of the box.
 :::
 
 :::tip Further reading
@@ -259,12 +296,15 @@ expose custom methods to your test suite.
 To create a custom driver, we'll use Node.js' [`child_process`](https://nodejs.org/api/child_process.html) API.
 The test suite will spawn the Electron process, then establish a simple messaging protocol:
 
-```js title='testDriver.js'
-const childProcess = require('child_process')
+```js title='testDriver.js' @ts-nocheck
 const electronPath = require('electron')
 
+const childProcess = require('node:child_process')
+
 // spawn the process
-const env = { /* ... */ }
+const env = {
+  /* ... */
+}
 const stdio = ['inherit', 'inherit', 'inherit', 'ipc']
 const appProcess = childProcess.spawn(electronPath, ['./app'], { stdio, env })
 
@@ -296,9 +336,9 @@ For convenience, you may want to wrap `appProcess` in a driver object that provi
 high-level functions. Here is an example of how you can do this. Let's start by creating
 a `TestDriver` class:
 
-```js title='testDriver.js'
+```js title='testDriver.js' @ts-nocheck
 class TestDriver {
-  constructor ({ path, args, env }) {
+  constructor({ path, args, env }) {
     this.rpcCalls = []
 
     // start child process
@@ -326,26 +366,26 @@ class TestDriver {
 
   // simple RPC call
   // to use: driver.rpc('method', 1, 2, 3).then(...)
-  async rpc (cmd, ...args) {
+  async rpc(cmd, ...args) {
     // send rpc request
     const msgId = this.rpcCalls.length
     this.process.send({ msgId, cmd, args })
     return new Promise((resolve, reject) => this.rpcCalls.push({ resolve, reject }))
   }
 
-  stop () {
+  stop() {
     this.process.kill()
   }
 }
 
-module.exports = { TestDriver };
+module.exports = { TestDriver }
 ```
 
-In your app code, can then write a simple handler to receive RPC calls:
+In your app code, you can then write a simple handler to receive RPC calls:
 
 ```js title='main.js'
 const METHODS = {
-  isReady () {
+  isReady() {
     // do any setup needed
     return true
   }
@@ -378,9 +418,11 @@ framework of your choosing. The following example uses
 [`ava`](https://www.npmjs.com/package/ava), but other popular choices like Jest
 or Mocha would work as well:
 
-```js title='test.js'
-const test = require('ava')
+```js title='test.js' @ts-nocheck
 const electronPath = require('electron')
+
+const test = require('ava')
+
 const { TestDriver } = require('./testDriver')
 
 const app = new TestDriver({
@@ -390,20 +432,20 @@ const app = new TestDriver({
     NODE_ENV: 'test'
   }
 })
-test.before(async t => {
+test.before(async (t) => {
   await app.isReady
 })
-test.after.always('cleanup', async t => {
+test.after.always('cleanup', async (t) => {
   await app.stop()
 })
 ```
 
 [chrome-driver]: https://sites.google.com/chromium.org/driver/
 [Puppeteer]: https://github.com/puppeteer/puppeteer
+[playwright-intro]: https://playwright.dev/docs/intro
 [playwright-electron]: https://playwright.dev/docs/api/class-electron/
 [playwright-electronapplication]: https://playwright.dev/docs/api/class-electronapplication
 [playwright-page]: https://playwright.dev/docs/api/class-page
-[playwright-releases]: https://github.com/microsoft/playwright/releases
+[playwright-releases]: https://playwright.dev/docs/release-notes
 [playwright-test-config]: https://playwright.dev/docs/api/class-testconfig#test-config-test-match
-[playwright-test-runners]: https://playwright.dev/docs/test-runners/
 [Chrome DevTools Protocol]: https://chromedevtools.github.io/devtools-protocol/

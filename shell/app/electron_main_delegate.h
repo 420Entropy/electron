@@ -8,8 +8,9 @@
 #include <memory>
 #include <string>
 
+#include "base/containers/span.h"
+#include "components/memory_system/memory_system.h"
 #include "content/public/app/content_main_delegate.h"
-#include "content/public/common/content_client.h"
 
 namespace tracing {
 class TracingSamplerProfiler;
@@ -21,8 +22,7 @@ std::string LoadResourceBundle(const std::string& locale);
 
 class ElectronMainDelegate : public content::ContentMainDelegate {
  public:
-  static const char* const kNonWildcardDomainNonPortSchemes[];
-  static const size_t kNonWildcardDomainNonPortSchemesSize;
+  static base::span<const char* const> GetNonWildcardDomainNonPortSchemes();
   ElectronMainDelegate();
   ~ElectronMainDelegate() override;
 
@@ -30,42 +30,49 @@ class ElectronMainDelegate : public content::ContentMainDelegate {
   ElectronMainDelegate(const ElectronMainDelegate&) = delete;
   ElectronMainDelegate& operator=(const ElectronMainDelegate&) = delete;
 
-  base::StringPiece GetBrowserV8SnapshotFilename() override;
-
- protected:
-  // content::ContentMainDelegate:
-  absl::optional<int> BasicStartupComplete() override;
-  void PreSandboxStartup() override;
-  void SandboxInitialized(const std::string& process_type) override;
-  absl::optional<int> PreBrowserMain() override;
-  content::ContentClient* CreateContentClient() override;
-  content::ContentBrowserClient* CreateContentBrowserClient() override;
-  content::ContentGpuClient* CreateContentGpuClient() override;
-  content::ContentRendererClient* CreateContentRendererClient() override;
-  content::ContentUtilityClient* CreateContentUtilityClient() override;
-  absl::variant<int, content::MainFunctionParams> RunProcess(
-      const std::string& process_type,
-      content::MainFunctionParams main_function_params) override;
-  bool ShouldCreateFeatureList(InvokedIn invoked_in) override;
-  bool ShouldInitializeMojo(InvokedIn invoked_in) override;
-  bool ShouldLockSchemeRegistry() override;
-#if BUILDFLAG(IS_LINUX)
-  void ZygoteForked() override;
-#endif
-
- private:
 #if BUILDFLAG(IS_MAC)
   void OverrideChildProcessPath();
   void OverrideFrameworkBundlePath();
   void SetUpBundleOverrides();
 #endif
 
+ protected:
+  // content::ContentMainDelegate:
+  std::optional<int> BasicStartupComplete() override;
+  void PreSandboxStartup() override;
+  void SandboxInitialized(const std::string& process_type) override;
+  std::optional<int> PreBrowserMain() override;
+  std::optional<int> PostEarlyInitialization(InvokedIn invoked_in) override;
+  content::ContentClient* CreateContentClient() override;
+  content::ContentBrowserClient* CreateContentBrowserClient() override;
+  content::ContentGpuClient* CreateContentGpuClient() override;
+  content::ContentRendererClient* CreateContentRendererClient() override;
+  content::ContentUtilityClient* CreateContentUtilityClient() override;
+  std::variant<int, content::MainFunctionParams> RunProcess(
+      const std::string& process_type,
+      content::MainFunctionParams main_function_params) override;
+  bool ShouldCreateFeatureList(InvokedIn invoked_in) override;
+  bool ShouldInitializeMojo(InvokedIn invoked_in) override;
+  bool ShouldLoadV8Snapshot(const std::string& process_type) override;
+  bool ShouldLockSchemeRegistry() override;
+#if BUILDFLAG(IS_LINUX)
+  void ZygoteForked() override;
+#endif
+
+  void InitializeMemorySystem();
+
+ private:
   std::unique_ptr<content::ContentBrowserClient> browser_client_;
-  std::unique_ptr<content::ContentClient> content_client_;
   std::unique_ptr<content::ContentGpuClient> gpu_client_;
   std::unique_ptr<content::ContentRendererClient> renderer_client_;
   std::unique_ptr<content::ContentUtilityClient> utility_client_;
+  // Declared after the per-process clients so it is destroyed first: the
+  // base content::ContentClient holds raw_ptrs to them, and releasing those
+  // after the pointees are freed trips the dangling pointer detector.
+  std::unique_ptr<content::ContentClient> content_client_;
   std::unique_ptr<tracing::TracingSamplerProfiler> tracing_sampler_profiler_;
+
+  memory_system::MemorySystem memory_system_;
 };
 
 }  // namespace electron

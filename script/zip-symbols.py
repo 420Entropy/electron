@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 
-from __future__ import print_function
 import argparse
 import glob
 import os
 import sys
 
-from lib.config import PLATFORM, get_target_arch
-from lib.util import scoped_cwd, get_electron_version, make_zip, \
+from lib.config import PLATFORM
+from lib.util import scoped_cwd, get_electron_version, make_zip, make_tar_xz, \
                      get_electron_branding, get_out_dir, execute
 
 ELECTRON_VERSION = get_electron_version()
@@ -28,16 +27,15 @@ def main():
     make_zip(zip_file, licenses, dirs)
 
   if PLATFORM == 'darwin':
-    dsym_name = 'dsym.zip'
+    dsym_name = 'dsym.tar.xz'
     with scoped_cwd(args.build_dir):
       dsyms = glob.glob('*.dSYM')
       snapshot_dsyms = ['v8_context_snapshot_generator.dSYM']
       for dsym in snapshot_dsyms:
         if (dsym in dsyms):
           dsyms.remove(dsym)
-      dsym_zip_file = os.path.join(args.build_dir, dsym_name)
-      print('Making dsym zip: ' + dsym_zip_file)
-      make_zip(dsym_zip_file, licenses, dsyms)
+      dsym_tar_file = os.path.join(args.build_dir, dsym_name)
+      make_tar_xz(dsym_tar_file, licenses, dsyms)
       dsym_snapshot_name = 'dsym-snapshot.zip'
       dsym_snapshot_zip_file = os.path.join(args.build_dir, dsym_snapshot_name)
       print('Making dsym snapshot zip: ' + dsym_snapshot_zip_file)
@@ -48,6 +46,16 @@ def main():
     pdb_name = 'pdb.zip'
     with scoped_cwd(args.build_dir):
       pdbs = glob.glob('*.pdb')
+      # Host build tools whose V8/Node-sized PDBs push pdb.zip over
+      # GitHub's 2 GiB release asset limit. The codecache and node_mksnapshot
+      # executables never ship in any release zip.
+      excluded_pdbs = ['electron_xcache.exe.pdb',
+                       'electron_natives_codecache.exe.pdb',
+                       'electron_natives_codecache_snapshot.exe.pdb',
+                       'node_mksnapshot.exe.pdb']
+      for pdb in excluded_pdbs:
+        if (pdb in pdbs):
+          pdbs.remove(pdb)
       pdb_zip_file = os.path.join(args.build_dir, pdb_name)
       print('Making pdb zip: ' + pdb_zip_file)
       make_zip(pdb_zip_file, pdbs + licenses, [])

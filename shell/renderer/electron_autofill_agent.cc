@@ -46,7 +46,7 @@ void GetDataListSuggestions(const blink::WebInputElement& element,
     if (option.Value() != option.Label())
       labels->push_back(option.Label().Utf16());
     else
-      labels->push_back(std::u16string());
+      labels->emplace_back();
   }
 
   TrimStringVectorForIPC(values);
@@ -82,7 +82,7 @@ void AutofillAgent::Shutdown() {
   weak_ptr_factory_.InvalidateWeakPtrs();
 }
 
-void AutofillAgent::DidChangeScrollOffset() {
+void AutofillAgent::DidChangeScrollOffset(blink::mojom::ScrollType) {
   HidePopup();
 }
 
@@ -96,30 +96,32 @@ void AutofillAgent::TextFieldDidEndEditing(const blink::WebInputElement&) {
   HidePopup();
 }
 
-void AutofillAgent::TextFieldDidChange(
+void AutofillAgent::TextFieldValueChanged(
     const blink::WebFormControlElement& element) {
   if (!IsUserGesture() && !render_frame()->IsPasting())
     return;
 
   weak_ptr_factory_.InvalidateWeakPtrs();
   base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
-      FROM_HERE, base::BindOnce(&AutofillAgent::TextFieldDidChangeImpl,
+      FROM_HERE, base::BindOnce(&AutofillAgent::TextFieldValueChangedImpl,
                                 weak_ptr_factory_.GetWeakPtr(), element));
 }
 
-void AutofillAgent::TextFieldDidChangeImpl(
+void AutofillAgent::TextFieldValueChangedImpl(
     const blink::WebFormControlElement& element) {
   ShowSuggestions(element, {.requires_caret_at_end = true});
 }
 
-void AutofillAgent::TextFieldDidReceiveKeyDown(
-    const blink::WebInputElement& element,
-    const blink::WebKeyboardEvent& event) {
-  if (event.windows_key_code == ui::VKEY_DOWN ||
-      event.windows_key_code == ui::VKEY_UP) {
-    ShowSuggestions(element, {.autofill_on_empty_values = true,
-                              .requires_caret_at_end = true});
+bool AutofillAgent::DidReceiveKeyDown(const blink::WebElement& element,
+                                      const blink::WebKeyboardEvent& event) {
+  if (auto input_element = element.DynamicTo<blink::WebInputElement>();
+      input_element && input_element.IsTextField() &&
+      (event.windows_key_code == ui::VKEY_DOWN ||
+       event.windows_key_code == ui::VKEY_UP)) {
+    ShowSuggestions(input_element, {.autofill_on_empty_values = true,
+                                    .requires_caret_at_end = true});
   }
+  return false;
 }
 
 void AutofillAgent::OpenTextDataListChooser(
@@ -159,7 +161,7 @@ void AutofillAgent::ShowSuggestions(const blink::WebFormControlElement& element,
       (!options.autofill_on_empty_values && value.IsEmpty()) ||
       (options.requires_caret_at_end &&
        (element.SelectionStart() != element.SelectionEnd() ||
-        element.SelectionEnd() != static_cast<int>(value.length())))) {
+        element.SelectionEnd() != value.length()))) {
     // Any popup currently showing is obsolete.
     HidePopup();
     return;
@@ -169,6 +171,14 @@ void AutofillAgent::ShowSuggestions(const blink::WebFormControlElement& element,
   std::vector<std::u16string> data_list_labels;
   if (!input_element.IsNull()) {
     GetDataListSuggestions(input_element, &data_list_values, &data_list_labels);
+  }
+
+  // With no suggestions there is nothing to show; hide any existing popup
+  // instead of asking the browser process to rebuild the native popup
+  // window for an empty list.
+  if (data_list_values.empty()) {
+    HidePopup();
+    return;
   }
 
   ShowPopup(element, data_list_values, data_list_labels);
@@ -195,7 +205,8 @@ void AutofillAgent::HidePopup() {
 void AutofillAgent::ShowPopup(const blink::WebFormControlElement& element,
                               const std::vector<std::u16string>& values,
                               const std::vector<std::u16string>& labels) {
-  gfx::RectF bounds = render_frame()->ElementBoundsInWindow(element);
+  auto bounds = gfx::RectF{
+      render_frame()->ConvertViewportToWindow(element.BoundsInWidget())};
   GetAutofillDriver()->ShowAutofillPopup(bounds, values, labels);
 }
 
@@ -205,7 +216,7 @@ void AutofillAgent::AcceptDataListSuggestion(const std::u16string& suggestion) {
     blink::WebInputElement input_element =
         element.DynamicTo<blink::WebInputElement>();
     if (!input_element.IsNull())
-      input_element.SetAutofillValue(blink::WebString::FromUTF16(suggestion));
+      input_element.SetAutofillValue(blink::WebString::FromUtf16(suggestion));
   }
 }
 

@@ -1,148 +1,37 @@
-import { app, ipcMain, session, webFrameMain } from 'electron/main';
-import type { BrowserWindowConstructorOptions, LoadURLOptions } from 'electron/main';
-
-import * as url from 'url';
-import * as path from 'path';
-import { openGuestWindow, makeWebPreferences, parseContentTypeFormat } from '@electron/internal/browser/guest-window-manager';
-import { parseFeatures } from '@electron/internal/browser/parse-features-string';
-import { ipcMainInternal } from '@electron/internal/browser/ipc-main-internal';
-import * as ipcMainUtils from '@electron/internal/browser/ipc-main-internal-utils';
-import { MessagePortMain } from '@electron/internal/browser/message-port-main';
-import { IPC_MESSAGES } from '@electron/internal/common/ipc-messages';
+import {
+  openGuestWindow,
+  makeWebPreferences,
+  parseContentTypeFormat
+} from '@electron/internal/browser/guest-window-manager';
 import { IpcMainImpl } from '@electron/internal/browser/ipc-main-impl';
+import { parseFeatures } from '@electron/internal/browser/parse-features-string';
 import * as deprecate from '@electron/internal/common/deprecate';
 
-// session is not used here, the purpose is to make sure session is initialized
-// before the webContents module.
-// eslint-disable-next-line
-session
+import { app, webFrameMain, dialog } from 'electron/main';
+import type { BrowserWindowConstructorOptions, MessageBoxOptions, NavigationEntry } from 'electron/main';
 
-const webFrameMainBinding = process._linkedBinding('electron_browser_web_frame_main');
-
-let nextId = 0;
-const getNextId = function () {
-  return ++nextId;
-};
-
-type PostData = LoadURLOptions['postData']
-
-// Stock page sizes
-const PDFPageSizes: Record<string, ElectronInternal.MediaSize> = {
-  Letter: {
-    custom_display_name: 'Letter',
-    height_microns: 279400,
-    name: 'NA_LETTER',
-    width_microns: 215900
-  },
-  Legal: {
-    custom_display_name: 'Legal',
-    height_microns: 355600,
-    name: 'NA_LEGAL',
-    width_microns: 215900
-  },
-  Tabloid: {
-    height_microns: 431800,
-    name: 'NA_LEDGER',
-    width_microns: 279400,
-    custom_display_name: 'Tabloid'
-  },
-  A0: {
-    custom_display_name: 'A0',
-    height_microns: 1189000,
-    name: 'ISO_A0',
-    width_microns: 841000
-  },
-  A1: {
-    custom_display_name: 'A1',
-    height_microns: 841000,
-    name: 'ISO_A1',
-    width_microns: 594000
-  },
-  A2: {
-    custom_display_name: 'A2',
-    height_microns: 594000,
-    name: 'ISO_A2',
-    width_microns: 420000
-  },
-  A3: {
-    custom_display_name: 'A3',
-    height_microns: 420000,
-    name: 'ISO_A3',
-    width_microns: 297000
-  },
-  A4: {
-    custom_display_name: 'A4',
-    height_microns: 297000,
-    name: 'ISO_A4',
-    is_default: 'true',
-    width_microns: 210000
-  },
-  A5: {
-    custom_display_name: 'A5',
-    height_microns: 210000,
-    name: 'ISO_A5',
-    width_microns: 148000
-  },
-  A6: {
-    custom_display_name: 'A6',
-    height_microns: 148000,
-    name: 'ISO_A6',
-    width_microns: 105000
-  }
-} as const;
-
-const paperFormats: Record<string, ElectronInternal.PageSize> = {
-  letter: { width: 8.5, height: 11 },
-  legal: { width: 8.5, height: 14 },
-  tabloid: { width: 11, height: 17 },
-  ledger: { width: 17, height: 11 },
-  a0: { width: 33.1, height: 46.8 },
-  a1: { width: 23.4, height: 33.1 },
-  a2: { width: 16.54, height: 23.4 },
-  a3: { width: 11.7, height: 16.54 },
-  a4: { width: 8.27, height: 11.7 },
-  a5: { width: 5.83, height: 8.27 },
-  a6: { width: 4.13, height: 5.83 }
-} as const;
-
-// The minimum micron size Chromium accepts is that where:
-// Per printing/units.h:
-//  * kMicronsPerInch - Length of an inch in 0.001mm unit.
-//  * kPointsPerInch - Length of an inch in CSS's 1pt unit.
-//
-// Formula: (kPointsPerInch / kMicronsPerInch) * size >= 1
-//
-// Practically, this means microns need to be > 352 microns.
-// We therefore need to verify this or it will silently fail.
-const isValidCustomPageSize = (width: number, height: number) => {
-  return [width, height].every(x => x > 352);
-};
+import * as path from 'path';
+import * as url from 'url';
+// session is not used here, the purpose of the import is to make sure session
+// is initialized before the webContents module.
+import '@electron/internal/browser/api/session';
 
 // JavaScript implementations of WebContents.
 const binding = process._linkedBinding('electron_browser_web_contents');
-const printing = process._linkedBinding('electron_browser_printing');
 const { WebContents } = binding as { WebContents: { prototype: Electron.WebContents } };
 
-WebContents.prototype.postMessage = function (...args) {
-  return this.mainFrame.postMessage(...args);
-};
-
-WebContents.prototype.send = function (channel, ...args) {
-  return this.mainFrame.send(channel, ...args);
-};
-
-WebContents.prototype._sendInternal = function (channel, ...args) {
-  return this.mainFrame._sendInternal(channel, ...args);
-};
-
-function getWebFrame (contents: Electron.WebContents, frame: number | [number, number]) {
+function getWebFrame(contents: Electron.WebContents, frame: number | [number, number]) {
+  let webFrame: Electron.WebFrameMain | undefined;
   if (typeof frame === 'number') {
-    return webFrameMain.fromId(contents.mainFrame.processId, frame);
-  } else if (Array.isArray(frame) && frame.length === 2 && frame.every(value => typeof value === 'number')) {
-    return webFrameMain.fromId(frame[0], frame[1]);
+    webFrame = webFrameMain.fromId(contents.mainFrame.processId, frame);
+  } else if (Array.isArray(frame) && frame.length === 2 && frame.every((value) => typeof value === 'number')) {
+    webFrame = webFrameMain.fromId(frame[0], frame[1]);
   } else {
     throw new Error('Missing required frame argument (must be number or [processId, frameId])');
   }
+  // Frame ids are global; only address frames that belong to |contents|.
+  if (webFrame && webFrame.top !== contents.mainFrame) return undefined;
+  return webFrame;
 }
 
 WebContents.prototype.sendToFrame = function (frameId, channel, ...args) {
@@ -151,20 +40,6 @@ WebContents.prototype.sendToFrame = function (frameId, channel, ...args) {
   frame.send(channel, ...args);
   return true;
 };
-
-// Following methods are mapped to webFrame.
-const webFrameMethods = [
-  'insertCSS',
-  'insertText',
-  'removeInsertedCSS',
-  'setVisualZoomLevelLimits'
-] as ('insertCSS' | 'insertText' | 'removeInsertedCSS' | 'setVisualZoomLevelLimits')[];
-
-for (const method of webFrameMethods) {
-  WebContents.prototype[method] = function (...args: any[]): Promise<any> {
-    return ipcMainUtils.invokeInWebContents(this, IPC_MESSAGES.RENDERER_WEB_FRAME_METHOD, method, ...args);
-  };
-}
 
 const waitTillCanExecuteJavaScript = async (webContents: Electron.WebContents) => {
   if (webContents.getURL() && !webContents.isLoadingMainFrame()) return;
@@ -180,322 +55,58 @@ const waitTillCanExecuteJavaScript = async (webContents: Electron.WebContents) =
 // WebContents has been loaded.
 WebContents.prototype.executeJavaScript = async function (code, hasUserGesture) {
   await waitTillCanExecuteJavaScript(this);
-  return ipcMainUtils.invokeInWebContents(this, IPC_MESSAGES.RENDERER_WEB_FRAME_METHOD, 'executeJavaScript', String(code), !!hasUserGesture);
+  return this._executeJavaScript(0, [{ code: String(code) }], !!hasUserGesture);
 };
 WebContents.prototype.executeJavaScriptInIsolatedWorld = async function (worldId, code, hasUserGesture) {
+  if (!Number.isInteger(worldId)) throw new TypeError('worldId must be an integer');
   await waitTillCanExecuteJavaScript(this);
-  return ipcMainUtils.invokeInWebContents(this, IPC_MESSAGES.RENDERER_WEB_FRAME_METHOD, 'executeJavaScriptInIsolatedWorld', worldId, code, !!hasUserGesture);
-};
-
-// Translate the options of printToPDF.
-
-let pendingPromise: Promise<any> | undefined;
-WebContents.prototype.printToPDF = async function (options) {
-  const printSettings: Record<string, any> = {
-    requestID: getNextId(),
-    landscape: false,
-    displayHeaderFooter: false,
-    headerTemplate: '',
-    footerTemplate: '',
-    printBackground: false,
-    scale: 1.0,
-    paperWidth: 8.5,
-    paperHeight: 11.0,
-    marginTop: 0.4,
-    marginBottom: 0.4,
-    marginLeft: 0.4,
-    marginRight: 0.4,
-    pageRanges: '',
-    preferCSSPageSize: false
-  };
-
-  if (options.landscape !== undefined) {
-    if (typeof options.landscape !== 'boolean') {
-      return Promise.reject(new Error('landscape must be a Boolean'));
-    }
-    printSettings.landscape = options.landscape;
-  }
-
-  if (options.displayHeaderFooter !== undefined) {
-    if (typeof options.displayHeaderFooter !== 'boolean') {
-      return Promise.reject(new Error('displayHeaderFooter must be a Boolean'));
-    }
-    printSettings.displayHeaderFooter = options.displayHeaderFooter;
-  }
-
-  if (options.printBackground !== undefined) {
-    if (typeof options.printBackground !== 'boolean') {
-      return Promise.reject(new Error('printBackground must be a Boolean'));
-    }
-    printSettings.shouldPrintBackgrounds = options.printBackground;
-  }
-
-  if (options.scale !== undefined) {
-    if (typeof options.scale !== 'number') {
-      return Promise.reject(new Error('scale must be a Number'));
-    }
-    printSettings.scale = options.scale;
-  }
-
-  const { pageSize } = options;
-  if (pageSize !== undefined) {
-    if (typeof pageSize === 'string') {
-      const format = paperFormats[pageSize.toLowerCase()];
-      if (!format) {
-        return Promise.reject(new Error(`Invalid pageSize ${pageSize}`));
-      }
-
-      printSettings.paperWidth = format.width;
-      printSettings.paperHeight = format.height;
-    } else if (typeof options.pageSize === 'object') {
-      if (!pageSize.height || !pageSize.width) {
-        return Promise.reject(new Error('height and width properties are required for pageSize'));
-      }
-
-      printSettings.paperWidth = pageSize.width;
-      printSettings.paperHeight = pageSize.height;
-    } else {
-      return Promise.reject(new Error('pageSize must be a String or Object'));
-    }
-  }
-
-  const { margins } = options;
-  if (margins !== undefined) {
-    if (typeof margins !== 'object') {
-      return Promise.reject(new Error('margins must be an Object'));
-    }
-
-    if (margins.top !== undefined) {
-      if (typeof margins.top !== 'number') {
-        return Promise.reject(new Error('margins.top must be a Number'));
-      }
-      printSettings.marginTop = margins.top;
-    }
-
-    if (margins.bottom !== undefined) {
-      if (typeof margins.bottom !== 'number') {
-        return Promise.reject(new Error('margins.bottom must be a Number'));
-      }
-      printSettings.marginBottom = margins.bottom;
-    }
-
-    if (margins.left !== undefined) {
-      if (typeof margins.left !== 'number') {
-        return Promise.reject(new Error('margins.left must be a Number'));
-      }
-      printSettings.marginLeft = margins.left;
-    }
-
-    if (margins.right !== undefined) {
-      if (typeof margins.right !== 'number') {
-        return Promise.reject(new Error('margins.right must be a Number'));
-      }
-      printSettings.marginRight = margins.right;
-    }
-  }
-
-  if (options.pageRanges !== undefined) {
-    if (typeof options.pageRanges !== 'string') {
-      return Promise.reject(new Error('pageRanges must be a String'));
-    }
-    printSettings.pageRanges = options.pageRanges;
-  }
-
-  if (options.headerTemplate !== undefined) {
-    if (typeof options.headerTemplate !== 'string') {
-      return Promise.reject(new Error('headerTemplate must be a String'));
-    }
-    printSettings.headerTemplate = options.headerTemplate;
-  }
-
-  if (options.footerTemplate !== undefined) {
-    if (typeof options.footerTemplate !== 'string') {
-      return Promise.reject(new Error('footerTemplate must be a String'));
-    }
-    printSettings.footerTemplate = options.footerTemplate;
-  }
-
-  if (options.preferCSSPageSize !== undefined) {
-    if (typeof options.preferCSSPageSize !== 'boolean') {
-      return Promise.reject(new Error('footerTemplate must be a String'));
-    }
-    printSettings.preferCSSPageSize = options.preferCSSPageSize;
-  }
-
-  if (this._printToPDF) {
-    if (pendingPromise) {
-      pendingPromise = pendingPromise.then(() => this._printToPDF(printSettings));
-    } else {
-      pendingPromise = this._printToPDF(printSettings);
-    }
-    return pendingPromise;
-  } else {
-    const error = new Error('Printing feature is disabled');
-    return Promise.reject(error);
-  }
-};
-
-WebContents.prototype.print = function (options: ElectronInternal.WebContentsPrintOptions = {}, callback) {
-  // TODO(codebytere): deduplicate argument sanitization by moving rest of
-  // print param logic into new file shared between printToPDF and print
-  if (typeof options === 'object') {
-    // Optionally set size for PDF.
-    if (options.pageSize !== undefined) {
-      const pageSize = options.pageSize;
-      if (typeof pageSize === 'object') {
-        if (!pageSize.height || !pageSize.width) {
-          throw new Error('height and width properties are required for pageSize');
-        }
-
-        // Dimensions in Microns - 1 meter = 10^6 microns
-        const height = Math.ceil(pageSize.height);
-        const width = Math.ceil(pageSize.width);
-        if (!isValidCustomPageSize(width, height)) {
-          throw new Error('height and width properties must be minimum 352 microns.');
-        }
-
-        options.mediaSize = {
-          name: 'CUSTOM',
-          custom_display_name: 'Custom',
-          height_microns: height,
-          width_microns: width
-        };
-      } else if (PDFPageSizes[pageSize]) {
-        options.mediaSize = PDFPageSizes[pageSize];
-      } else {
-        throw new Error(`Unsupported pageSize: ${pageSize}`);
-      }
-    }
-  }
-
-  if (this._print) {
-    if (callback) {
-      this._print(options, callback);
-    } else {
-      this._print(options);
-    }
-  } else {
-    console.error('Error: Printing feature is disabled.');
-  }
-};
-
-WebContents.prototype.getPrinters = function () {
-  // TODO(nornagon): this API has nothing to do with WebContents and should be
-  // moved.
-  if (printing.getPrinterList) {
-    return printing.getPrinterList();
-  } else {
-    console.error('Error: Printing feature is disabled.');
-    return [];
-  }
-};
-
-WebContents.prototype.getPrintersAsync = async function () {
-  // TODO(nornagon): this API has nothing to do with WebContents and should be
-  // moved.
-  if (printing.getPrinterListAsync) {
-    return printing.getPrinterListAsync();
-  } else {
-    console.error('Error: Printing feature is disabled.');
-    return [];
-  }
+  return this._executeJavaScript(worldId, code, !!hasUserGesture);
 };
 
 WebContents.prototype.loadFile = function (filePath, options = {}) {
   if (typeof filePath !== 'string') {
-    throw new Error('Must pass filePath as a string');
+    throw new TypeError('Must pass filePath as a string');
   }
   const { query, search, hash } = options;
 
-  return this.loadURL(url.format({
-    protocol: 'file',
-    slashes: true,
-    pathname: path.resolve(app.getAppPath(), filePath),
-    query,
-    search,
-    hash
-  }));
+  return this.loadURL(
+    url.format({
+      protocol: 'file',
+      slashes: true,
+      pathname: path.resolve(app.getAppPath(), filePath),
+      query,
+      search,
+      hash
+    })
+  );
 };
 
-WebContents.prototype.loadURL = function (url, options) {
-  const p = new Promise<void>((resolve, reject) => {
-    const resolveAndCleanup = () => {
-      removeListeners();
-      resolve();
-    };
-    const rejectAndCleanup = (errorCode: number, errorDescription: string, url: string) => {
-      const err = new Error(`${errorDescription} (${errorCode}) loading '${typeof url === 'string' ? url.substr(0, 2048) : url}'`);
-      Object.assign(err, { errno: errorCode, code: errorDescription, url });
-      removeListeners();
-      reject(err);
-    };
-    const finishListener = () => {
-      resolveAndCleanup();
-    };
-    const failListener = (event: Electron.Event, errorCode: number, errorDescription: string, validatedURL: string, isMainFrame: boolean) => {
-      if (isMainFrame) {
-        rejectAndCleanup(errorCode, errorDescription, validatedURL);
-      }
-    };
-
-    let navigationStarted = false;
-    const navigationListener = (event: Electron.Event, url: string, isSameDocument: boolean, isMainFrame: boolean) => {
-      if (isMainFrame) {
-        if (navigationStarted && !isSameDocument) {
-          // the webcontents has started another unrelated navigation in the
-          // main frame (probably from the app calling `loadURL` again); reject
-          // the promise
-          // We should only consider the request aborted if the "navigation" is
-          // actually navigating and not simply transitioning URL state in the
-          // current context.  E.g. pushState and `location.hash` changes are
-          // considered navigation events but are triggered with isSameDocument.
-          // We can ignore these to allow virtual routing on page load as long
-          // as the routing does not leave the document
-          return rejectAndCleanup(-3, 'ERR_ABORTED', url);
-        }
-        navigationStarted = true;
-      }
-    };
-    const stopLoadingListener = () => {
-      // By the time we get here, either 'finish' or 'fail' should have fired
-      // if the navigation occurred. However, in some situations (e.g. when
-      // attempting to load a page with a bad scheme), loading will stop
-      // without emitting finish or fail. In this case, we reject the promise
-      // with a generic failure.
-      // TODO(jeremy): enumerate all the cases in which this can happen. If
-      // the only one is with a bad scheme, perhaps ERR_INVALID_ARGUMENT
-      // would be more appropriate.
-      rejectAndCleanup(-2, 'ERR_FAILED', url);
-    };
-    const removeListeners = () => {
-      this.removeListener('did-finish-load', finishListener);
-      this.removeListener('did-fail-load', failListener);
-      this.removeListener('did-navigate-in-page', finishListener);
-      this.removeListener('did-start-navigation', navigationListener);
-      this.removeListener('did-stop-loading', stopLoadingListener);
-      this.removeListener('destroyed', stopLoadingListener);
-    };
-    this.on('did-finish-load', finishListener);
-    this.on('did-fail-load', failListener);
-    this.on('did-navigate-in-page', finishListener);
-    this.on('did-start-navigation', navigationListener);
-    this.on('did-stop-loading', stopLoadingListener);
-    this.on('destroyed', stopLoadingListener);
-  });
-  // Add a no-op rejection handler to silence the unhandled rejection error.
-  p.catch(() => {});
-  this._loadURL(url, options ?? {});
-  return p;
+WebContents.prototype.copyVideoFrameAt = function (x: number, y: number) {
+  this.mainFrame.copyVideoFrameAt(x, y);
 };
 
-WebContents.prototype.setWindowOpenHandler = function (handler: (details: Electron.HandlerDetails) => ({action: 'deny'} | {action: 'allow', overrideBrowserWindowOptions?: BrowserWindowConstructorOptions, outlivesOpener?: boolean})) {
+WebContents.prototype.saveVideoFrameAs = function (x: number, y: number) {
+  this.mainFrame.saveVideoFrameAs(x, y);
+};
+
+WebContents.prototype.setWindowOpenHandler = function (
+  handler: (details: Electron.HandlerDetails) => Electron.WindowOpenHandlerResponse
+) {
   this._windowOpenHandler = handler;
 };
 
-WebContents.prototype._callWindowOpenHandler = function (event: Electron.Event, details: Electron.HandlerDetails): {browserWindowConstructorOptions: BrowserWindowConstructorOptions | null, outlivesOpener: boolean} {
+WebContents.prototype._callWindowOpenHandler = function (
+  event: Electron.Event,
+  details: Electron.HandlerDetails
+): {
+  browserWindowConstructorOptions: BrowserWindowConstructorOptions | null;
+  outlivesOpener: boolean;
+  createWindow?: Electron.CreateWindowFunction;
+} {
   const defaultResponse = {
     browserWindowConstructorOptions: null,
-    outlivesOpener: false
+    outlivesOpener: false,
+    createWindow: undefined
   };
   if (!this._windowOpenHandler) {
     return defaultResponse;
@@ -519,208 +130,141 @@ WebContents.prototype._callWindowOpenHandler = function (event: Electron.Event, 
     event.preventDefault();
     return defaultResponse;
   } else if (response.action === 'allow') {
-    if (typeof response.overrideBrowserWindowOptions === 'object' && response.overrideBrowserWindowOptions !== null) {
-      return {
-        browserWindowConstructorOptions: response.overrideBrowserWindowOptions,
-        outlivesOpener: typeof response.outlivesOpener === 'boolean' ? response.outlivesOpener : false
-      };
-    } else {
-      return {
-        browserWindowConstructorOptions: {},
-        outlivesOpener: typeof response.outlivesOpener === 'boolean' ? response.outlivesOpener : false
-      };
-    }
+    return {
+      browserWindowConstructorOptions:
+        typeof response.overrideBrowserWindowOptions === 'object' ? response.overrideBrowserWindowOptions : null,
+      outlivesOpener: typeof response.outlivesOpener === 'boolean' ? response.outlivesOpener : false,
+      createWindow: typeof response.createWindow === 'function' ? response.createWindow : undefined
+    };
   } else {
     event.preventDefault();
-    console.error('The window open handler response must be an object with an \'action\' property of \'allow\' or \'deny\'.');
+    console.error("The window open handler response must be an object with an 'action' property of 'allow' or 'deny'.");
     return defaultResponse;
   }
 };
 
-const addReplyToEvent = (event: Electron.IpcMainEvent) => {
-  const { processId, frameId } = event;
-  event.reply = (channel: string, ...args: any[]) => {
-    event.sender.sendToFrame([processId, frameId], channel, ...args);
-  };
+// Deprecation warnings for navigation related APIs.
+const canGoBackDeprecated = deprecate.warnOnce('webContents.canGoBack', 'webContents.navigationHistory.canGoBack');
+WebContents.prototype.canGoBack = function () {
+  canGoBackDeprecated();
+  return this._canGoBack();
 };
 
-const addSenderToEvent = (event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent, sender: Electron.WebContents) => {
-  event.sender = sender;
-  const { processId, frameId } = event;
-  Object.defineProperty(event, 'senderFrame', {
-    get: () => webFrameMain.fromId(processId, frameId)
-  });
+const canGoForwardDeprecated = deprecate.warnOnce(
+  'webContents.canGoForward',
+  'webContents.navigationHistory.canGoForward'
+);
+WebContents.prototype.canGoForward = function () {
+  canGoForwardDeprecated();
+  return this._canGoForward();
 };
 
-const addReturnValueToEvent = (event: Electron.IpcMainEvent) => {
-  Object.defineProperty(event, 'returnValue', {
-    set: (value) => event._replyChannel.sendReply(value),
-    get: () => {}
-  });
+const canGoToOffsetDeprecated = deprecate.warnOnce(
+  'webContents.canGoToOffset',
+  'webContents.navigationHistory.canGoToOffset'
+);
+WebContents.prototype.canGoToOffset = function (index: number) {
+  canGoToOffsetDeprecated();
+  return this._canGoToOffset(index);
 };
 
-const getWebFrameForEvent = (event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent) => {
-  if (!event.processId || !event.frameId) return null;
-  return webFrameMainBinding.fromIdOrNull(event.processId, event.frameId);
+const clearHistoryDeprecated = deprecate.warnOnce('webContents.clearHistory', 'webContents.navigationHistory.clear');
+WebContents.prototype.clearHistory = function () {
+  clearHistoryDeprecated();
+  return this._clearHistory();
 };
 
-const commandLine = process._linkedBinding('electron_common_command_line');
-const environment = process._linkedBinding('electron_common_environment');
-
-const loggingEnabled = () => {
-  return environment.hasVar('ELECTRON_ENABLE_LOGGING') || commandLine.hasSwitch('enable-logging');
+const goBackDeprecated = deprecate.warnOnce('webContents.goBack', 'webContents.navigationHistory.goBack');
+WebContents.prototype.goBack = function () {
+  goBackDeprecated();
+  return this._goBack();
 };
+
+const goForwardDeprecated = deprecate.warnOnce('webContents.goForward', 'webContents.navigationHistory.goForward');
+WebContents.prototype.goForward = function () {
+  goForwardDeprecated();
+  return this._goForward();
+};
+
+const goToIndexDeprecated = deprecate.warnOnce('webContents.goToIndex', 'webContents.navigationHistory.goToIndex');
+WebContents.prototype.goToIndex = function (index: number) {
+  goToIndexDeprecated();
+  return this._goToIndex(index);
+};
+
+const goToOffsetDeprecated = deprecate.warnOnce('webContents.goToOffset', 'webContents.navigationHistory.goToOffset');
+WebContents.prototype.goToOffset = function (index: number) {
+  goToOffsetDeprecated();
+  return this._goToOffset(index);
+};
+
+const consoleMessageDeprecated = deprecate.warnOnceMessage(
+  "'console-message' arguments are deprecated and will be removed. Please use Event<WebContentsConsoleMessageEventParams> object instead."
+);
 
 // Add JavaScript wrappers for WebContents class.
 WebContents.prototype._init = function () {
-  const prefs = this.getLastWebPreferences() || {};
-  if (!prefs.nodeIntegration && prefs.preload != null && prefs.sandbox == null) {
-    deprecate.log('The default sandbox option for windows without nodeIntegration is changing. Presently, by default, when a window has a preload script, it defaults to being unsandboxed. In Electron 20, this default will be changing, and all windows that have nodeIntegration: false (which is the default) will be sandboxed by default. If your preload script doesn\'t use Node, no action is needed. If your preload script does use Node, either refactor it to move Node usage to the main process, or specify sandbox: false in your WebPreferences.');
-  }
-  // Read off the ID at construction time, so that it's accessible even after
-  // the underlying C++ WebContents is destroyed.
-  const id = this.id;
-  Object.defineProperty(this, 'id', {
-    value: id,
-    writable: false
-  });
-
   this._windowOpenHandler = null;
 
   const ipc = new IpcMainImpl();
   Object.defineProperty(this, 'ipc', {
-    get () { return ipc; },
+    get() {
+      return ipc;
+    },
     enumerable: true
   });
 
-  // Dispatch IPC messages to the ipc module.
-  this.on('-ipc-message' as any, function (this: Electron.WebContents, event: Electron.IpcMainEvent, internal: boolean, channel: string, args: any[]) {
-    addSenderToEvent(event, this);
-    if (internal) {
-      ipcMainInternal.emit(channel, event, ...args);
-    } else {
-      addReplyToEvent(event);
-      this.emit('ipc-message', event, channel, ...args);
-      const maybeWebFrame = getWebFrameForEvent(event);
-      maybeWebFrame && maybeWebFrame.ipc.emit(channel, event, ...args);
-      ipc.emit(channel, event, ...args);
-      ipcMain.emit(channel, event, ...args);
-    }
-  });
+  // Add navigationHistory property which handles session history,
+  // maintaining a list of navigation entries for backward and forward navigation.
+  Object.defineProperty(this, 'navigationHistory', {
+    value: {
+      canGoBack: this._canGoBack.bind(this),
+      canGoForward: this._canGoForward.bind(this),
+      canGoToOffset: this._canGoToOffset.bind(this),
+      clear: this._clearHistory.bind(this),
+      goBack: this._goBack.bind(this),
+      goForward: this._goForward.bind(this),
+      goToIndex: this._goToIndex.bind(this),
+      goToOffset: this._goToOffset.bind(this),
+      getActiveIndex: this._getActiveIndex.bind(this),
+      length: this._historyLength.bind(this),
+      getEntryAtIndex: this._getNavigationEntryAtIndex.bind(this),
+      removeEntryAtIndex: this._removeNavigationEntryAtIndex.bind(this),
+      getAllEntries: this._getHistory.bind(this),
+      restore: ({ index, entries }: { index?: number; entries: NavigationEntry[] }) => {
+        if (index === undefined) {
+          index = entries.length - 1;
+        }
 
-  this.on('-ipc-invoke' as any, async function (this: Electron.WebContents, event: Electron.IpcMainInvokeEvent, internal: boolean, channel: string, args: any[]) {
-    addSenderToEvent(event, this);
-    const replyWithResult = (result: any) => event._replyChannel.sendReply({ result });
-    const replyWithError = (error: Error) => {
-      console.error(`Error occurred in handler for '${channel}':`, error);
-      event._replyChannel.sendReply({ error: error.toString() });
-    };
-    const maybeWebFrame = getWebFrameForEvent(event);
-    const targets: (ElectronInternal.IpcMainInternal| undefined)[] = internal ? [ipcMainInternal] : [maybeWebFrame?.ipc, ipc, ipcMain];
-    const target = targets.find(target => target && (target as any)._invokeHandlers.has(channel));
-    if (target) {
-      const handler = (target as any)._invokeHandlers.get(channel);
-      try {
-        replyWithResult(await Promise.resolve(handler(event, ...args)));
-      } catch (err) {
-        replyWithError(err as Error);
+        if (index < 0 || !entries[index]) {
+          throw new Error(
+            'Invalid index. Index must be a positive integer and within the bounds of the entries length.'
+          );
+        }
+
+        try {
+          return this._restoreHistory(index, entries);
+        } catch (error) {
+          return Promise.reject(error);
+        }
       }
-    } else {
-      replyWithError(new Error(`No handler registered for '${channel}'`));
-    }
-  });
-
-  this.on('-ipc-message-sync' as any, function (this: Electron.WebContents, event: Electron.IpcMainEvent, internal: boolean, channel: string, args: any[]) {
-    addSenderToEvent(event, this);
-    addReturnValueToEvent(event);
-    if (internal) {
-      ipcMainInternal.emit(channel, event, ...args);
-    } else {
-      addReplyToEvent(event);
-      const maybeWebFrame = getWebFrameForEvent(event);
-      if (this.listenerCount('ipc-message-sync') === 0 && ipc.listenerCount(channel) === 0 && ipcMain.listenerCount(channel) === 0 && (!maybeWebFrame || maybeWebFrame.ipc.listenerCount(channel) === 0)) {
-        console.warn(`WebContents #${this.id} called ipcRenderer.sendSync() with '${channel}' channel without listeners.`);
-      }
-      this.emit('ipc-message-sync', event, channel, ...args);
-      maybeWebFrame && maybeWebFrame.ipc.emit(channel, event, ...args);
-      ipc.emit(channel, event, ...args);
-      ipcMain.emit(channel, event, ...args);
-    }
-  });
-
-  this.on('-ipc-ports' as any, function (this: Electron.WebContents, event: Electron.IpcMainEvent, internal: boolean, channel: string, message: any, ports: any[]) {
-    addSenderToEvent(event, this);
-    event.ports = ports.map(p => new MessagePortMain(p));
-    const maybeWebFrame = getWebFrameForEvent(event);
-    maybeWebFrame && maybeWebFrame.ipc.emit(channel, event, message);
-    ipc.emit(channel, event, message);
-    ipcMain.emit(channel, event, message);
-  });
-
-  this.on('crashed', (event, ...args) => {
-    app.emit('renderer-process-crashed', event, this, ...args);
-  });
-
-  this.on('render-process-gone', (event, details) => {
-    app.emit('render-process-gone', event, this, details);
-
-    // Log out a hint to help users better debug renderer crashes.
-    if (loggingEnabled()) {
-      console.info(`Renderer process ${details.reason} - see https://www.electronjs.org/docs/tutorial/application-debugging for potential debugging information.`);
-    }
-  });
-
-  // The devtools requests the webContents to reload.
-  this.on('devtools-reload-page', function (this: Electron.WebContents) {
-    this.reload();
+    },
+    writable: false,
+    enumerable: true
   });
 
   if (this.getType() !== 'remote') {
-    // Make new windows requested by links behave like "window.open".
-    this.on('-new-window' as any, (event: Electron.Event, url: string, frameName: string, disposition: Electron.HandlerDetails['disposition'],
-      rawFeatures: string, referrer: Electron.Referrer, postData: PostData) => {
-      const postBody = postData ? {
-        data: postData,
-        ...parseContentTypeFormat(postData)
-      } : undefined;
-      const details: Electron.HandlerDetails = {
-        url,
-        frameName,
-        features: rawFeatures,
-        referrer,
-        postBody,
-        disposition
-      };
-
-      let result: ReturnType<typeof this._callWindowOpenHandler>;
-      try {
-        result = this._callWindowOpenHandler(event, details);
-      } catch (err) {
-        event.preventDefault();
-        throw err;
-      }
-
-      const options = result.browserWindowConstructorOptions;
-      if (!event.defaultPrevented) {
-        openGuestWindow({
-          embedder: this,
-          disposition,
-          referrer,
-          postData,
-          overrideBrowserWindowOptions: options || {},
-          windowOpenArgs: details,
-          outlivesOpener: result.outlivesOpener
-        });
-      }
-    });
-
     let windowOpenOverriddenOptions: BrowserWindowConstructorOptions | null = null;
     let windowOpenOutlivesOpenerOption: boolean = false;
-    this.on('-will-add-new-contents' as any, (event: Electron.Event, url: string, frameName: string, rawFeatures: string, disposition: Electron.HandlerDetails['disposition'], referrer: Electron.Referrer, postData: PostData) => {
-      const postBody = postData ? {
-        data: postData,
-        ...parseContentTypeFormat(postData)
-      } : undefined;
+    let createWindow: Electron.CreateWindowFunction | undefined;
+
+    this.on('-will-add-new-contents', (event, url, frameName, rawFeatures, disposition, referrer, postData) => {
+      const postBody = postData
+        ? {
+            data: postData,
+            ...parseContentTypeFormat(postData)
+          }
+        : undefined;
       const details: Electron.HandlerDetails = {
         url,
         frameName,
@@ -740,15 +284,18 @@ WebContents.prototype._init = function () {
 
       windowOpenOutlivesOpenerOption = result.outlivesOpener;
       windowOpenOverriddenOptions = result.browserWindowConstructorOptions;
+      createWindow = result.createWindow;
       if (!event.defaultPrevented) {
-        const secureOverrideWebPreferences = windowOpenOverriddenOptions ? {
-          // Allow setting of backgroundColor as a webPreference even though
-          // it's technically a BrowserWindowConstructorOptions option because
-          // we need to access it in the renderer at init time.
-          backgroundColor: windowOpenOverriddenOptions.backgroundColor,
-          transparent: windowOpenOverriddenOptions.transparent,
-          ...windowOpenOverriddenOptions.webPreferences
-        } : undefined;
+        const secureOverrideWebPreferences = windowOpenOverriddenOptions
+          ? {
+              // Allow setting of backgroundColor as a webPreference even though
+              // it's technically a BrowserWindowConstructorOptions option because
+              // we need to access it in the renderer at init time.
+              backgroundColor: windowOpenOverriddenOptions.backgroundColor,
+              transparent: windowOpenOverriddenOptions.transparent,
+              ...windowOpenOverriddenOptions.webPreferences
+            }
+          : undefined;
         const { webPreferences: parsedWebPreferences } = parseFeatures(rawFeatures);
         const webPreferences = makeWebPreferences({
           embedder: this,
@@ -763,113 +310,152 @@ WebContents.prototype._init = function () {
       }
     });
 
-    // Create a new browser window for "window.open"
-    this.on('-add-new-contents' as any, (event: Electron.Event, webContents: Electron.WebContents, disposition: string,
-      _userGesture: boolean, _left: number, _top: number, _width: number, _height: number, url: string, frameName: string,
-      referrer: Electron.Referrer, rawFeatures: string, postData: PostData) => {
-      const overriddenOptions = windowOpenOverriddenOptions || undefined;
-      const outlivesOpener = windowOpenOutlivesOpenerOption;
-      windowOpenOverriddenOptions = null;
-      // false is the default
-      windowOpenOutlivesOpenerOption = false;
-
-      if ((disposition !== 'foreground-tab' && disposition !== 'new-window' &&
-           disposition !== 'background-tab')) {
-        event.preventDefault();
-        return;
-      }
-
-      openGuestWindow({
-        embedder: this,
-        guest: webContents,
-        overrideBrowserWindowOptions: overriddenOptions,
+    // Create a new browser window for window.open() and for links opened into
+    // a new window; both arrive here with the new webContents already created.
+    this.on(
+      '-add-new-contents',
+      (
+        event,
+        webContents,
         disposition,
+        _userGesture,
+        _left,
+        _top,
+        _width,
+        _height,
+        url,
+        frameName,
         referrer,
-        postData,
-        windowOpenArgs: {
-          url,
-          frameName,
-          features: rawFeatures
-        },
-        outlivesOpener
-      });
-    });
+        rawFeatures,
+        postData
+      ) => {
+        const overriddenOptions = windowOpenOverriddenOptions || undefined;
+        const outlivesOpener = windowOpenOutlivesOpenerOption;
+        const windowOpenFunction = createWindow;
+
+        createWindow = undefined;
+        windowOpenOverriddenOptions = null;
+        // false is the default
+        windowOpenOutlivesOpenerOption = false;
+
+        if (
+          disposition !== 'foreground-tab' &&
+          disposition !== 'new-window' &&
+          disposition !== 'background-tab' &&
+          disposition !== 'save-to-disk'
+        ) {
+          event.preventDefault();
+          return;
+        }
+
+        openGuestWindow({
+          embedder: this,
+          guest: webContents,
+          overrideBrowserWindowOptions: overriddenOptions,
+          disposition,
+          referrer,
+          postData,
+          windowOpenArgs: {
+            url,
+            frameName,
+            features: rawFeatures
+          },
+          outlivesOpener,
+          createWindow: windowOpenFunction
+        });
+      }
+    );
   }
 
-  this.on('login', (event, ...args) => {
-    app.emit('login', event, this, ...args);
-  });
+  const originCounts = new Map<string, number>();
+  const openDialogs = new Set<AbortController>();
+  this.on('-run-dialog', async (info, callback) => {
+    const origin = info.frame.origin === 'file://' ? info.frame.url : info.frame.origin;
+    if ((originCounts.get(origin) ?? 0) < 0) return callback(false, '');
 
-  this.on('ready-to-show' as any, () => {
-    const owner = this.getOwnerBrowserWindow();
-    if (owner && !owner.isDestroyed()) {
-      process.nextTick(() => {
-        owner.emit('ready-to-show');
-      });
+    const prefs = this.getLastWebPreferences();
+    if (!prefs || prefs.disableDialogs) return callback(false, '');
+
+    // We don't support prompt() for some reason :)
+    if (info.dialogType === 'prompt') return callback(false, '');
+
+    originCounts.set(origin, (originCounts.get(origin) ?? 0) + 1);
+
+    // TODO: translate?
+    const checkbox =
+      originCounts.get(origin)! > 1 && prefs.safeDialogs
+        ? prefs.safeDialogsMessage || 'Prevent this app from creating additional dialogs'
+        : '';
+    const parent = this.getOwnerBrowserWindow();
+    const abortController = new AbortController();
+    const options: MessageBoxOptions = {
+      message: info.messageText,
+      checkboxLabel: checkbox,
+      signal: abortController.signal,
+      ...(info.dialogType === 'confirm'
+        ? {
+            buttons: ['OK', 'Cancel'],
+            defaultId: 0,
+            cancelId: 1
+          }
+        : {
+            buttons: ['OK'],
+            defaultId: -1, // No default button
+            cancelId: 0
+          })
+    };
+    openDialogs.add(abortController);
+    const promise =
+      parent && !prefs.offscreen ? dialog.showMessageBox(parent, options) : dialog.showMessageBox(options);
+    try {
+      const result = await promise;
+      if (abortController.signal.aborted || this.isDestroyed()) return;
+      if (result.checkboxChecked) originCounts.set(origin, -1);
+      return callback(result.response === 0, '');
+    } finally {
+      openDialogs.delete(abortController);
     }
   });
 
-  this.on('select-bluetooth-device', (event, devices, callback) => {
-    if (this.listenerCount('select-bluetooth-device') === 1) {
-      // Cancel it if there are no handlers
-      event.preventDefault();
-      callback('');
+  this.on('-cancel-dialogs', () => {
+    for (const controller of openDialogs) {
+      controller.abort();
+    }
+    openDialogs.clear();
+  });
+
+  (this as NodeJS.EventEmitter).on('newListener', (eventName: string | symbol, listener: (...args: any[]) => void) => {
+    if (eventName === 'console-message') {
+      // TODO(samuelmaddock): remove deprecated 'console-message' arguments
+      if (listener.length > 1) consoleMessageDeprecated();
+      if (!this.isDestroyed()) this._setConsoleMessageObserved(true);
     }
   });
-
-  app.emit('web-contents-created', { sender: this, preventDefault () {}, get defaultPrevented () { return false; } }, this);
-
-  // Properties
-
-  Object.defineProperty(this, 'audioMuted', {
-    get: () => this.isAudioMuted(),
-    set: (muted) => this.setAudioMuted(muted)
-  });
-
-  Object.defineProperty(this, 'userAgent', {
-    get: () => this.getUserAgent(),
-    set: (agent) => this.setUserAgent(agent)
-  });
-
-  Object.defineProperty(this, 'zoomLevel', {
-    get: () => this.getZoomLevel(),
-    set: (level) => this.setZoomLevel(level)
-  });
-
-  Object.defineProperty(this, 'zoomFactor', {
-    get: () => this.getZoomFactor(),
-    set: (factor) => this.setZoomFactor(factor)
-  });
-
-  Object.defineProperty(this, 'frameRate', {
-    get: () => this.getFrameRate(),
-    set: (rate) => this.setFrameRate(rate)
-  });
-
-  Object.defineProperty(this, 'backgroundThrottling', {
-    get: () => this.getBackgroundThrottling(),
-    set: (allowed) => this.setBackgroundThrottling(allowed)
+  (this as NodeJS.EventEmitter).on('removeListener', (eventName: string | symbol) => {
+    if (eventName === 'console-message' && !this.isDestroyed() && this.listenerCount('console-message') === 0) {
+      this._setConsoleMessageObserved(false);
+    }
   });
 };
 
 // Public APIs.
-export function create (options = {}): Electron.WebContents {
+export function create(options = {}): Electron.WebContents {
   return new (WebContents as any)(options);
 }
 
-export function fromId (id: string) {
+export function fromId(id: number) {
   return binding.fromId(id);
 }
 
-export function fromFrame (frame: Electron.WebFrameMain) {
+export function fromFrame(frame: Electron.WebFrameMain) {
   return binding.fromFrame(frame);
 }
 
-export function fromDevToolsTargetId (targetId: string) {
+export function fromDevToolsTargetId(targetId: string) {
   return binding.fromDevToolsTargetId(targetId);
 }
 
-export function getFocusedWebContents () {
+export function getFocusedWebContents() {
   let focused = null;
   for (const contents of binding.getAllWebContents()) {
     if (!contents.isFocused()) continue;
@@ -880,6 +466,6 @@ export function getFocusedWebContents () {
   }
   return focused;
 }
-export function getAllWebContents () {
+export function getAllWebContents() {
   return binding.getAllWebContents();
 }
